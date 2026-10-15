@@ -4,7 +4,8 @@ local function loadAddon(savedVariables, loggedIn)
     local messages, frames, timers = {}, {}, {}
     local world = {
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
-        addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {}, optionsOpened = 0,
+        addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
+        optionsOpened = 0, welcomeOpened = 0,
     }
     local function channelByName(name)
         if type(name) == "string" then return world.channels[name:lower()] end
@@ -109,6 +110,7 @@ local function loadAddon(savedVariables, loggedIn)
         chunk("LockInTools", addon)
     end
     addon.OpenOptions = function() world.optionsOpened = world.optionsOpened + 1 end
+    addon.OpenWelcome = function() world.welcomeOpened = world.welcomeOpened + 1 end
     addon.RefreshOptions = function() end
     local function fire(event, ...)
         local count = #frames
@@ -181,13 +183,18 @@ assert(addon.db.schemaVersion == 3 and addon.db.showWelcome == true)
 assert(addon.db.chat.autoJoin == true and not addon:HasGroup())
 fire("PLAYER_LOGIN")
 assert(addon.ready and #messages == 1, "announce once at login")
+assert(world.welcomeOpened == 1, "show initial welcome after login when no group is configured")
 fire("PLAYER_LOGIN")
-assert(#messages == 1)
+assert(#messages == 1 and world.welcomeOpened == 1, "do not repeat welcome on duplicate login events")
 world:advance(30)
 assert(#world.joinCalls == 0, "an unconfigured group must not join a channel")
 local command = environment.SlashCmdList.LOCKINTOOLS
 command("")
-assert(world.optionsOpened == 1, "bare /lit opens options")
+assert(world.welcomeOpened == 2, "bare /lit opens welcome")
+command("welcome")
+assert(world.welcomeOpened == 3, "/lit welcome reopens welcome")
+command("options")
+assert(world.optionsOpened == 1, "/lit options opens feature settings")
 local messageStart = #messages + 1
 command("help")
 assert(contains(messages, "/lit welcome", messageStart))
@@ -206,6 +213,7 @@ local reloaded, reloadedEnvironment, reloadedMessages, reloadEvent, reloadWorld 
 reloadEvent("ADDON_LOADED", "LockInTools")
 assert(reloaded.ready and reloadedEnvironment.LockInToolsDB == persisted)
 assert(not reloaded.db.showWelcome and #reloadedMessages == 0 and reloaded.db.futureField.keep)
+assert(reloadWorld.welcomeOpened == 0, "configured groups do not reopen welcome at login")
 assert(reloaded:GetGroupSecret() == SECRET, "retain group across reload")
 assert(reloaded:GetGroupFingerprint() == addon:GetGroupFingerprint())
 assert(reloaded:GetGroupChannelName() == addon:GetGroupChannelName())
@@ -221,6 +229,7 @@ for _, legacy in ipairs({
     migrationWorld:initialize()
     migrationWorld:advance(30)
     assert(migrated.db.schemaVersion == 3 and migrated.db.showWelcome == false)
+    assert(migrationWorld.welcomeOpened == 0, "disabled welcome stays disabled during migration")
     assert(not migrated:HasGroup() and #migrationWorld.joinCalls == 0,
         "migration does not reinterpret a legacy channel name as a group secret")
 end
@@ -234,6 +243,7 @@ assert(not olderAddon:LeaveGroup() and olderAddon.savedDataReadOnly)
 assert(olderEnvironment.LockInToolsDB == newer and newer.schemaVersion == 4)
 assert(not newer.showWelcome and newer.important == "keep" and newer.group.secret == SECRET)
 assert(newer.chat.autoJoin == false)
+assert(olderWorld.welcomeOpened == 0, "read-only saved data does not trigger initial setup")
 for _, damaged in ipairs({ false, "invalid", { schemaVersion = "bad", showWelcome = "bad", chat = "bad" } }) do
     local repaired, _, _, _, repairedWorld = loadAddon(damaged, true)
     repairedWorld:initialize()
@@ -409,13 +419,14 @@ assert(not contains(friendlyMessages, "otter-4827") and not contains(friendlyMes
 
 -- Exercise the real options callbacks against strict native-widget stubs.
 local function loadOptions(uiAddon, uiEnvironment)
+    local createEventFrame = uiEnvironment.CreateFrame
     local methods = {}
     local function makeWidget()
         return setmetatable({ scripts = {}, enabled = true, shown = true }, { __index = methods })
     end
     for _, name in ipairs({ "SetSize", "SetPoint", "SetFrameStrata", "SetClampedToScreen",
         "SetMovable", "EnableMouse", "RegisterForDrag", "StartMoving", "StopMovingOrSizing",
-        "SetWidth", "SetJustifyH", "SetAutoFocus", "Raise" }) do
+        "SetWidth", "SetHeight", "SetJustifyH", "SetAutoFocus", "Raise" }) do
         methods[name] = function() end
     end
     function methods:SetText(text) self.text = text end
@@ -425,8 +436,8 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:IsEnabled() return self.enabled end
     function methods:SetChecked(checked) self.checked = checked end
     function methods:GetChecked() return self.checked end
-    function methods:ClearFocus() self.focusCleared = true end
-    function methods:SetFocus() self.focused = true end
+    function methods:ClearFocus() self.focusCleared = true; self.focused = false end
+    function methods:SetFocus() self.focused = true; self.focusCleared = false end
     function methods:HighlightText() self.highlighted = true end
     function methods:SetPassword(password) self.password = password end
     function methods:SetScript(script, callback) self.scripts[script] = callback end
@@ -445,7 +456,15 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:Click()
         if self.enabled and self.scripts.OnClick then self.scripts.OnClick(self) end
     end
+    function methods:UserInput(text)
+        assert(self.enabled, "disabled fields do not accept user input")
+        self:SetText(text)
+        if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
+    end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
+        if frameType == "Frame" and not name and not template then
+            return createEventFrame(frameType)
+        end
         assert(frameType == "Frame" or frameType == "EditBox"
             or frameType == "CheckButton" or frameType == "Button", "use supported native widgets")
         local widget = makeWidget()
@@ -472,9 +491,9 @@ local uiAddon, uiEnvironment, uiMessages, _, uiWorld = loadAddon(settings("", fa
 uiWorld:initialize()
 loadOptions(uiAddon, uiEnvironment)
 assert(uiAddon.optionsPanel == nil, "build options only when requested")
-uiEnvironment.SlashCmdList.LOCKINTOOLS("")
+uiEnvironment.SlashCmdList.LOCKINTOOLS("options")
 local panel = uiAddon.optionsPanel
-assert(panel and panel:IsShown(), "/lit opens the actual options panel")
+assert(panel and panel:IsShown(), "/lit options opens the actual options panel")
 assert(panel.secret:GetText() == "" and panel.secret.password and panel.autoJoin:GetChecked() == false)
 assert(not panel.join:IsEnabled() and not panel.leave:IsEnabled(), "no group means no join/leave buttons")
 assert(uiEnvironment.UISpecialFrames[1] == "LockInToolsOptions", "Escape can close the native panel")
@@ -562,6 +581,193 @@ assert(not readOnly.optionsPanel.secret:IsEnabled()
     and not readOnly.optionsPanel.save:IsEnabled(), "read-only settings disable editing and saving")
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true))
 
+-- Welcome creates one persisted key and keeps copying separate from joining a friend.
+do
+    local initial, initialEnvironment, initialMessages, _, initialWorld = loadAddon(nil, false)
+    local generatedCalls = 0
+    initialEnvironment.math = setmetatable({ random = function(_, maximum)
+        generatedCalls = generatedCalls + 1
+        return maximum == 64 and 48 or 4827
+    end }, { __index = math })
+    loadOptions(initial, initialEnvironment)
+    initialWorld:initialize()
+    local welcome = initial.welcomePanel
+    local initialKey = "otter-4827"
+    local initialRoom = initial:GetGroupChannelName()
+    assert(welcome and welcome:IsShown() and initial.optionsPanel == nil,
+        "first login opens welcome without constructing feature settings")
+    assert(initial:GetGroupSecret() == initialKey and initial.db.group.secret == initialKey
+        and generatedCalls == 2, "welcome generates and saves one copyable group key")
+    assert(welcome.ownSecret:GetText() == initialKey and not welcome.ownSecret.password,
+        "welcome visibly displays the persisted key")
+    assert(#initialWorld.joinCalls == 1 and initialWorld.joinCalls[1] == initialRoom,
+        "initial group creation uses normal chat autojoin once")
+    initialWorld.fire("PLAYER_LOGIN")
+    assert(generatedCalls == 2 and #initialWorld.joinCalls == 1,
+        "duplicate login does not regenerate the key or request another join")
+    assert(contains(initialEnvironment.UISpecialFrames, "LockInToolsWelcome"),
+        "Escape can close the welcome screen")
+    welcome.selectKey:Click()
+    assert(welcome.ownSecret.focused and welcome.ownSecret.highlighted,
+        "select key focuses and highlights the visible key for copying")
+    welcome.ownSecret:UserInput("accidental-edit")
+    assert(welcome.ownSecret:GetText() == initialKey and initial:GetGroupSecret() == initialKey,
+        "typing into the copy field cannot change the saved key")
+
+    local restored, restoredEnvironment, _, restoredEvent, restoredWorld = loadAddon(initial.db, true)
+    restoredEnvironment.math = setmetatable({ random = function()
+        error("a persisted key must not be regenerated")
+    end }, { __index = math })
+    loadOptions(restored, restoredEnvironment)
+    restoredEvent("ADDON_LOADED", "LockInTools")
+    assert(restored.ready and restored.welcomePanel == nil and restored:GetGroupSecret() == initialKey,
+        "loading after login preserves the key without reopening completed setup")
+    restoredEnvironment.SlashCmdList.LOCKINTOOLS("welcome")
+    assert(restored.welcomePanel.ownSecret:GetText() == initialKey,
+        "welcome reopens with the same key after reload")
+    restored.welcomePanel.done:Click()
+    restoredWorld:advance(1)
+    assert(restoredWorld.joinCalls[1] == initialRoom, "the saved welcome key restores the same channel")
+
+    welcome.friendSecret:UserInput("   ")
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and welcome.feedback:GetText() ~= ""
+        and welcome.feedback.color[1] == 1, "blank friend input reports an error without changing groups")
+    welcome.friendSecret:UserInput("invalid--key")
+    welcome.joinGroup:Click()
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and #initialWorld.leaveCalls == 0,
+        "an invalid friend's key preserves the current group and its transport")
+    welcome.friendSecret:UserInput("  OTTER-4827  ")
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and welcome.joinGroup:GetText() == "Join friend"
+        and #initialWorld.leaveCalls == 0 and #initialWorld.joinCalls == 1,
+        "the same canonical key succeeds immediately without switching transport")
+
+    welcome.friendSecret:UserInput("first-friend")
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and welcome.joinGroup:GetText() == "Confirm switch",
+        "joining a friend requires confirmation before changing every feature's group")
+    welcome.friendSecret:UserInput("other-friend")
+    assert(welcome.joinGroup:GetText() == "Join friend", "editing the key resets switch confirmation")
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and welcome.joinGroup:GetText() == "Confirm switch")
+    initialWorld:completeJoin(initialRoom, 7)
+    assert(welcome.friendSecret:GetText() == "other-friend"
+        and welcome.joinGroup:GetText() == "Confirm switch" and welcome.ownSecret:GetText() == initialKey,
+        "asynchronous chat updates preserve the friend's draft and confirmation")
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == "other-friend" and initial.db.group.secret == "other-friend"
+        and welcome.ownSecret:GetText() == "other-friend", "confirmed friend key becomes the displayed saved key")
+    assert(initialWorld.leaveCalls[1] == initialRoom
+        and initialWorld.joinCalls[2] == initial:GetGroupChannelName(),
+        "welcome switches groups through the existing channel lifecycle")
+    assert(initial.optionsPanel == nil, "welcome refreshes without requiring an options panel")
+
+    assert(initial:SetGroupSecret(SECRET))
+    assert(welcome.ownSecret:GetText() == SECRET, "welcome follows group changes made outside its form")
+    local previousLeaves = #initialWorld.leaveCalls
+    welcome.friendSecret:UserInput("  " .. SECRET:lower() .. "  ")
+    welcome.joinGroup:Click()
+    assert(initial:GetGroupSecret() == SECRET and #initialWorld.leaveCalls == previousLeaves
+        and welcome.joinGroup:GetText() == "Join friend", "legacy keys retain canonical same-group behavior")
+    welcome.friendSecret:UserInput(OTHER_SECRET)
+    welcome.joinGroup:Click()
+    welcome.selectKey:Click()
+    welcome.friendSecret:SetFocus()
+    welcome.done:Click()
+    assert(not welcome:IsShown() and welcome.ownSecret:GetText() == ""
+        and welcome.friendSecret:GetText() == "" and welcome.ownSecret.focusCleared
+        and welcome.friendSecret.focusCleared, "closing welcome clears plaintext, drafts and focus")
+    initial:OpenWelcome()
+    assert(initial.welcomePanel == welcome and welcome.ownSecret:GetText() == SECRET
+        and welcome.friendSecret:GetText() == "" and welcome.joinGroup:GetText() == "Join friend"
+        and generatedCalls == 2, "reopening restores the saved key and resets pending confirmation")
+    welcome.options:Click()
+    assert(initial.optionsPanel and initial.optionsPanel:IsShown() and not welcome:IsShown(),
+        "the welcome options button opens feature settings")
+    assert(not contains(initialMessages, initialKey) and not contains(initialMessages, "other-friend")
+        and not contains(initialMessages, SECRET) and not contains(initialMessages, OTHER_SECRET),
+        "welcome never prints either person's key to chat")
+end
+
+-- Manual setup respects disabled autojoin; generation failures still allow friend import.
+do
+    local manualWelcome, manualEnvironment, _, _, manualWelcomeWorld = loadAddon(settings("", false), false)
+    loadOptions(manualWelcome, manualEnvironment)
+    manualWelcomeWorld:initialize()
+    assert(manualWelcome.welcomePanel == nil, "welcome off suppresses automatic setup")
+    manualEnvironment.SlashCmdList.LOCKINTOOLS("")
+    assert(manualWelcome:HasGroup() and #manualWelcomeWorld.joinCalls == 0,
+        "manually opening welcome saves a key while respecting disabled autojoin")
+    local manualPanel = manualWelcome.welcomePanel
+    manualPanel.friendSecret:UserInput("manual-friend")
+    manualPanel.joinGroup:Click()
+    manualPanel.joinGroup:Click()
+    assert(manualWelcome:GetGroupSecret() == "manual-friend" and #manualWelcomeWorld.joinCalls == 0
+        and not manualWelcome.db.chat.autoJoin, "friend import preserves feature preferences")
+
+    local failed, failedEnvironment, failedMessages, _, failedWorld = loadAddon(nil, false)
+    local attempts = 0
+    failedEnvironment.math = setmetatable({ random = function()
+        attempts = attempts + 1
+        error("private generator failure")
+    end }, { __index = math })
+    loadOptions(failed, failedEnvironment)
+    failedWorld:initialize()
+    local failedPanel = failed.welcomePanel
+    assert(failedPanel and failedPanel:IsShown() and not failed:HasGroup()
+        and failed.db.group.secret == "" and failedPanel.ownSecret:GetText() == "",
+        "generation failure leaves saved group data empty")
+    assert(failedPanel.friendSecret:IsEnabled() and failedPanel.joinGroup:IsEnabled()
+        and failedPanel.feedback:GetText() ~= "", "friend import remains available after generation failure")
+    failed:RefreshOptions()
+    assert(attempts == 1, "status refresh does not retry failed key generation")
+    failedPanel.friendSecret:UserInput("friend-4827")
+    failedPanel.joinGroup:Click()
+    assert(failed:GetGroupSecret() == "friend-4827" and failedPanel.ownSecret:GetText() == "friend-4827"
+        and #failedWorld.joinCalls == 1, "a friend's key can be saved immediately when no group exists")
+    assert(not contains(failedMessages, "private generator failure") and not contains(failedMessages, "friend-4827"))
+end
+
+-- Do not replace damaged or newer-schema saved keys while opening welcome.
+do
+    local invalidSettings = settings("damaged secret", false)
+    invalidSettings.showWelcome = true
+    local invalid, invalidEnvironment, _, _, invalidWorld = loadAddon(invalidSettings, false)
+    invalidEnvironment.math = setmetatable({ random = function()
+        error("damaged stored keys must not be replaced")
+    end }, { __index = math })
+    loadOptions(invalid, invalidEnvironment)
+    invalidWorld:initialize()
+    assert(invalid.invalidGroupSecret and invalid.db.group.secret == "damaged secret"
+        and invalid.welcomePanel.ownSecret:GetText() == "" and #invalidWorld.joinCalls == 0,
+        "welcome preserves an invalid saved key for explicit repair")
+    invalid.welcomePanel.done:Click()
+    invalid:OpenWelcome()
+    assert(invalid.db.group.secret == "damaged secret" and invalid.welcomePanel.friendSecret:IsEnabled(),
+        "reopening does not silently replace damaged settings")
+
+    local futureSettings = { schemaVersion = 4, showWelcome = true, important = "keep",
+        group = { secret = SECRET }, chat = { autoJoin = false } }
+    local future, futureEnvironment, _, _, futureWorld = loadAddon(futureSettings, false)
+    futureEnvironment.math = setmetatable({ random = function()
+        error("read-only preferences must not generate a key")
+    end }, { __index = math })
+    loadOptions(future, futureEnvironment)
+    futureWorld:initialize()
+    assert(future.savedDataReadOnly and future.welcomePanel == nil,
+        "newer schemas do not automatically start setup")
+    future:OpenWelcome()
+    assert(not future.welcomePanel.friendSecret:IsEnabled() and not future.welcomePanel.joinGroup:IsEnabled()
+        and future.welcomePanel.ownSecret:GetText() == "", "read-only welcome disables saved edits")
+    future.welcomePanel.joinGroup:Click()
+    assert(futureEnvironment.LockInToolsDB == futureSettings and futureSettings.schemaVersion == 4
+        and futureSettings.group.secret == SECRET and futureSettings.important == "keep"
+        and futureSettings.showWelcome and not futureSettings.chat.autoJoin and #futureWorld.joinCalls == 0,
+        "opening read-only welcome leaves the original saved data untouched")
+end
+
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: startup, migration, shared identity, protected chat, retries, group lifecycle and options")
+print("PASS: startup, migration, shared identity, protected chat, retries, group lifecycle, options and welcome")
 

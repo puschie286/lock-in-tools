@@ -84,10 +84,13 @@ function addon:OnLogin()
     end
 
     if self.db.showWelcome then
-        self:Print("Loaded. Type /lit for options.")
+        self:Print("Loaded. Type /lit to connect with friends.")
     end
 
     self:OnChatLogin()
+    if self.db.showWelcome and not self:HasGroup() and not self.savedDataReadOnly then
+        self:OpenWelcome()
+    end
 end
 
 function addon:SetShowWelcome(enabled)

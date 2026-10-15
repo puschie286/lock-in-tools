@@ -1,0 +1,44 @@
+# ==============================================================================
+# World of Warcraft Addon Development .gitignore
+# ==============================================================================
+
+# --- World of Warcraft & Lua Temporary Files ---
+*.luac                  # Compiled Lua bytecode (never commit these)
+*.bak                   # Automatic backup files created by some text editors
+*.old                   # Older versions of files manually renamed
+
+# --- Local SavedVariables & Testing Context ---
+# If you clone or symlink your repository directly inside the WoW \Interface\AddOns\ directory,
+# do not track game-generated user data.
+*.lua.bak
+*.txt.bak
+
+# --- IDEs and Text Editors ---
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# IntelliJ IDEA / Rider
+.idea/
+*.iml
+
+# Neovim / Vim
+*.swp
+*.swo
+.netrwhist
+
+# macOS / Windows OS artifacts
+.DS_Store
+Thumbs.db
+
+# --- Build Tools, CI/CD, & Packaging ---
+# BigWigs/CurseForge packager artifacts (if you use BigWigsMods/packager)
+.release/
+*.zip
+pkgmeta.yaml
+exclude.lst
+
+# --- Developer-Specific Extensions / Type Definitions ---
+# Tooling libraries (like EmmyLua or Lua Language Server type defs)
+.lua-libs/
+.luarc.json

@@ -6,7 +6,7 @@ A World of Warcraft Forever addon for playing with friends. Feature guides: [gro
 
 1. Copy or link this repository into the Forever client's `Interface/AddOns/LockInTools` folder, with `LockInTools.toc` directly inside it. No build step or third-party runtime dependencies are required.
 2. Restart WoW and enable **LockInTools** in the AddOns list.
-3. Use `/lit` to open options and `/lit status` to check the addon version and client build.
+3. The welcome screen opens on your first login and saves a key for you. Use `/lit` to share your key or enter a friend's, `/lit options` for settings, and `/lit status` to check the addon version and client build.
 
 The local checkout is `C:\Repositories\LockInTools`. The existing junction at `D:\BattleNetLibrary\World of Warcraft\_classic_beta_\Interface\AddOns\LockInTools` points to it.
 

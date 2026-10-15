@@ -4,7 +4,7 @@ Native WoW chat for friends using the same [group key](group.md), faction and re
 
 ## Use
 
-1. Open `/lit`, enable **Automatically join shared chat on login**, and click **Save chat settings**; alternatively, use `/lit join`.
+1. Use `/lit` to share a key or join a friend's group. Shared chat joins automatically by default. In `/lit options`, enable **Automatically join shared chat on login** and click **Save chat settings** if needed; alternatively, use `/lit join`.
 2. Wait for **Joined**, then use `/lit chat` to type in normal WoW chat.
 
 ## Joining and leaving

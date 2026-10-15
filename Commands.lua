@@ -1,12 +1,13 @@
 local _, addon = ...
 
 function addon:ShowHelp()
-    self:Print("/lit - Open group and feature options.")
+    self:Print("/lit or /lit welcome - Show your key and connect with friends.")
+    self:Print("/lit options - Open group and feature options.")
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
     self:Print("/lit status - Show addon and client information.")
-    self:Print("/lit welcome on|off - Show or hide the login message.")
+    self:Print("/lit welcome on|off - Enable or disable the login message and initial welcome screen.")
 end
 
 function addon:ShowStatus()
@@ -29,7 +30,9 @@ function addon:HandleCommand(message)
     command = command:lower()
     argument = argument:lower()
 
-    if (command == "" or command == "options") and argument == "" then
+    if (command == "" or command == "welcome") and argument == "" then
+        self:OpenWelcome()
+    elseif command == "options" and argument == "" then
         self:OpenOptions()
     elseif command == "help" and argument == "" then
         self:ShowHelp()

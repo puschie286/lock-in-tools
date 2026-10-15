@@ -284,6 +284,7 @@ local function CreateOptionsPanel()
 end
 
 function addon:RefreshOptions()
+    self:RefreshWelcome()
     local panel = self.optionsPanel
     if not panel or not self.initialized then
         return
@@ -322,4 +323,229 @@ function addon:OpenOptions()
 
     self.optionsPanel:Show()
     self.optionsPanel:Raise()
+end
+
+local function ResetWelcomeConfirmation(panel)
+    panel.pendingSecret = nil
+    panel.joinGroup:SetText("Join friend")
+end
+
+local function JoinFriend(panel)
+    local secret = panel.friendSecret:GetText():match("^%s*(.-)%s*$")
+    if secret == "" then
+        ResetWelcomeConfirmation(panel)
+        SetFeedback(panel, "Enter your friend's key first.", true)
+        return
+    end
+
+    if addon:HasGroup() and secret:lower() ~= addon:GetGroupSecret():lower()
+        and panel.pendingSecret ~= secret then
+        ResetWelcomeConfirmation(panel)
+        panel.pendingSecret = secret
+        panel.joinGroup:SetText("Confirm switch")
+        SetFeedback(panel, "Click Confirm switch to use your friend's key for all LockInTools features.", true)
+        return
+    end
+
+    local success, message = addon:SetGroupSecret(secret)
+    ResetWelcomeConfirmation(panel)
+    if not success then
+        SetFeedback(panel, message or "Unable to save your friend's key.", true)
+        return
+    end
+
+    panel.friendSecret:SetText("")
+    panel.friendSecret:ClearFocus()
+    SetFeedback(panel, "Key saved. You and your friends now use the same group.", false)
+    addon:RefreshOptions()
+end
+
+local function CreateWelcomePanel()
+    local panel = CreateFrame("Frame", "LockInToolsWelcome", UIParent, "BasicFrameTemplateWithInset")
+    panel:SetSize(560, 440)
+    panel:SetPoint("CENTER")
+    panel:SetFrameStrata("DIALOG")
+    panel:SetClampedToScreen(true)
+    panel:SetMovable(true)
+    panel:EnableMouse(true)
+    panel:RegisterForDrag("LeftButton")
+    panel:SetScript("OnDragStart", panel.StartMoving)
+    panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
+    panel:Hide()
+    panel.TitleText:SetText("LockInTools")
+
+    local heading = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    heading:SetPoint("TOPLEFT", 24, -44)
+    heading:SetText("Welcome to LockInTools")
+
+    local introduction = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    introduction:SetPoint("TOPLEFT", 24, -78)
+    introduction:SetWidth(512)
+    introduction:SetJustifyH("LEFT")
+    introduction:SetText("Playing together starts with the same key. Share yours, or enter a friend's key below.")
+
+    local ownLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    ownLabel:SetPoint("TOPLEFT", 24, -133)
+    ownLabel:SetText("Your secret key")
+
+    panel.ownSecret = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+    panel.ownSecret:SetPoint("TOPLEFT", 29, -157)
+    panel.ownSecret:SetSize(385, 28)
+    panel.ownSecret:SetAutoFocus(false)
+    panel.ownSecret:SetPassword(false)
+    -- Keep the saved key selectable for copying without accepting edits.
+    panel.ownSecret:SetScript("OnTextChanged", function(editBox)
+        local secret = panel:IsShown() and addon:GetGroupSecret() or ""
+        if editBox:GetText() ~= secret then
+            editBox:SetText(secret)
+        end
+    end)
+    panel.ownSecret:SetScript("OnEditFocusGained", function(editBox)
+        editBox:HighlightText()
+    end)
+    panel.ownSecret:SetScript("OnEscapePressed", function(editBox)
+        editBox:ClearFocus()
+    end)
+    panel.ownSecret:SetScript("OnEnterPressed", function(editBox)
+        editBox:ClearFocus()
+    end)
+
+    panel.selectKey = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    panel.selectKey:SetPoint("TOPLEFT", 426, -157)
+    panel.selectKey:SetSize(110, 28)
+    panel.selectKey:SetText("Select key")
+    panel.selectKey:SetScript("OnClick", function()
+        panel.ownSecret:SetFocus()
+        panel.ownSecret:HighlightText()
+        SetFeedback(panel, "Press Ctrl+C to copy your key, then share it with your friends.", false)
+    end)
+
+    local copyHint = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    copyHint:SetPoint("TOPLEFT", 24, -197)
+    copyHint:SetWidth(512)
+    copyHint:SetJustifyH("LEFT")
+    copyHint:SetText("This key is saved. Select it and press Ctrl+C to copy it.")
+
+    local friendLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    friendLabel:SetPoint("TOPLEFT", 24, -241)
+    friendLabel:SetText("Have a friend's key?")
+
+    panel.friendSecret = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+    panel.friendSecret:SetPoint("TOPLEFT", 29, -265)
+    panel.friendSecret:SetSize(385, 28)
+    panel.friendSecret:SetAutoFocus(false)
+    panel.friendSecret:SetScript("OnEscapePressed", function(editBox)
+        editBox:ClearFocus()
+    end)
+    panel.friendSecret:SetScript("OnEnterPressed", function()
+        JoinFriend(panel)
+    end)
+    panel.friendSecret:SetScript("OnTextChanged", function(_, userInput)
+        if userInput then
+            ResetWelcomeConfirmation(panel)
+            SetFeedback(panel)
+        end
+    end)
+
+    panel.joinGroup = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    panel.joinGroup:SetPoint("TOPLEFT", 426, -265)
+    panel.joinGroup:SetSize(110, 28)
+    panel.joinGroup:SetText("Join friend")
+    panel.joinGroup:SetScript("OnClick", function()
+        JoinFriend(panel)
+    end)
+
+    panel.feedback = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    panel.feedback:SetPoint("TOPLEFT", 24, -309)
+    panel.feedback:SetWidth(512)
+    panel.feedback:SetJustifyH("LEFT")
+
+    local realmHint = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    realmHint:SetPoint("TOPLEFT", 24, -357)
+    realmHint:SetText("Shared chat works with friends on the same realm and faction.")
+
+    panel.options = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    panel.options:SetPoint("TOPLEFT", 24, -391)
+    panel.options:SetSize(140, 26)
+    panel.options:SetText("More options")
+    panel.options:SetScript("OnClick", function()
+        panel:Hide()
+        addon:OpenOptions()
+    end)
+
+    panel.done = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    panel.done:SetPoint("TOPLEFT", 426, -391)
+    panel.done:SetSize(110, 26)
+    panel.done:SetText("Done")
+    panel.done:SetScript("OnClick", function()
+        panel:Hide()
+    end)
+
+    panel:SetScript("OnShow", function()
+        ResetWelcomeConfirmation(panel)
+        SetFeedback(panel)
+        addon:RefreshWelcome()
+    end)
+    panel:SetScript("OnHide", function()
+        panel.ownSecret:SetText("")
+        panel.ownSecret:ClearFocus()
+        panel.friendSecret:SetText("")
+        panel.friendSecret:ClearFocus()
+        ResetWelcomeConfirmation(panel)
+        SetFeedback(panel)
+        panel:StopMovingOrSizing()
+    end)
+
+    tinsert(UISpecialFrames, "LockInToolsWelcome")
+    return panel
+end
+
+function addon:RefreshWelcome()
+    local panel = self.welcomePanel
+    if not panel or not panel:IsShown() or not self.initialized then
+        return
+    end
+
+    local secret = self:GetGroupSecret()
+    if panel.ownSecret:GetText() ~= secret then
+        panel.ownSecret:SetText(secret)
+    end
+    panel.ownSecret:SetEnabled(secret ~= "")
+    panel.selectKey:SetEnabled(secret ~= "")
+    panel.friendSecret:SetEnabled(not self.savedDataReadOnly)
+    panel.joinGroup:SetEnabled(not self.savedDataReadOnly)
+    if self.savedDataReadOnly then
+        panel.friendSecret:SetText("")
+        panel.friendSecret:ClearFocus()
+        ResetWelcomeConfirmation(panel)
+        SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
+    elseif self.invalidGroupSecret then
+        SetFeedback(panel, "Your saved key is invalid. Enter a friend's key, or use More options to create a group.", true)
+    end
+end
+
+function addon:OpenWelcome()
+    if not self.initialized then
+        self:Print("Still loading. Please try again after login.")
+        return
+    end
+
+    local problem
+    if not self:HasGroup() and not self.invalidGroupSecret and not self.savedDataReadOnly then
+        local key
+        key, problem = self:GenerateGroupKey()
+        if key then
+            local success
+            success, problem = self:SetGroupSecret(key)
+            if success then problem = nil end
+        end
+    end
+
+    if not self.welcomePanel then
+        self.welcomePanel = CreateWelcomePanel()
+    end
+    self.welcomePanel:Show()
+    self.welcomePanel:Raise()
+    self:RefreshWelcome()
+    if problem then SetFeedback(self.welcomePanel, problem, true) end
 end
