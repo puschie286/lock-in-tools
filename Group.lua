@@ -39,6 +39,8 @@ local function DeriveGroup(code, secret)
         fingerprint = Crypto.Hex(derive("identity")):sub(1, 24),
         channelName = "LIT" .. Crypto.Hex(derive("chat/channel")):sub(1, 28),
         channelPassword = Crypto.Hex(derive("chat/password")):sub(1, 31),
+        dataChannelName = "LITDATA" .. Crypto.Hex(derive("data/channel")):sub(1, 24),
+        dataChannelPassword = Crypto.Hex(derive("data/password")):sub(1, 31),
         authenticationKey = derive("authentication"),
     }
 end
@@ -54,7 +56,9 @@ local function CanChange(self)
 end
 
 local function NotifyChanged(self, previousChannel)
+    if self.OnDataGroupChanged then self:OnDataGroupChanged() end
     if self.OnGroupChanged then self:OnGroupChanged(previousChannel) end
+    if self.OnPositionGroupChanged then self:OnPositionGroupChanged() end
     if self.RefreshOptions then self:RefreshOptions() end
 end
 
@@ -134,6 +138,8 @@ function addon:GetGroupSecret() return self.groupState and self.groupState.code 
 function addon:GetGroupFingerprint() return self.groupState and self.groupState.fingerprint end
 function addon:GetGroupChannelName() return self.groupState and self.groupState.channelName end
 function addon:GetGroupChannelPassword() return self.groupState and self.groupState.channelPassword end
+function addon:GetGroupDataChannelName() return self.groupState and self.groupState.dataChannelName end
+function addon:GetGroupDataChannelPassword() return self.groupState and self.groupState.dataChannelPassword end
 
 function addon:GetGroupStatusText()
     if self.groupState then return self.groupState.fingerprint end
@@ -145,8 +151,8 @@ local function ValidFeature(feature)
     return type(feature) == "string" and #feature <= 64 and feature:match("^[a-z][a-z0-9_.-]*$")
 end
 
--- For future transports: authenticate a feature's exact serialized bytes. The
--- transport must separately validate sender IDs, freshness and replay counters.
+-- Optional helpers authenticate a feature's exact serialized bytes. Features
+-- choose their own data handling; the shared data pipeline does not sign packets.
 -- All members share authority; these tags do not distinguish one member from another.
 function addon:GetGroupAuthenticationKey(feature)
     if not self.groupState or not ValidFeature(feature) then return nil end

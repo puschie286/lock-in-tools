@@ -1,4 +1,4 @@
--- Run from the repository root. This harness is never loaded by the addon.
+-- This harness is never loaded by the addon.
 -- Server membership changes are asynchronous, as they are in the client.
 local function loadAddon(savedVariables, loggedIn)
     local messages, frames, timers = {}, {}, {}
@@ -97,7 +97,7 @@ local function loadAddon(savedVariables, loggedIn)
         end,
     }, { __index = _G })
     local addon = {}
-    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Commands.lua" }) do
+    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)
@@ -200,6 +200,7 @@ command("help")
 assert(contains(messages, "/lit welcome", messageStart))
 command("status")
 assert(contains(messages, "16001", messageStart))
+assert(contains(messages, "Shared positions:", messageStart), "status includes position sharing")
 command("  WeLcOmE OFF  ")
 assert(addon.db.showWelcome == false)
 command("welcome maybe")
@@ -498,6 +499,8 @@ uiEnvironment.SlashCmdList.LOCKINTOOLS("options")
 local panel = uiAddon.optionsPanel
 assert(panel and panel:IsShown(), "/lit options opens the actual options panel")
 assert(panel.secret:GetText() == "" and panel.secret.password and panel.autoJoin:GetChecked() == false)
+assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true,
+    "position sharing starts off with last-known retention enabled")
 assert(not panel.join:IsEnabled() and not panel.leave:IsEnabled(), "no group means no join/leave buttons")
 assert(uiEnvironment.UISpecialFrames[1] == "LockInToolsOptions", "Escape can close the native panel")
 panel.createGroup:Click()
@@ -518,14 +521,29 @@ assert(panel.secret:GetText() == SECRET and not panel.secret.password
     and panel.secret.focused and panel.secret.highlighted, "reveal only after explicit click for copying")
 panel.toggleSecret:Click()
 assert(panel.secret.password, "hide masks the revealed secret")
+panel.positionSharing:SetChecked(true)
+panel.positionRetention:SetChecked(false)
 panel.autoJoin:SetChecked(true)
 panel.save:Click()
 assert(uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1)
+assert(not uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown,
+    "saving chat does not apply position preference drafts")
+panel.savePosition:Click()
+assert(uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown
+    and uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1,
+    "position settings save independently of chat and do not request a chat join")
 panel.secret:SetText(OTHER_SECRET)
 panel.autoJoin:SetChecked(false)
+panel.positionSharing:SetChecked(false)
+panel.positionRetention:SetChecked(true)
 uiWorld:completeJoin(room, 9)
 assert(panel.secret:GetText() == OTHER_SECRET and panel.autoJoin:GetChecked() == false,
     "asynchronous status updates preserve form edits")
+assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true
+    and uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown,
+    "asynchronous status updates preserve position preference drafts")
+assert(panel.positionStatus:GetText() == "Status: " .. uiAddon:GetPositionStatusText(),
+    "position status reflects the current sharing state")
 assert(panel.status:GetText():find("Joined", 1, true), "status reflects confirmed membership")
 panel.secret:SetText("invalid--key")
 panel.applyGroup:Click()
@@ -549,6 +567,8 @@ panel:Hide()
 assert(panel.secret.password and panel.secret:GetText() == "", "closing clears and masks secrets")
 uiAddon:OpenOptions()
 assert(uiAddon.optionsPanel == panel and panel.secret:GetText() == "" and panel.secret.password)
+assert(panel.positionSharing:GetChecked() == true and panel.positionRetention:GetChecked() == false,
+    "reopening options restores saved position preferences")
 panel.secret:SetText(SECRET)
 panel.autoJoin:SetChecked(false)
 panel.secret.scripts.OnEnterPressed(panel.secret)
@@ -581,7 +601,10 @@ assert(not readOnly.optionsPanel.secret:IsEnabled()
     and not readOnly.optionsPanel.applyGroup:IsEnabled()
     and not readOnly.optionsPanel.createGroup:IsEnabled()
     and not readOnly.optionsPanel.autoJoin:IsEnabled()
-    and not readOnly.optionsPanel.save:IsEnabled(), "read-only settings disable editing and saving")
+    and not readOnly.optionsPanel.save:IsEnabled()
+    and not readOnly.optionsPanel.positionSharing:IsEnabled()
+    and not readOnly.optionsPanel.positionRetention:IsEnabled()
+    and not readOnly.optionsPanel.savePosition:IsEnabled(), "read-only settings disable editing and saving")
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true))
 
 -- Welcome creates one persisted key and keeps copying separate from joining a friend.

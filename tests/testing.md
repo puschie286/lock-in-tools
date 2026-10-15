@@ -21,9 +21,13 @@ The script downloads a pinned archive from the [LuaBinaries release files](https
 Run after changing addon Lua, tests or verification tooling, and before handoff or committing. Both scripts locate the repository themselves and work from another directory when invoked by full path. Verification uses only the installed local runtime and performs no downloads.
 
 1. Require Lua 5.1, matching the addon's syntax target.
-2. Parse every root-level addon Lua file and every Lua file under `tests/` with `luac -p`, without producing bytecode files.
+2. Parse every root-level addon Lua file, every Lua file under `tests/`, and the standalone position probe source with `luac -p`, without producing bytecode files. Parse `PositionPins.xml` for XML syntax.
 3. Run `tests/group.lua` for crypto reference vectors, friendly/legacy keys, generation failures, validation, credential derivation, feature separation and group lifecycle.
 4. Run `tests/smoke.lua` for initialization, migrations, commands, asynchronous chat joins/retries, group switching, options and welcome callbacks against mocked WoW APIs. Welcome checks include saved-key stability, copying, friend import and confirmation, draft preservation, hide cleanup, disabled autojoin, generation failure and damaged/newer-schema data.
+5. Run `tests/position-probe.lua` for the separate diagnostic's startup, channel broadcasts and whisper fallback, independent receipt/order/traffic accounting, changing channel numbers, five-second cadence, roster targeting up to nine recipients, missing coordinates and shutdown. These mocks do not prove in-game discovery, delivery or 6–10-player performance; follow [position-sharing validation](../feature/position-sharing.md).
+6. Run `tests/position.lua` for opt-in settings, two-second sampling, unchanged-coordinate suppression, the 15-second heartbeat threshold with a normal 16-second cadence, latest-sample retries, unavailable positions, ordering, 60-second offline detection, retained-location persistence with restored peers offline, suppression resets and read-only data. Run `tests/position-map.lua` for native map-provider callbacks, lazy loading, active/offline pin labels and colors, parent-map projection and cleanup. Native rendering remains an in-game check.
+
+7. Run `tests/data.lua` for data-channel credential separation, shared feature routing, framing/packet budget, failure isolation, connection changes, group switches and position integration. No live backend is enabled by these tests.
 
 Any failed check stops verification with a nonzero exit code. Fix the cause and rerun. Add regression coverage to the existing suites when behavior changes can be meaningfully exercised by the mocks; register new suites in `tools/verify.ps1` when needed. Keep test files out of `LockInTools.toc`.
 

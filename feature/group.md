@@ -21,9 +21,26 @@ One account-wide key identifies your friends across all features. Open the welco
 
 `Group.lua` generates/validates keys; `Crypto.lua` uses distinct versioned HKDF-SHA256 labels for the fingerprint, channel/password and authentication root/feature-specific HMAC keys. Keys are not broadcast; fingerprints compare groups without authenticating peers.
 
-Signing helpers cover exact payload bytes without encryption. Future protocols must define serialization, sender identity, freshness and replay protection.
+Optional signing helpers cover exact payload bytes without encryption. Features define their own message handling; the shared data pipeline below uses plain messages for trusted friends.
 
 `Core.lua` loads schema 3 settings on `ADDON_LOADED`, then derives the group. At login, an unconfigured player with welcome enabled sees the welcome screen. Opening it creates a key only when no key is saved; invalid saved keys stay intact for correction. Reload/logout persists settings. Migration preserves welcome/autojoin and unrelated fields; old channel names remain stored but unused. Newer schemas remain intact with temporary defaults and saved edits blocked. `Options.lua`/`Commands.lua` expose controls.
+
+## Shared data pipeline
+
+Human chat keeps its existing channel. Shared feature data has a separate group-derived name beginning **LITDATA** and separate derived credentials. This is the addon's naming convention on a normal custom channel, not a special WoW channel mode. Existing friendly/legacy fingerprints and chat credentials stay unchanged.
+
+`Data.lua` provides one pipeline with the addon prefix `LockInToolsData`. Position sharing registers as `position`; future features register their own identifier and use the same backend. Messages use `1|feature|payload`, preserving the payload verbatim, with a 255-byte total packet cap. Sampling, ordering, persistence and retry decisions remain each feature's responsibility.
+
+Shared internal helpers:
+
+- `RegisterDataFeature(name, receive, connectionChanged)`: one receiver per feature and an optional connection-change callback.
+- `SendData(name, payload)` / `ReceiveData(sender, message)`: frame outgoing data and route incoming data using WoW's sender.
+- `SetDataTransport(send)`: provide a backend accepting `(prefix, framedMessage)` and returning true when accepted; nil disconnects it. `IsDataConnected()` reports availability.
+- `GetGroupDataChannelName()` / `GetGroupDataChannelPassword()`: obtain the common data-channel credentials. Never log passwords or group keys.
+
+The backend will own native prefix registration, membership, routing, peer discovery and traffic handling. It must match the prefix and current group route before calling `ReceiveData`. **It remains disconnected pending [live channel/whisper validation](position-sharing.md#validation-and-remaining-work).** The helper does not join channels or send native messages on its own. Accepted sends do not prove peer delivery.
+
+Switching/leaving the group disconnects the old backend while retaining feature registrations. Reconnecting notifies features to reset send suppression. Individual feature switches stay independent of human chat. The pipeline has no queue, fragmentation, signing or authentication handshake.
 
 ## In-game checks
 

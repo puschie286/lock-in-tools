@@ -22,6 +22,8 @@ function addon:ShowStatus()
             .. (self.db.showWelcome and "on." or "off."))
         self:Print("Group: " .. self:GetGroupStatusText())
         self:Print("Shared chat: " .. self:GetChatStatusText())
+        self:Print("Group data: " .. self:GetDataStatusText())
+        self:Print("Shared positions: " .. self:GetPositionStatusText())
     end
 end
 

@@ -16,7 +16,7 @@ The manifest targets interface **16001**; the inspected local Forever beta build
 
 ## Checks
 
-Install the local native Lua 5.1 runtime once, then run verification after changes:
+From the repository root, install the local native Lua 5.1 runtime once, then run verification after changes:
 
 ```powershell
 .\tools\setup-lua.ps1
@@ -25,4 +25,4 @@ Install the local native Lua 5.1 runtime once, then run verification after chang
 
 The runtime lives in ignored `tools/lua/`. Verification checks Lua syntax and runs the offline group, chat and welcome-screen tests without downloading anything. Both scripts resolve repository paths themselves, so they also work when invoked by full path from another directory.
 
-See [the verification process](docs/testing.md) for coverage, future changes and required in-game checks.
+See [the verification process](tests/testing.md) for coverage, future changes and required in-game checks.

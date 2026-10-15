@@ -8,5 +8,9 @@ Core.lua
 Crypto.lua
 Group.lua
 Chat.lua
+Data.lua
+Position.lua
+PositionMap.lua
+PositionPins.xml
 Options.lua
 Commands.lua

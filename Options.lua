@@ -66,9 +66,26 @@ local function SaveChatSettings(panel)
     addon:RefreshOptions()
 end
 
+local function SavePositionSettings(panel)
+    local success, message = addon:SetPositionRetention(panel.positionRetention:GetChecked() and true or false)
+    if not success then
+        SetFeedback(panel, message or "Unable to save position settings.", true)
+        return
+    end
+
+    success, message = addon:SetPositionSharing(panel.positionSharing:GetChecked() and true or false)
+    if not success then
+        SetFeedback(panel, message or "Unable to save position settings.", true)
+        return
+    end
+
+    SetFeedback(panel, "Position settings saved.", false)
+    addon:RefreshOptions()
+end
+
 local function CreateOptionsPanel()
     local panel = CreateFrame("Frame", "LockInToolsOptions", UIParent, "BasicFrameTemplateWithInset")
-    panel:SetSize(580, 590)
+    panel:SetSize(800, 590)
     panel:SetPoint("CENTER")
     panel:SetFrameStrata("DIALOG")
     panel:SetClampedToScreen(true)
@@ -86,12 +103,12 @@ local function CreateOptionsPanel()
 
     panel.groupStatus = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     panel.groupStatus:SetPoint("TOPLEFT", 20, -72)
-    panel.groupStatus:SetWidth(540)
+    panel.groupStatus:SetWidth(760)
     panel.groupStatus:SetJustifyH("LEFT")
 
     local introduction = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     introduction:SetPoint("TOPLEFT", 20, -102)
-    introduction:SetWidth(540)
+    introduction:SetWidth(760)
     introduction:SetJustifyH("LEFT")
     introduction:SetText("Use the same key as your friends. Your group applies to every LockInTools feature.")
 
@@ -201,7 +218,7 @@ local function CreateOptionsPanel()
 
     local privacyHint = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     privacyHint:SetPoint("TOPLEFT", 20, -249)
-    privacyHint:SetWidth(540)
+    privacyHint:SetWidth(760)
     privacyHint:SetJustifyH("LEFT")
     privacyHint:SetText("Share the same key with your friends.")
 
@@ -211,7 +228,7 @@ local function CreateOptionsPanel()
 
     local chatIntroduction = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     chatIntroduction:SetPoint("TOPLEFT", 20, -330)
-    chatIntroduction:SetWidth(540)
+    chatIntroduction:SetWidth(360)
     chatIntroduction:SetJustifyH("LEFT")
     chatIntroduction:SetText("Your group selects its shared channel automatically. Friends must be on the same realm and faction.")
 
@@ -224,11 +241,11 @@ local function CreateOptionsPanel()
 
     panel.status = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     panel.status:SetPoint("TOPLEFT", 20, -417)
-    panel.status:SetWidth(540)
+    panel.status:SetWidth(360)
     panel.status:SetJustifyH("LEFT")
 
     panel.save = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    panel.save:SetSize(150, 26)
+    panel.save:SetSize(130, 26)
     panel.save:SetPoint("TOPLEFT", 20, -453)
     panel.save:SetText("Save chat settings")
     panel.save:SetScript("OnClick", function()
@@ -236,7 +253,7 @@ local function CreateOptionsPanel()
     end)
 
     panel.join = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    panel.join:SetSize(118, 26)
+    panel.join:SetSize(90, 26)
     panel.join:SetPoint("LEFT", panel.save, "RIGHT", 10, 0)
     panel.join:SetText("Join chat")
     panel.join:SetScript("OnClick", function()
@@ -246,7 +263,7 @@ local function CreateOptionsPanel()
     end)
 
     panel.leave = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    panel.leave:SetSize(118, 26)
+    panel.leave:SetSize(90, 26)
     panel.leave:SetPoint("LEFT", panel.join, "RIGHT", 10, 0)
     panel.leave:SetText("Leave chat")
     panel.leave:SetScript("OnClick", function()
@@ -257,19 +274,58 @@ local function CreateOptionsPanel()
 
     local chatHint = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     chatHint:SetPoint("TOPLEFT", 20, -492)
-    chatHint:SetWidth(540)
+    chatHint:SetWidth(360)
     chatHint:SetJustifyH("LEFT")
     chatHint:SetText("Use /lit chat to write. Leaving chat keeps your LockInTools group.")
 
+    local positionHeading = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    positionHeading:SetPoint("TOPLEFT", 420, -300)
+    positionHeading:SetText("Shared positions")
+
+    local positionIntroduction = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    positionIntroduction:SetPoint("TOPLEFT", 420, -330)
+    positionIntroduction:SetWidth(360)
+    positionIntroduction:SetJustifyH("LEFT")
+    positionIntroduction:SetText("See your friends on the world map. Keep their last-known positions when they go offline.")
+
+    panel.positionSharing = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    panel.positionSharing:SetPoint("TOPLEFT", 416, -374)
+    panel.positionSharing:SetSize(28, 28)
+    local positionSharingLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    positionSharingLabel:SetPoint("LEFT", panel.positionSharing, "RIGHT", 2, 0)
+    positionSharingLabel:SetText("Enable position sharing")
+
+    panel.positionRetention = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    panel.positionRetention:SetPoint("TOPLEFT", 416, -408)
+    panel.positionRetention:SetSize(28, 28)
+    local positionRetentionLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    positionRetentionLabel:SetPoint("LEFT", panel.positionRetention, "RIGHT", 2, 0)
+    positionRetentionLabel:SetText("Keep last-known positions")
+
+    panel.positionStatus = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    panel.positionStatus:SetPoint("TOPLEFT", 420, -450)
+    panel.positionStatus:SetWidth(360)
+    panel.positionStatus:SetJustifyH("LEFT")
+
+    panel.savePosition = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    panel.savePosition:SetSize(170, 26)
+    panel.savePosition:SetPoint("TOPLEFT", 420, -492)
+    panel.savePosition:SetText("Save position settings")
+    panel.savePosition:SetScript("OnClick", function()
+        SavePositionSettings(panel)
+    end)
+
     panel.feedback = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     panel.feedback:SetPoint("TOPLEFT", 20, -526)
-    panel.feedback:SetWidth(540)
+    panel.feedback:SetWidth(760)
     panel.feedback:SetJustifyH("LEFT")
 
     panel:SetScript("OnShow", function()
         ResetConfirmation(panel)
         HideSecret(panel, true)
         panel.autoJoin:SetChecked(addon.db.chat.autoJoin)
+        panel.positionSharing:SetChecked(addon.db.position.sharing)
+        panel.positionRetention:SetChecked(addon.db.position.keepLastKnown)
         SetFeedback(panel)
         addon:RefreshOptions()
     end)
@@ -292,8 +348,9 @@ function addon:RefreshOptions()
 
     panel.groupStatus:SetText("Group: " .. self:GetGroupStatusText())
     panel.status:SetText("Status: " .. self:GetChatStatusText())
+    panel.positionStatus:SetText("Status: " .. self:GetPositionStatusText())
 
-    -- Status events must preserve any secret or chat preference being edited.
+    -- Status events must preserve the group key and feature preferences being edited.
     local editable = not self.savedDataReadOnly
     local hasGroup = self:HasGroup()
     panel.secret:SetEnabled(editable)
@@ -303,6 +360,9 @@ function addon:RefreshOptions()
     panel.leaveGroup:SetEnabled(editable and hasGroup)
     panel.autoJoin:SetEnabled(editable)
     panel.save:SetEnabled(editable)
+    panel.positionSharing:SetEnabled(editable)
+    panel.positionRetention:SetEnabled(editable)
+    panel.savePosition:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup)
     panel.leave:SetEnabled(self.ready and hasGroup)
     if not editable then

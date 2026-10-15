@@ -1,4 +1,3 @@
--- Run from the repository root: lua tests/group.lua
 -- Published known-answer vectors exercise algorithms independently of addon logic.
 local function loadModule(file, addon, environment)
     local chunk, problem
