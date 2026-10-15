@@ -395,7 +395,7 @@ local function CreateWelcomePanel()
     panel.ownSecret:SetPassword(false)
     -- Keep the saved key selectable for copying without accepting edits.
     panel.ownSecret:SetScript("OnTextChanged", function(editBox)
-        local secret = panel:IsShown() and addon:GetGroupSecret() or ""
+        local secret = panel.showingKeys and addon:GetGroupSecret() or ""
         if editBox:GetText() ~= secret then
             editBox:SetText(secret)
         end
@@ -482,11 +482,13 @@ local function CreateWelcomePanel()
     end)
 
     panel:SetScript("OnShow", function()
+        panel.showingKeys = true
         ResetWelcomeConfirmation(panel)
         SetFeedback(panel)
         addon:RefreshWelcome()
     end)
     panel:SetScript("OnHide", function()
+        panel.showingKeys = false
         panel.ownSecret:SetText("")
         panel.ownSecret:ClearFocus()
         panel.friendSecret:SetText("")
@@ -502,7 +504,7 @@ end
 
 function addon:RefreshWelcome()
     local panel = self.welcomePanel
-    if not panel or not panel:IsShown() or not self.initialized then
+    if not panel or not panel.showingKeys or not self.initialized then
         return
     end
 

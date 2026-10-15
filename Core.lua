@@ -105,7 +105,7 @@ function addon:SetShowWelcome(enabled)
     end
 
     self.db.showWelcome = enabled
-    self:Print("Login message " .. (enabled and "enabled." or "disabled."))
+    self:Print("Login welcome " .. (enabled and "enabled." or "disabled."))
 end
 
 addon.frame = CreateFrame("Frame")

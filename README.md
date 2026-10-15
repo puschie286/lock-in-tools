@@ -16,11 +16,13 @@ The manifest targets interface **16001**; the inspected local Forever beta build
 
 ## Checks
 
-The source uses Lua 5.1-compatible syntax. Run the offline checks from the repository root with a Lua interpreter:
+Install the local native Lua 5.1 runtime once, then run verification after changes:
 
-```text
-lua tests/group.lua
-lua tests/smoke.lua
+```powershell
+.\tools\setup-lua.ps1
+.\tools\verify.ps1
 ```
 
-Offline checks cover key generation, crypto vectors and mocked WoW APIs. Verify rendering, server behavior and saved settings with the feature guides' in-game checks.
+The runtime lives in ignored `tools/lua/`. Verification checks Lua syntax and runs the offline group, chat and welcome-screen tests without downloading anything. Both scripts resolve repository paths themselves, so they also work when invoked by full path from another directory.
+
+See [the verification process](docs/testing.md) for coverage, future changes and required in-game checks.

@@ -429,7 +429,10 @@ local function loadOptions(uiAddon, uiEnvironment)
         "SetWidth", "SetHeight", "SetJustifyH", "SetAutoFocus", "Raise" }) do
         methods[name] = function() end
     end
-    function methods:SetText(text) self.text = text end
+    function methods:SetText(text)
+        self.text = text
+        if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
+    end
     function methods:GetText() return self.text or "" end
     function methods:SetTextColor(red, green, blue) self.color = { red, green, blue } end
     function methods:SetEnabled(enabled) self.enabled = enabled end
@@ -458,7 +461,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     end
     function methods:UserInput(text)
         assert(self.enabled, "disabled fields do not accept user input")
-        self:SetText(text)
+        self.text = text
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
     end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
@@ -683,6 +686,16 @@ do
     assert(initial.welcomePanel == welcome and welcome.ownSecret:GetText() == SECRET
         and welcome.friendSecret:GetText() == "" and welcome.joinGroup:GetText() == "Join friend"
         and generatedCalls == 2, "reopening restores the saved key and resets pending confirmation")
+    -- Hiding UIParent fires OnHide while the child's own IsShown flag stays true.
+    welcome.friendSecret:UserInput(OTHER_SECRET)
+    welcome.joinGroup:Click()
+    welcome.scripts.OnHide(welcome)
+    initial:RefreshOptions()
+    assert(welcome:IsShown() and welcome.ownSecret:GetText() == ""
+        and welcome.friendSecret:GetText() == "" and welcome.joinGroup:GetText() == "Join friend",
+        "hiding the whole interface clears keys and prevents background refresh from restoring them")
+    welcome.scripts.OnShow(welcome)
+    assert(welcome.ownSecret:GetText() == SECRET, "showing the interface restores the saved key")
     welcome.options:Click()
     assert(initial.optionsPanel and initial.optionsPanel:IsShown() and not welcome:IsShown(),
         "the welcome options button opens feature settings")

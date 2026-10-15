@@ -42,3 +42,6 @@ exclude.lst
 # Tooling libraries (like EmmyLua or Lua Language Server type defs)
 .lua-libs/
 .luarc.json
+
+# Project-local Lua runtime and downloaded archive
+/tools/lua/

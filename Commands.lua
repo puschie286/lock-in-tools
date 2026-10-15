@@ -18,7 +18,7 @@ function addon:ShowStatus()
 
     if self.initialized then
         local settingsState = self.savedDataReadOnly and "read-only" or "available"
-        self:Print("Saved settings " .. settingsState .. "; login message "
+        self:Print("Saved settings " .. settingsState .. "; login welcome "
             .. (self.db.showWelcome and "on." or "off."))
         self:Print("Group: " .. self:GetGroupStatusText())
         self:Print("Shared chat: " .. self:GetChatStatusText())

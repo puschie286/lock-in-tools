@@ -1,0 +1,42 @@
+# Verification process
+
+Keep addon code compatible with Lua 5.1. Run offline checks after changes and verify relevant client behavior in WoW.
+
+## Local setup
+
+Install the native Windows x64 Lua 5.1.5 runtime once from the repository root:
+
+```powershell
+.\tools\setup-lua.ps1
+```
+
+The script downloads a pinned archive from the [LuaBinaries release files](https://sourceforge.net/projects/luabinaries/files/5.1.5/Tools%20Executables/), verifies its SHA-256 before extraction, and checks the interpreter and compiler. Executables, dependencies and the archive stay in ignored `tools/lua/`; no global installation or PATH change is needed. Running setup again reuses an existing installation.
+
+## After changes
+
+```powershell
+.\tools\verify.ps1
+```
+
+Run after changing addon Lua, tests or verification tooling, and before handoff or committing. Both scripts locate the repository themselves and work from another directory when invoked by full path. Verification uses only the installed local runtime and performs no downloads.
+
+1. Require Lua 5.1, matching the addon's syntax target.
+2. Parse every root-level addon Lua file and every Lua file under `tests/` with `luac -p`, without producing bytecode files.
+3. Run `tests/group.lua` for crypto reference vectors, friendly/legacy keys, generation failures, validation, credential derivation, feature separation and group lifecycle.
+4. Run `tests/smoke.lua` for initialization, migrations, commands, asynchronous chat joins/retries, group switching, options and welcome callbacks against mocked WoW APIs. Welcome checks include saved-key stability, copying, friend import and confirmation, draft preservation, hide cleanup, disabled autojoin, generation failure and damaged/newer-schema data.
+
+Any failed check stops verification with a nonzero exit code. Fix the cause and rerun. Add regression coverage to the existing suites when behavior changes can be meaningfully exercised by the mocks; register new suites in `tools/verify.ps1` when needed. Keep test files out of `LockInTools.toc`.
+
+## In-game verification
+
+Mocks verify callbacks and state transitions. Rendering, actual clipboard/focus behavior, client event ordering and server channels require in-game checks. Record addon version and client build with `/lit status`, plus realm and faction. Use an isolated test profile or preserved SavedVariables fixture for fresh-install and schema scenarios.
+
+1. With no saved group and welcome enabled, confirm welcome opens once with a saved key and chat begins joining when autojoin is enabled. Check different UI scales. Existing groups must retain their key.
+2. Use **Select key** and Ctrl+C, then paste elsewhere to check the complete key. Typing into **Your secret key** must leave it unchanged. Blank/invalid friend keys must preserve the group. Case/whitespace variants of the current key must require no switch confirmation.
+3. Require **Join friend**, then **Confirm switch**, before using a different key. Editing must reset confirmation. Check the displayed key updates, the old channel is left, unrelated channels remain and chat notices preserve unfinished input.
+4. Close with **Done**, the title-bar close button and Escape. A focused edit box may consume the first Escape. Hide and restore the interface with Alt+Z. Hidden fields must clear; reopening restores the saved key and resets drafts/confirmation. **More options** must open settings.
+5. Reload, relog and switch characters. The account-wide key, fingerprint and preferences must persist. Configured groups must not reopen welcome automatically. Check `/lit`, `/lit welcome`, `/lit options` and `/lit welcome off` on an unconfigured profile.
+6. With autojoin disabled, opening welcome and importing a friend key must save without an addon join request. Exchange messages between friends sharing a key, realm and faction using `/lit chat`. Check leave/reconnect, rejected joins, bounded retries and ownership/password behavior with the [shared-chat guide](../feature/shared-chat.md).
+7. With a disposable newer-schema fixture, editing must be blocked, initial setup must not create a key and saved data must remain intact. An invalid saved key must survive opening welcome until explicitly replaced.
+
+See [groups](../feature/group.md) and [shared chat](../feature/shared-chat.md) for further checks. Report the verification command and result with each change, separately from actual in-game validation and any client/server behavior left unverified.
