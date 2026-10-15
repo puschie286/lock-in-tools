@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: LockInTools
+## Notes: Tools for playing World of Warcraft Forever with friends.
+## Version: 0.3.0
+## SavedVariables: LockInToolsDB
+
+Core.lua
+Crypto.lua
+Group.lua
+Chat.lua
+Options.lua
+Commands.lua
