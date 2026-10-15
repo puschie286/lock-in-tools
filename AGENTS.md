@@ -1,7 +1,14 @@
-# Verification
+# LockInTools
 
-- Keep addon code compatible with Lua 5.1.
-- After changing Lua code or tests, run `.\tools\verify.ps1` from the repository root. It checks syntax and runs both offline suites; resolve failures before finishing.
-- If the local runtime is missing, run `.\tools\setup-lua.ps1`. Keep the downloaded runtime in ignored `tools/lua/`.
-- For behavior changes, extend the existing mocked tests when they can catch a meaningful regression. The test harness is never loaded by the addon.
-- Follow `docs/testing.md` for the full process and relevant in-game checks. Report offline results separately from any actual in-game validation.
+- World of Warcraft Forever addon using Lua 5.1 and native WoW APIs/UI; no build step, third-party runtime dependencies or backend.
+- `Core.lua`: startup/settings; `Crypto.lua`/`Group.lua`: group keys/credentials; `Chat.lua`: native chat; `Options.lua`/`Commands.lua`: welcome, settings and commands.
+- Features share one account-wide group key in `LockInToolsDB`. Preserve migrations, legacy keys and newer-schema read-only behavior. Never log group keys.
+- `LockInTools.toc` defines metadata and load order. Register new addon files there; keep tests out. Use `/reload` for existing Lua edits; restart WoW after manifest additions.
+- Keep `README.md` focused on development setup. Keep one concise file per feature in `feature/`, including limits and in-game checks; label planned features clearly.
+
+## Verification
+
+- After changing Lua, tests or verification tooling, run `.\tools\verify.ps1`; resolve failures before finishing. It checks syntax and runs both offline suites.
+- If the local runtime is missing, run `.\tools\setup-lua.ps1`. Keep downloads in ignored `tools/lua/`.
+- Extend existing mocked tests for meaningful behavior regressions. The test harness is never loaded by the addon.
+- Follow [tests/testing.md](tests/testing.md) for the full process. Report verification commands/results separately from actual in-game validation.
