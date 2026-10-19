@@ -80,6 +80,7 @@ function addon:OnLogin()
 
     self.ready = true
     self.frame:UnregisterEvent("PLAYER_LOGIN")
+    self:InitializeMinimapButton()
 
     if self.savedDataReadOnly then
         self:Print("Saved settings belong to a newer version; preferences are read-only.")

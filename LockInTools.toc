@@ -16,4 +16,5 @@ PositionMap.lua
 PositionPins.xml
 Theme.lua
 Options.lua
+Minimap.lua
 Commands.lua

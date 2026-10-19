@@ -18,15 +18,15 @@ local function Vector(x, y)
     return { x = x, y = y, GetXY = function(self) return self.x, self.y end }
 end
 
-local function LoadMap()
+local function LoadMap(enableTrails)
     local addon = {
         positions = {}, initialized = true, positionState = {},
-        db = { position = { showPlayerIcons = true } },
+        db = { position = { showPlayerIcons = true, showTrails = enableTrails == true, trailLength = 10 } },
     }
     local world = {
         frames = {}, added = 0, created = 0, released = 0, rectangles = {},
         bounds = {}, secretValues = {}, worldConversions = 0, mapConversions = 0, now = 0,
-        menuModifiers = {}, menuRegistrations = 0,
+        menuModifiers = {}, menuRegistrations = 0, lines = {},
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
@@ -96,13 +96,40 @@ local function LoadMap()
         }
         environment.MapCanvasPinMixin = {
             SetOwningMap = function(self, map) self.owningMap = map end,
+            GetMap = function(self) return self.owningMap end,
             SetPosition = function(self, x, y) self.x, self.y = x, y end,
             SetScalingLimits = function() end,
             SetIgnoreGlobalPinScale = function() end,
             UseFrameLevelType = function(_, level) assert(level == "PIN_FRAME_LEVEL_GROUP_MEMBER") end,
             OnReleased = function() world.released = world.released + 1 end,
         }
-        local map = { shown = shown, id = 101, pins = {}, pool = {}, unrelatedPin = {} }
+        local map = { shown = shown, id = 101, pins = {}, pool = {}, unrelatedPin = {}, scale = 1 }
+        local canvas = { width = 1000, height = 600 }
+        function canvas:GetWidth() return self.width end
+        function canvas:GetHeight() return self.height end
+        function canvas:CreateLine(name, layer)
+            assert(name == nil and layer == "ARTWORK", "trail lines use anonymous native canvas artwork")
+            local line = { canvas = self, shown = false }
+            function line:SetStartPoint(anchor, relative, x, y)
+                assert(anchor == "TOPLEFT" and relative == self.canvas)
+                self.startPoint = { x = x, y = y }
+            end
+            function line:SetEndPoint(anchor, relative, x, y)
+                assert(anchor == "TOPLEFT" and relative == self.canvas)
+                self.endPoint = { x = x, y = y }
+            end
+            function line:SetThickness(thickness) self.thickness = thickness end
+            function line:SetColorTexture(...) self.color = { ... } end
+            function line:SetAlpha(alpha) self.alpha = alpha end
+            function line:Show() self.shown = true end
+            function line:Hide() self.shown = false end
+            function line:ClearAllPoints() self.startPoint, self.endPoint = nil, nil end
+            world.lines[#world.lines + 1] = line
+            return line
+        end
+        map.canvas = canvas
+        function map:GetCanvas() return self.canvas end
+        function map:GetCanvasScale() return self.scale end
         function map:IsShown() return self.shown end
         function map:GetMapID() return self.id end
         function map:AddDataProvider(provider)
@@ -583,9 +610,13 @@ movingPin = FindPin(smoothWorld, moving.name)
 Near(movingPin.x, 0.2)
 Near(movingPin.y, 0.4)
 assert(movingPin:GetScript("OnUpdate"), "ordinary online movement installs an animation callback")
-smoothWorld:advance(1)
+smoothWorld:advance(0.5)
+Near(movingPin.x, 0.21)
+Near(movingPin.y, 0.415)
+smoothWorld:advance(0.5)
 Near(movingPin.x, 0.22)
 Near(movingPin.y, 0.43)
+assert(movingPin:GetScript("OnUpdate"), "linear movement covers half the distance after one second")
 Near(moving.x, 0.24)
 Near(moving.y, 0.46)
 
@@ -599,16 +630,32 @@ assert(movingPin.Icon.texture == classTexture, "class changes update visuals dur
 smoothWorld:advance(0.5)
 Near(movingPin.x, 0.23)
 Near(movingPin.y, 0.445)
+assert(movingPin:GetScript("OnUpdate"), "linear movement keeps its speed without arriving early or overshooting")
 assert(smoothWorld.created == 2, "refreshes reuse pooled pins while preserving each player's motion")
+smoothWorld:advance(0.5)
+Near(movingPin.x, 0.24)
+Near(movingPin.y, 0.46)
+assert(movingPin:GetScript("OnUpdate") == nil, "movement reaches its target and stops updating after two seconds")
+smoothWorld:advance(1)
+Near(movingPin.x, 0.24)
+Near(movingPin.y, 0.46)
+assert(movingPin:GetScript("OnUpdate") == nil,
+    "a delayed sample holds the received target without predicting further movement")
 
-moving.x, moving.y = 0.28, 0.46
+moving.x = 0.26
 smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.23)
-Near(movingPin.y, 0.445)
+smoothWorld:advance(0.5)
+Near(movingPin.x, 0.245)
+moving.x = 0.28
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.245)
+Near(movingPin.y, 0.46)
 smoothWorld:advance(1)
-Near(movingPin.x, 0.255)
-Near(movingPin.y, 0.4525)
+Near(movingPin.x, 0.2625)
+Near(movingPin.y, 0.46)
+assert(movingPin:GetScript("OnUpdate"), "a fast new target continues from the current displayed position")
 smoothWorld:advance(3)
 Near(movingPin.x, 0.28)
 Near(movingPin.y, 0.46)
@@ -763,4 +810,264 @@ Near(projectedMoving.y, 0.56)
 assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
     "projected movement ends at native map coordinates without changing the shared source data")
 
-print("PASS: native map attachment/filter, class icons/fallbacks, presence labels/colors, projection, smooth movement and pooled pin lifecycle")
+local function VisibleTrailLines(testWorld)
+    local result = {}
+    for _, line in ipairs(testWorld.lines) do
+        if line.shown then
+            assert(line.startPoint and line.endPoint and line.thickness and line.thickness > 0,
+                "visible trail lines have native anchors and a positive thickness")
+            result[#result + 1] = line
+        end
+    end
+    return result
+end
+
+local function TrailAlpha(line)
+    return (line.alpha or 1) * (line.color and line.color[4] or 1)
+end
+
+local function HighestTrailAlpha(testWorld)
+    local result = 0
+    for _, line in ipairs(VisibleTrailLines(testWorld)) do result = math.max(result, TrailAlpha(line)) end
+    return result
+end
+
+local function HasTrailEndpoint(testWorld, x, y)
+    local canvas = testWorld.map.canvas
+    for _, line in ipairs(VisibleTrailLines(testWorld)) do
+        for _, point in ipairs({ line.startPoint, line.endPoint }) do
+            if math.abs(point.x - x * canvas.width) < 0.000001
+                and math.abs(point.y + y * canvas.height) < 0.000001 then return true end
+        end
+    end
+    return false
+end
+
+local function AdvanceFrames(testWorld, seconds)
+    for _ = 1, seconds * 4 do testWorld:advance(0.25) end
+end
+
+local function MovingTrail()
+    local testAddon, testWorld = LoadMap(true)
+    testWorld:loadNativeMap(true)
+    local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
+    testAddon.positions.alice = peer
+    testAddon:InitializePositionMap()
+    assert(#VisibleTrailLines(testWorld) == 0, "a first position has no fabricated travel history")
+    peer.x, peer.y = 0.24, 0.46
+    testAddon:RefreshPositionPins()
+    AdvanceFrames(testWorld, 1)
+    local testPin = FindPin(testWorld, peer.name)
+    Near(testPin.x, 0.22)
+    Near(testPin.y, 0.43)
+    assert(#VisibleTrailLines(testWorld) > 0, "online movement leaves a native canvas trail")
+    return testAddon, testWorld, peer, testPin
+end
+
+local trails, trailWorld, trailPeer, trailPin = MovingTrail()
+assert(HasTrailEndpoint(trailWorld, 0.2, 0.4), "the trail starts at the previously displayed location")
+assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y), "the trail head meets the smoothed pin")
+assert(not HasTrailEndpoint(trailWorld, trailPeer.x, trailPeer.y), "a trail never leads to an undisplayed raw target")
+trailWorld:advance(0.01)
+assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y),
+    "the trail head stays attached even between throttled history redraws")
+trailWorld:advance(0.24)
+Near(trailPin.x, 0.225)
+Near(trailPin.y, 0.4375)
+assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y),
+    "the displayed trail head follows every frame between half-second history samples")
+assert(#trailWorld.frames == 0, "trails use pin callbacks without allocating a provider animation frame")
+
+local trailMotion = trails.positionMapProvider.positions.alice
+local historyBeforeRefresh = trailMotion.trail
+trailPeer.class = "MAGE"
+trails.positions.bob = { name = "Bob-Realm", map = 101, x = 0.8, y = 0.8, online = true }
+trails:RefreshPositionPins()
+trailPin = FindPin(trailWorld, trailPeer.name)
+Near(trailPin.x, 0.225)
+assert(trails.positionMapProvider.positions.alice.trail == historyBeforeRefresh
+    and HasTrailEndpoint(trailWorld, 0.2, 0.4),
+    "class updates and unrelated peers preserve the displayed path across pooled-pin refreshes")
+AdvanceFrames(trailWorld, 0.75)
+Near(trailPin.x, 0.24)
+Near(trailPin.y, 0.46)
+assert(trailPin:GetScript("OnUpdate"), "stationary pins continue aging their remaining trail")
+local alphaAtStop = HighestTrailAlpha(trailWorld)
+trailWorld:advance(0.5)
+assert(HighestTrailAlpha(trailWorld) < alphaAtStop, "trail opacity decays after movement stops")
+AdvanceFrames(trailWorld, 10)
+assert(#VisibleTrailLines(trailWorld) == 0 and trailPin:GetScript("OnUpdate") == nil,
+    "expired stationary trails hide their native lines and release their update callback")
+Near(trailPin.x, 0.24)
+Near(trailPin.y, 0.46)
+
+local lengths, lengthWorld, lengthPeer, lengthPin = MovingTrail()
+AdvanceFrames(lengthWorld, 3)
+assert(#VisibleTrailLines(lengthWorld) > 0, "the default ten-second history remains after a short stop")
+assert(lengths:SetPositionTrailSettings(true, 1))
+assert(#VisibleTrailLines(lengthWorld) == 0 and lengthPin:GetScript("OnUpdate") == nil,
+    "shortening the trail immediately removes history older than the selected length")
+lengthPeer.x = 0.28
+lengths:RefreshPositionPins()
+AdvanceFrames(lengthWorld, 0.5)
+assert(#VisibleTrailLines(lengthWorld) > 0)
+assert(lengths:SetPositionTrailSettings(false, 10))
+lengthPin = FindPin(lengthWorld, lengthPeer.name)
+local afterDisable = lengthPin.x
+assert(#VisibleTrailLines(lengthWorld) == 0 and lengthPin:GetScript("OnUpdate"),
+    "disabling trails immediately hides lines while preserving active interpolation")
+AdvanceFrames(lengthWorld, 0.5)
+assert(lengthPin.x > afterDisable and #VisibleTrailLines(lengthWorld) == 0,
+    "disabled trails never affect the original two-second pin movement")
+local displayAtEnable = lengthPin.x
+assert(lengths:SetPositionTrailSettings(true, 10))
+assert(#VisibleTrailLines(lengthWorld) == 0, "enabling a trail starts without resurrecting disabled history")
+AdvanceFrames(lengthWorld, 0.5)
+assert(#VisibleTrailLines(lengthWorld) > 0 and HasTrailEndpoint(lengthWorld, displayAtEnable, lengthPin.y),
+    "newly enabled trails start at the displayed position and record subsequent movement")
+
+local sized, sizeWorld, sizePeer, sizePin = MovingTrail()
+sizeWorld.map.canvas.width, sizeWorld.map.canvas.height, sizeWorld.map.scale = 1600, 900, 2
+sizeWorld:advance(0.25)
+assert(HasTrailEndpoint(sizeWorld, sizePin.x, sizePin.y), "the next frame reanchors history after a canvas resize")
+for _, line in ipairs(VisibleTrailLines(sizeWorld)) do
+    Near(line.thickness * sizeWorld.map.scale, 2)
+end
+sizeWorld.map.GetCanvasScale = nil
+sizeWorld:advance(0.25)
+for _, line in ipairs(VisibleTrailLines(sizeWorld)) do Near(line.thickness, 2) end
+assert(#sizeWorld.lines < 10, "ordinary frames reuse native line objects")
+
+local resetScenarios = {
+    { "offline", function(testAddon, _, peer) peer.online = false; testAddon:RefreshPositionPins() end },
+    { "teleport", function(testAddon, _, peer) peer.x = 0.6; testAddon:RefreshPositionPins() end },
+    { "source-map change", function(testAddon, testWorld, peer)
+        testWorld.rectangles["102:101"] = { 0, 1, 0, 1 }
+        peer.map = 102
+        testAddon:RefreshPositionPins()
+    end },
+    { "displayed-map change", function(_, testWorld)
+        testWorld.rectangles["101:100"] = { 0, 1, 0, 1 }
+        testWorld.map:changeMap(100)
+    end },
+    { "icon filtering", function(testAddon) assert(testAddon:SetShowPlayerIcons(false)) end },
+    { "map hiding", function(testAddon, testWorld)
+        testWorld.map.shown = false
+        testAddon:RefreshPositionPins()
+    end },
+    { "map reopening", function(_, testWorld)
+        testWorld.map.shown = false
+        testWorld.map:show()
+    end },
+    { "provider reset", function(testAddon) testAddon.positionMapProvider:RemoveAllData() end },
+    { "group cleanup", function(testAddon) testAddon.positions = {}; testAddon:RefreshPositionPins() end },
+}
+for _, scenario in ipairs(resetScenarios) do
+    local testAddon, testWorld, peer = MovingTrail()
+    local oldLines = VisibleTrailLines(testWorld)
+    scenario[2](testAddon, testWorld, peer)
+    assert(#VisibleTrailLines(testWorld) == 0, scenario[1] .. " clears trail rendering immediately")
+    for _, line in ipairs(oldLines) do assert(not line.shown, scenario[1] .. " releases each native line") end
+    if scenario[1] == "offline" then
+        peer.online, peer.x = true, 0.28
+        testAddon:RefreshPositionPins()
+        assert(#VisibleTrailLines(testWorld) == 0, "reconnecting starts a fresh trail without an offline bridge")
+    end
+end
+
+local replaced, replaceWorld, replacePeer = MovingTrail()
+local oldPeerLines = VisibleTrailLines(replaceWorld)
+replaced.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.7, y = 0.8, online = true } }
+replaced:RefreshPositionPins()
+assert(#VisibleTrailLines(replaceWorld) == 0 and replaceWorld.created == 1,
+    "a reused pin never displays the removed peer's path for its next owner")
+for _, line in ipairs(oldPeerLines) do assert(not line.shown) end
+replaced.positions.bob.x = 0.74
+replaced:RefreshPositionPins()
+AdvanceFrames(replaceWorld, 1)
+assert(#VisibleTrailLines(replaceWorld) > 0 and not HasTrailEndpoint(replaceWorld, 0.2, 0.4),
+    "the reused native line pool contains only the new peer's path")
+
+local peers, peersWorld, firstPeer = MovingTrail()
+local secondPeer = { name = "Bob-Realm", map = 101, x = 0.7, y = 0.8, online = true }
+peers.positions.bob = secondPeer
+peers:RefreshPositionPins()
+secondPeer.x, secondPeer.y = 0.74, 0.84
+peers:RefreshPositionPins()
+AdvanceFrames(peersWorld, 1)
+assert(HasTrailEndpoint(peersWorld, 0.2, 0.4) and HasTrailEndpoint(peersWorld, 0.7, 0.8),
+    "simultaneously moving peers retain separate paths")
+peers.positions.alice = nil
+peers:RefreshPositionPins()
+assert(not HasTrailEndpoint(peersWorld, 0.2, 0.4) and HasTrailEndpoint(peersWorld, 0.7, 0.8),
+    "removing one peer clears its lines while preserving another peer's history")
+for _, line in ipairs(VisibleTrailLines(peersWorld)) do
+    assert(line.startPoint.x >= 0.7 * peersWorld.map.canvas.width
+        and line.endPoint.x >= 0.7 * peersWorld.map.canvas.width,
+        "no orphaned line survives pooled-pin reassignment between peers")
+end
+
+local toggled, toggleWorld, togglePeer = MovingTrail()
+local pooledLineCount = #toggleWorld.lines
+for toggle = 1, 12 do
+    assert(toggled:SetPositionTrailSettings(false, 10))
+    assert(#VisibleTrailLines(toggleWorld) == 0)
+    assert(toggled:SetPositionTrailSettings(true, 10))
+    togglePeer.x = toggle % 2 == 0 and 0.24 or 0.26
+    toggled:RefreshPositionPins()
+    AdvanceFrames(toggleWorld, 1)
+    assert(#VisibleTrailLines(toggleWorld) > 0 and #toggleWorld.lines <= pooledLineCount,
+        "repeated trail toggles reuse native line objects without growing the pool")
+end
+
+local projectedTrails, projectedTrailWorld = LoadMap(true)
+projectedTrailWorld:loadNativeMap(true)
+projectedTrailWorld.map.id = 100
+projectedTrailWorld.rectangles["101:100"] = { 0.1, 0.5, 0.2, 0.6 }
+local projectedTrailPeer = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true }
+projectedTrails.positions.alice = projectedTrailPeer
+projectedTrails:InitializePositionMap()
+projectedTrailPeer.x, projectedTrailPeer.y = 0.29, 0.56
+projectedTrails:RefreshPositionPins()
+AdvanceFrames(projectedTrailWorld, 1)
+local projectedTrailPin = FindPin(projectedTrailWorld, projectedTrailPeer.name)
+Near(projectedTrailPin.x, 0.208)
+Near(projectedTrailPin.y, 0.412)
+assert(HasTrailEndpoint(projectedTrailWorld, 0.2, 0.4)
+    and HasTrailEndpoint(projectedTrailWorld, projectedTrailPin.x, projectedTrailPin.y)
+    and not HasTrailEndpoint(projectedTrailWorld, 0.25, 0.5),
+    "projected trails use the same displayed-map coordinates as their pins")
+Near(projectedTrailPeer.x, 0.29)
+Near(projectedTrailPeer.y, 0.56)
+
+local bounded, boundedWorld, boundedPeer = MovingTrail()
+assert(bounded:SetPositionTrailSettings(true, 30))
+for sample = 1, 120 do
+    boundedPeer.x = 0.24 + (sample % 20) * 0.002
+    bounded:RefreshPositionPins()
+    AdvanceFrames(boundedWorld, 2)
+    local motion = bounded.positionMapProvider.positions.alice
+    assert(motion.trail and #motion.trail.points <= 64, "long journeys keep a bounded in-memory history")
+    assert(#VisibleTrailLines(boundedWorld) <= 64 and #boundedWorld.lines <= 64,
+        "long journeys bound native line allocation and reuse the existing pool")
+end
+AdvanceFrames(boundedWorld, 31)
+assert(#VisibleTrailLines(boundedWorld) == 0 and FindPin(boundedWorld, boundedPeer.name):GetScript("OnUpdate") == nil,
+    "maximum-length trails expire even after a long journey")
+
+for _, unavailable in ipairs({ "canvas", "CreateLine" }) do
+    local fallback, fallbackWorld = LoadMap(true)
+    fallbackWorld:loadNativeMap(true)
+    if unavailable == "canvas" then fallbackWorld.map.canvas = nil
+    else fallbackWorld.map.canvas.CreateLine = nil end
+    local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
+    fallback.positions.alice = peer
+    fallback:InitializePositionMap()
+    peer.x = 0.24
+    fallback:RefreshPositionPins()
+    AdvanceFrames(fallbackWorld, 1)
+    Near(FindPin(fallbackWorld, peer.name).x, 0.22)
+    assert(#fallbackWorld.lines == 0, "missing " .. unavailable .. " preserves pins without allocating lines")
+end
+
+print("PASS: native map attachment/filter, class icons/fallbacks, presence, projection, smooth movement, trails and pooled lifecycle")

@@ -7,7 +7,8 @@ local function loadAddon(savedVariables, loggedIn)
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
         dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, prefixes = {},
         resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
-        optionsOpened = 0, welcomeOpened = 0,
+        optionsOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
+        cursorX = 1000, cursorY = 600, cursorReads = 0,
     }
     local function channelByName(name)
         if type(name) == "string" then return world.channels[name:lower()] end
@@ -72,6 +73,60 @@ local function loadAddon(savedVariables, loggedIn)
         world.openedChat[#world.openedChat + 1] = { text = text, frame = frame }
         return editBox
     end
+    local minimap = { width = 140, height = 140, scale = 1, x = 1000, y = 600, hooks = {} }
+    function minimap:GetWidth() return self.width end
+    function minimap:GetHeight() return self.height end
+    function minimap:GetEffectiveScale() return self.scale end
+    function minimap:GetCenter() return self.x, self.y end
+    function minimap:GetFrameLevel() return 10 end
+    function minimap:HookScript(script, callback)
+        assert(script == "OnSizeChanged", "minimap only hooks size changes")
+        self.hooks[#self.hooks + 1] = callback
+    end
+    function minimap:SetSize(width, height)
+        self.width, self.height = width, height
+        for _, callback in ipairs(self.hooks) do callback(self, width, height) end
+    end
+    local tooltip = { lines = {}, shown = false }
+    function tooltip:SetOwner(owner, anchor) self.owner, self.anchor = owner, anchor end
+    function tooltip:IsOwned(owner) return self.owner == owner end
+    function tooltip:SetText(text) self.text, self.lines = text, {} end
+    function tooltip:AddLine(text) self.lines[#self.lines + 1] = text end
+    function tooltip:Show() self.shown = true end
+    function tooltip:Hide() self.shown = false end
+    local function newMinimapButton(name, parent)
+        assert(name == "LockInToolsMinimapButton" and parent == minimap,
+            "the addon button uses a named native minimap child")
+        world.minimapButtonCreations = world.minimapButtonCreations + 1
+        local button = { name = name, parent = parent, scripts = {}, shown = true, textures = {} }
+        function button:SetSize(width, height) self.width, self.height = width, height end
+        function button:SetFrameStrata(strata) self.strata = strata end
+        function button:SetFrameLevel(level) self.level = level end
+        function button:RegisterForClicks(...) self.clicks = { ... } end
+        function button:RegisterForDrag(...) self.drags = { ... } end
+        function button:ClearAllPoints() self.point = nil end
+        function button:SetPoint(...) self.point = { ... } end
+        function button:SetHighlightTexture(texture) self.highlight = texture end
+        function button:SetScript(script, callback) self.scripts[script] = callback end
+        function button:GetScript(script) return self.scripts[script] end
+        function button:CreateTexture()
+            local texture = {}
+            function texture:SetSize(width, height) self.width, self.height = width, height end
+            function texture:SetPoint(...) self.point = { ... } end
+            function texture:SetAllPoints() self.allPoints = true end
+            function texture:SetTexture(path) self.path = path end
+            function texture:SetTexCoord(...) self.texCoord = { ... } end
+            button.textures[#button.textures + 1] = texture
+            return texture
+        end
+        function button:Click(mouseButton) self.scripts.OnClick(self, mouseButton) end
+        function button:Hide()
+            self.shown = false
+            if self.scripts.OnHide then self.scripts.OnHide(self) end
+        end
+        environment[name] = button
+        return button
+    end
     environment = setmetatable({
         LockInToolsDB = savedVariables,
         SlashCmdList = {},
@@ -87,6 +142,13 @@ local function loadAddon(savedVariables, loggedIn)
             SendAddonMessageResult = { Success = 0 },
         },
         GetTime = function() return world.now end,
+        Minimap = minimap,
+        GameTooltip = tooltip,
+        GetCursorPosition = function()
+            world.cursorReads = world.cursorReads + 1
+            return world.cursorX, world.cursorY
+        end,
+        GetMinimapShape = function() return world.minimapShape or "ROUND" end,
         GetServerTime = function() return 2000000000 + math.floor(world.now) end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         UnitFullName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
@@ -197,7 +259,8 @@ local function loadAddon(savedVariables, loggedIn)
         end,
         IsLoggedIn = function() return loggedIn end,
         GetBuildInfo = function() return "1.60.1", "70374", "Oct 2026", 16001 end,
-        CreateFrame = function(frameType)
+        CreateFrame = function(frameType, name, parent)
+            if frameType == "Button" then return newMinimapButton(name, parent) end
             assert(frameType == "Frame", "options are not loaded in this harness")
             local frame = { events = {} }
             function frame:RegisterEvent(event) self.events[event] = true end
@@ -212,7 +275,7 @@ local function loadAddon(savedVariables, loggedIn)
     }, { __index = _G })
     environment._G = environment
     local addon = {}
-    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Commands.lua" }) do
+    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Minimap.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)
@@ -295,6 +358,143 @@ local function contains(messages, needle, first)
         if messages[index]:find(needle, 1, true) then return true end
     end
     return false
+end
+
+-- Native minimap entry point, account-wide placement and saved-data safety.
+do
+    local function near(actual, expected)
+        return type(actual) == "number" and math.abs(actual - expected) < 0.000001
+    end
+    local function at(button, parent, x, y)
+        return button.point[1] == "CENTER" and button.point[2] == parent and button.point[3] == "CENTER"
+            and near(button.point[4], x) and near(button.point[5], y)
+    end
+    local entry, api, entryMessages, entryEvent, entryWorld = loadAddon(settings(nil, false), false)
+    entry:InitializeMinimapButton()
+    assert(not entry.minimapButton and entryWorld.minimapButtonCreations == 0,
+        "the minimap button waits until login")
+    entryEvent("ADDON_LOADED", "LockInTools")
+    assert(not entry.minimapButton and not entry.db.minimap,
+        "saved-variable initialization does not create a button or minimap settings")
+    entryEvent("PLAYER_LOGIN")
+    local button = entry.minimapButton
+    local diagonal = 78 / math.sqrt(2)
+    assert(button and entryWorld.minimapButtonCreations == 1
+        and api.LockInToolsMinimapButton == button and button.parent == api.Minimap
+        and at(button, api.Minimap, -diagonal, -diagonal),
+        "login creates one native button at the default minimap position")
+    assert(button.width == 31 and button.height == 31 and button.strata == "MEDIUM" and button.level == 18
+        and button.clicks[1] == "LeftButtonUp" and button.clicks[2] == "RightButtonUp"
+        and button.drags[1] == "LeftButton" and not button.drags[2],
+        "the native button registers both click actions and left-button dragging")
+    entryEvent("PLAYER_LOGIN")
+    entry:InitializeMinimapButton()
+    assert(entryWorld.minimapButtonCreations == 1 and #api.Minimap.hooks == 1
+        and not entry.optionsPanel and not entry.welcomePanel and not entry.db.minimap,
+        "repeated login and initialization reuse the button without building windows or saving defaults")
+    button:Click("LeftButton")
+    button:Click("RightButton")
+    button:Click("MiddleButton")
+    assert(entryWorld.optionsOpened == 1 and entryWorld.welcomeOpened == 1,
+        "left and right clicks open their windows while other clicks do nothing")
+    button.scripts.OnEnter(button)
+    assert(api.GameTooltip.shown and api.GameTooltip.owner == button and api.GameTooltip.anchor == "ANCHOR_LEFT"
+        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 3,
+        "hover explains the minimap actions")
+    button.scripts.OnLeave(button)
+    assert(not api.GameTooltip.shown)
+
+    api.Minimap.scale = 2
+    api.Minimap:SetSize(140, 100)
+    entryWorld.cursorX, entryWorld.cursorY = (1000 + 78) * 2, (600 + 58) * 2
+    button.scripts.OnDragStart(button)
+    button.scripts.OnEnter(button)
+    assert(button.scripts.OnUpdate and not api.GameTooltip.shown,
+        "dragging installs cursor updates and suppresses the tooltip")
+    button.scripts.OnUpdate(button)
+    assert(at(button, api.Minimap, 78 / math.sqrt(2), 58 / math.sqrt(2)) and not entry.db.minimap,
+        "dragging accounts for minimap scale and unequal radii without saving intermediate positions")
+    local cursorReads = entryWorld.cursorReads
+    entryWorld.cursorX, entryWorld.cursorY = 0, 0
+    button.scripts.OnDragStop(button)
+    assert(not button.scripts.OnUpdate and near(entry.db.minimap.angle, 45)
+        and entryWorld.cursorReads == cursorReads
+        and entryWorld.optionsOpened == 1 and entryWorld.welcomeOpened == 1,
+        "drag stop saves the last displayed angle without a cursor resample or opening a window")
+    api.Minimap:SetSize(200, 160)
+    assert(at(button, api.Minimap, 108 / math.sqrt(2), 88 / math.sqrt(2)),
+        "minimap resizing refreshes the saved angular placement")
+    local resumed, resumedApi, _, resumedEvent, resumedWorld = loadAddon(entry.db, true)
+    resumedEvent("ADDON_LOADED", "LockInTools")
+    assert(resumed.ready and resumedWorld.minimapButtonCreations == 1
+        and at(resumed.minimapButton, resumedApi.Minimap, diagonal, diagonal),
+        "late loading restores account-wide placement during login initialization")
+
+    entryWorld.cursorX, entryWorld.cursorY = (1000 - 108) * 2, 600 * 2
+    button.scripts.OnDragStart(button)
+    button.scripts.OnUpdate(button)
+    cursorReads = entryWorld.cursorReads
+    entryWorld.cursorX, entryWorld.cursorY = 0, 0
+    button:Hide()
+    assert(not button.scripts.OnUpdate and near(entry.db.minimap.angle, 180)
+        and entryWorld.cursorReads == cursorReads and not api.GameTooltip.shown,
+        "hiding mid-drag saves the displayed position and stops updates without sampling a hidden cursor")
+    assert(not contains(entryMessages, SECRET), "minimap interaction never prints the group key")
+
+    for _, invalid in ipairs({ false, "bad", { angle = "45" }, { angle = 0 / 0 },
+        { angle = math.huge }, { angle = -math.huge } }) do
+        local saved = settings(nil, false)
+        saved.minimap = invalid
+        local originalAngle = type(invalid) == "table" and invalid.angle
+        local repaired, repairedApi, _, _, repairedWorld = loadAddon(saved, false)
+        repairedWorld:initialize()
+        assert(at(repaired.minimapButton, repairedApi.Minimap, -diagonal, -diagonal)
+            and saved.minimap == invalid,
+            "invalid and non-finite saved positions fall back without replacing their saved field")
+        if type(invalid) == "table" then
+            assert(invalid.angle == originalAngle or (invalid.angle ~= invalid.angle and originalAngle ~= originalAngle),
+                "reading an invalid angle does not rewrite it")
+        end
+    end
+    local normalizedSettings = settings(nil, false)
+    normalizedSettings.minimap = { angle = -450, futureField = "keep" }
+    local normalized, normalizedApi, _, _, normalizedWorld = loadAddon(normalizedSettings, false)
+    normalizedWorld:initialize()
+    assert(at(normalized.minimapButton, normalizedApi.Minimap, 0, -78)
+        and normalizedSettings.minimap.angle == -450 and normalizedSettings.minimap.futureField == "keep",
+        "finite saved angles normalize for placement while preserving saved data")
+
+    local squareSettings = settings(nil, false)
+    squareSettings.minimap = { angle = 45 }
+    local square, squareApi, _, _, squareWorld = loadAddon(squareSettings, false)
+    squareWorld.minimapShape = "SQUARE"
+    squareWorld:initialize()
+    assert(at(square.minimapButton, squareApi.Minimap, 78, 78),
+        "square minimaps project diagonal placement onto their rim")
+    squareWorld.minimapShape = "CORNER-TOPLEFT"
+    squareApi.Minimap:SetSize(140, 140)
+    assert(at(square.minimapButton, squareApi.Minimap, diagonal, diagonal),
+        "other minimap shapes retain the circular placement fallback")
+
+    local futureSettings = settings(nil, false)
+    futureSettings.schemaVersion = 4
+    futureSettings.minimap = { angle = 120, futureField = "keep" }
+    local originalMinimap = futureSettings.minimap
+    local readOnly, readOnlyApi, _, _, readOnlyWorld = loadAddon(futureSettings, false)
+    readOnlyWorld:initialize()
+    local readOnlyButton = readOnly.minimapButton
+    readOnlyButton:Click("LeftButton")
+    readOnlyButton:Click("RightButton")
+    readOnlyWorld.cursorX, readOnlyWorld.cursorY = 1078, 600
+    readOnlyButton.scripts.OnDragStart(readOnlyButton)
+    readOnlyButton.scripts.OnUpdate(readOnlyButton)
+    readOnlyButton.scripts.OnDragStop(readOnlyButton)
+    assert(readOnlyWorld.optionsOpened == 1 and readOnlyWorld.welcomeOpened == 1
+        and at(readOnlyButton, readOnlyApi.Minimap, 78, 0)
+        and readOnlyApi.LockInToolsDB == futureSettings and futureSettings.minimap == originalMinimap
+        and originalMinimap.angle == 120 and originalMinimap.futureField == "keep"
+        and futureSettings.schemaVersion == 4 and not readOnly.db.minimap,
+        "read-only profiles permit button access and temporary dragging without writing any minimap settings")
 end
 
 -- Startup, migration, commands, reload and saved-variable preservation.
@@ -660,10 +860,17 @@ do
         "saving enabled sharing without a group does not join or broadcast")
     local futureSettings = settings(nil, false)
     futureSettings.schemaVersion = 4
-    futureSettings.position = { sharing = false, keepLastKnown = true, peers = {} }
+    futureSettings.position = { sharing = false, keepLastKnown = true, peers = {},
+        showTrails = "future-trails", trailLength = "future-length" }
     local future, _, _, _, futureWorld = loadAddon(futureSettings, false)
     futureWorld:initialize()
     assert(not future:SetPositionSharing(true))
+    assert(not future:SetPositionTrailSettings(false, 5))
+    local futureTrails, futureTrailLength = future:GetPositionTrailSettings()
+    assert(futureTrails == true and futureTrailLength == 10
+        and futureSettings.position.showTrails == "future-trails"
+        and futureSettings.position.trailLength == "future-length",
+        "Read-only startup uses safe trail defaults without repairing the original newer-schema data")
     futureWorld:advance(30)
     assert(not futureSettings.position.sharing and #futureWorld.dataJoinCalls == 0
         and #futureWorld.dataSends == 0, "read-only preferences cannot enable sharing or reconnect data")
@@ -1163,6 +1370,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     end
     function methods:HighlightText() self.highlighted = true end
     function methods:SetPassword(password) self.password = password end
+    function methods:SetNumeric(numeric) self.numeric = numeric end
     function methods:SetFontString(fontString) self.fontString = fontString end
     function methods:GetFontString() return self.fontString end
     function methods:SetCheckedTexture(texture)
@@ -1212,7 +1420,9 @@ local function loadOptions(uiAddon, uiEnvironment)
         if not wasShown and self.scripts.OnShow then self.scripts.OnShow(self) end
     end
     function methods:Click()
-        if self.enabled and self.scripts.OnClick then self.scripts.OnClick(self) end
+        if not self.enabled then return end
+        if self.frameType == "CheckButton" then self:SetChecked(not self:GetChecked()) end
+        if self.scripts.OnClick then self.scripts.OnClick(self) end
     end
     function methods:UserInput(text)
         assert(self.enabled, "disabled fields do not accept user input")
@@ -1221,6 +1431,9 @@ local function loadOptions(uiAddon, uiEnvironment)
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
     end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
+        if frameType == "Button" and name == "LockInToolsMinimapButton" then
+            return createEventFrame(frameType, name, parent, template)
+        end
         if frameType == "Frame" and not name and not template and not parent then
             return createEventFrame(frameType)
         end
@@ -1273,6 +1486,9 @@ assert(panel and panel:IsShown(), "/lit options opens the actual options panel")
 assert(panel.secret:GetText() == "" and panel.secret.password and panel.autoJoin:GetChecked() == false)
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true,
     "position sharing starts off with last-known retention enabled")
+assert(panel.positionTrails:GetChecked() == true and panel.positionTrailLength:GetText() == "10"
+    and panel.positionTrailLength.numeric == true, "trail controls show default-on trails and a numeric ten-second length")
+assert(panel.save == nil and panel.savePosition == nil, "feature preferences need no Save settings buttons")
 assert(not panel.join:IsEnabled() and not panel.leave:IsEnabled(), "no group means no join/leave buttons")
 assert(uiEnvironment.UISpecialFrames[1] == "LockInToolsOptions", "Escape can close the native panel")
 panel.createGroup:Click()
@@ -1294,39 +1510,111 @@ assert(panel.secret:GetText() == SECRET and not panel.secret.password
 panel.toggleSecret:Click()
 assert(panel.secret.password, "hide masks the revealed secret")
 panel.tabs.position:Click()
-panel.positionSharing:SetChecked(true)
-panel.positionRetention:SetChecked(false)
+panel.positionSharing:Click()
+assert(uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown
+    and uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 10,
+    "sharing applies immediately without changing other position preferences")
+panel.positionRetention:Click()
+assert(uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown,
+    "retention applies immediately")
+panel.positionTrails:Click()
+assert(not uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 10,
+    "trail visibility applies immediately without changing trail length")
+panel.positionTrailLength:UserInput("17")
+assert(uiAddon.db.position.trailLength == 17, "valid trail length applies while typing")
 panel.tabs.chat:Click()
-panel.autoJoin:SetChecked(true)
-panel.save:Click()
-assert(uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1)
-assert(not uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown,
-    "saving chat does not apply position preference drafts")
-panel.tabs.position:Click()
-panel.savePosition:Click()
+panel.autoJoin:Click()
+assert(uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1,
+    "chat autojoin applies immediately and requests a join")
 assert(uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown
-    and uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1,
-    "position settings save independently of chat and do not request a chat join")
-panel.tabs.chat:Click()
-panel.autoJoin:SetChecked(false)
+    and not uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 17,
+    "chat changes preserve saved position preferences")
 panel.tabs.position:Click()
-panel.positionSharing:SetChecked(false)
-panel.positionRetention:SetChecked(true)
+for _, invalid in ipairs({ "", "0", "31", "1.5", "many", "1e309" }) do
+    panel.positionTrailLength:UserInput(invalid)
+    assert(uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown
+        and not uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 17
+        and panel.positionTrailLength:GetText() == invalid and panel.feedback.color[1] == 1,
+        "invalid trail lengths preserve saved preferences and show feedback without interrupting the draft")
+end
+panel.positionSharing:Click()
+assert(not uiAddon.db.position.sharing and uiAddon.db.position.trailLength == 17
+    and panel.positionTrailLength:GetText() == "1e309", "invalid trail text does not block sharing changes")
+panel.positionRetention:Click()
+assert(uiAddon.db.position.keepLastKnown and uiAddon.db.position.trailLength == 17
+    and panel.positionTrailLength:GetText() == "1e309", "invalid trail text does not block retention changes")
+panel.positionTrails:Click()
+assert(uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 17
+    and panel.positionTrailLength:GetText() == "1e309", "invalid trail text does not block trail visibility changes")
+panel.positionSharing:Click()
+panel.positionRetention:Click()
+panel.positionTrails:Click()
+panel.positionTrailLength:SetText("22")
+assert(uiAddon.db.position.trailLength == 17, "programmatic text changes never save trail length")
+panel.positionTrailLength:SetFocus()
+panel.positionTrailLength:UserInput("")
+panel.positionTrailLength:ClearFocus()
+assert(panel.positionTrailLength:GetText() == "17" and uiAddon.db.position.trailLength == 17
+    and panel.feedback.color[1] == 1 and panel.feedback:GetText() ~= "",
+    "leaving an empty draft restores the saved length with validation feedback")
+panel.positionTrailLength:SetFocus()
+panel.positionTrailLength:UserInput("31")
+panel.positionTrailLength.scripts.OnEnterPressed(panel.positionTrailLength)
+assert(panel.positionTrailLength:GetText() == "17" and uiAddon.db.position.trailLength == 17
+    and panel.feedback.color[1] == 1 and panel.feedback:GetText() ~= "",
+    "Enter restores an invalid draft with validation feedback")
+panel.positionTrailLength:UserInput("17")
+assert(uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown
+    and not uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 17
+    and uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1,
+    "position changes apply independently of chat and do not request a chat join")
+do
+    local state = uiAddon.positionState
+    local timer, generation = state.timer, state.generation
+    local sample, stamp, succeeded = state.lastSentSample, state.lastSentAt, state.lastSendSucceeded
+    local discovery, attempts = state.classRequestPending, state.classRequestAttempts
+    local joins, sends = #uiWorld.dataJoinCalls, #uiWorld.dataSends
+    panel.positionTrails:Click()
+    panel.positionTrailLength:SetFocus()
+    panel.positionTrailLength:UserInput("01")
+    assert(uiAddon.db.position.trailLength == 1, "valid numeric drafts apply before Enter")
+    panel.positionTrailLength.scripts.OnEnterPressed(panel.positionTrailLength)
+    assert(uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 1
+        and panel.positionTrailLength:GetText() == "1"
+        and state.timer == timer and state.generation == generation and state.lastSentSample == sample
+        and state.lastSentAt == stamp and state.lastSendSucceeded == succeeded
+        and state.classRequestPending == discovery and state.classRequestAttempts == attempts
+        and #uiWorld.dataJoinCalls == joins and #uiWorld.dataSends == sends,
+        "applying and normalizing trail-only changes preserves sampling, suppression, discovery and transport")
+    panel.positionTrails:Click()
+    panel.positionTrailLength:UserInput("17")
+end
+panel.tabs.chat:Click()
+panel.autoJoin:Click()
+assert(not uiAddon.db.chat.autoJoin, "chat autojoin can be disabled immediately")
+panel.tabs.position:Click()
+panel.positionSharing:Click()
+panel.positionRetention:Click()
+panel.positionTrails:Click()
+panel.positionTrailLength:UserInput("30")
+assert(uiAddon.db.position.trailLength == 30, "the maximum trail length applies immediately")
 panel.tabs.group:Click()
 panel.secret:SetText(OTHER_SECRET)
 uiWorld:completeJoin(room, 9)
 assert(panel.secret:GetText() == OTHER_SECRET and panel.autoJoin:GetChecked() == false,
-    "asynchronous status updates preserve form edits")
+    "asynchronous status updates preserve key drafts and immediately applied preferences")
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true
-    and uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown,
-    "asynchronous status updates preserve position preference drafts")
+    and panel.positionTrails:GetChecked() == true and panel.positionTrailLength:GetText() == "30"
+    and uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 30
+    and not uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown,
+    "asynchronous status updates retain applied position preferences")
 assert(panel.positionStatus:GetText() == "Status: " .. uiAddon:GetPositionStatusText(),
     "position status reflects the current sharing state")
 assert(panel.status:GetText():find("Joined", 1, true), "status reflects confirmed membership")
 panel.secret:SetText("invalid--key")
 panel.applyGroup:Click()
 panel.applyGroup:Click()
-assert(uiAddon:GetGroupSecret() == SECRET and uiAddon.db.chat.autoJoin,
+assert(uiAddon:GetGroupSecret() == SECRET and not uiAddon.db.chat.autoJoin,
     "invalid input preserves group and feature preferences")
 assert(panel.feedback:GetText() ~= "" and panel.feedback.color[1] == 1)
 panel.secret:SetText(OTHER_SECRET)
@@ -1349,10 +1637,10 @@ panel:Hide()
 assert(panel.secret.password and panel.secret:GetText() == "", "closing clears and masks secrets")
 uiAddon:OpenOptions()
 assert(uiAddon.optionsPanel == panel and panel.secret:GetText() == "" and panel.secret.password)
-assert(panel.positionSharing:GetChecked() == true and panel.positionRetention:GetChecked() == false,
-    "reopening options restores saved position preferences")
+assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true
+    and panel.positionTrails:GetChecked() == true and panel.positionTrailLength:GetText() == "30"
+    and not panel.autoJoin:GetChecked(), "closing and reopening retains immediately applied preferences")
 panel.tabs.chat:Click()
-panel.autoJoin:SetChecked(false)
 panel.tabs.group:Click()
 panel.secret:SetText(SECRET)
 panel.secret.scripts.OnEnterPressed(panel.secret)
@@ -1360,8 +1648,8 @@ assert(uiAddon:GetGroupSecret() == OTHER_SECRET, "Enter also requires switch con
 panel.secret:SetText(OTHER_SECRET)
 panel.secret.scripts.OnTextChanged(panel.secret, true)
 panel.applyGroup:Click()
-assert(uiAddon:GetGroupSecret() == OTHER_SECRET and uiAddon.db.chat.autoJoin,
-    "using a secret does not apply an unsaved feature toggle")
+assert(uiAddon:GetGroupSecret() == OTHER_SECRET and not uiAddon.db.chat.autoJoin,
+    "using a secret preserves the independently applied feature preference")
 panel.createGroup:Click()
 local replacementDraft = panel.secret:GetText()
 assert(replacementDraft:match("^[a-z]+%-%d%d%d%d$") and uiAddon:GetGroupSecret() == OTHER_SECRET,
@@ -1385,14 +1673,93 @@ assert(not readOnly.optionsPanel.secret:IsEnabled()
     and not readOnly.optionsPanel.applyGroup:IsEnabled()
     and not readOnly.optionsPanel.createGroup:IsEnabled()
     and not readOnly.optionsPanel.autoJoin:IsEnabled()
-    and not readOnly.optionsPanel.save:IsEnabled()
     and not readOnly.optionsPanel.positionSharing:IsEnabled()
     and not readOnly.optionsPanel.positionRetention:IsEnabled()
-    and not readOnly.optionsPanel.savePosition:IsEnabled(), "read-only settings disable editing and saving")
+    and not readOnly.optionsPanel.positionTrails:IsEnabled()
+    and not readOnly.optionsPanel.positionTrailLength:IsEnabled()
+    and not readOnly.optionsPanel.save and not readOnly.optionsPanel.savePosition,
+    "read-only settings disable every immediately applied preference")
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true))
 readOnly.optionsPanel.tabs.chat:Click()
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true)
     and not readOnly.optionsPanel.autoJoin:IsEnabled(), "category changes retain the read-only notice and disabled edits")
+
+-- Programmatic refreshes never save preferences or recursively apply normalized trail text.
+do
+    local direct, directEnvironment, _, _, directWorld = loadAddon(settings(SECRET, false), false)
+    directWorld:initialize()
+    local trailCalls, setTrails = 0, direct.SetPositionTrailSettings
+    direct.SetPositionTrailSettings = function(self, ...)
+        trailCalls = trailCalls + 1
+        return setTrails(self, ...)
+    end
+    loadOptions(direct, directEnvironment)
+    direct:OpenOptions()
+    local options = direct.optionsPanel
+    options.tabs.position:Click()
+    options.positionTrailLength:SetText("7")
+    options.positionSharing:SetChecked(true)
+    options.positionRetention:SetChecked(false)
+    options.positionTrails:SetChecked(false)
+    options.autoJoin:SetChecked(true)
+    direct:RefreshOptions()
+    assert(trailCalls == 0 and direct.db.position.trailLength == 10
+        and not direct.db.position.sharing and direct.db.position.keepLastKnown
+        and direct.db.position.showTrails and not direct.db.chat.autoJoin,
+        "loading and programmatically updating controls never applies preferences")
+    options:Hide()
+    direct:OpenOptions()
+    assert(trailCalls == 0 and options.positionTrailLength:GetText() == "10"
+        and not options.positionSharing:GetChecked() and options.positionRetention:GetChecked()
+        and options.positionTrails:GetChecked() and not options.autoJoin:GetChecked(),
+        "reopening restores saved values without invoking setters")
+    options.positionTrailLength:SetFocus()
+    options.positionTrailLength:UserInput("08")
+    assert(trailCalls == 1 and direct.db.position.trailLength == 8,
+        "a valid trail edit applies exactly once")
+    options.positionTrailLength.scripts.OnEnterPressed(options.positionTrailLength)
+    assert(trailCalls == 1 and options.positionTrailLength:GetText() == "8"
+        and options.positionTrailLength.focusCleared,
+        "normalizing text and clearing focus do not recursively apply its programmatic text callback")
+    options.positionTrailLength:SetFocus()
+    options.positionTrailLength:UserInput("")
+    local attempts = trailCalls
+    direct:RefreshOptions()
+    assert(trailCalls == attempts and direct.db.position.trailLength == 8
+        and options.positionTrailLength:GetText() == "" and options.feedback.color[1] == 1,
+        "unrelated status refresh preserves an incomplete draft and its validation feedback")
+    options.tabs.chat:Click()
+    assert(options.positionTrailLength:GetText() == "8" and direct.db.position.trailLength == 8
+        and options.positionTrailLength.focusCleared,
+        "leaving the position category finalizes and restores an invalid draft")
+    options.tabs.position:Click()
+    options.positionTrailLength:SetFocus()
+    options.positionTrailLength:UserInput("0")
+    options:Hide()
+    direct:OpenOptions()
+    assert(options.positionTrailLength:GetText() == "8" and direct.db.position.trailLength == 8,
+        "closing with an invalid draft retains the latest valid length on reopening")
+
+    direct.savedDataReadOnly = true
+    direct:RefreshOptions()
+    for _, preference in ipairs({ { options.autoJoin, direct.db.chat, "autoJoin" },
+        { options.positionSharing, direct.db.position, "sharing" },
+        { options.positionRetention, direct.db.position, "keepLastKnown" },
+        { options.positionTrails, direct.db.position, "showTrails" } }) do
+        local control, saved, name = unpack(preference)
+        local previous = saved[name]
+        control:SetChecked(not previous)
+        control.scripts.OnClick(control)
+        assert(saved[name] == previous and control:GetChecked() == previous
+            and options.feedback.color[1] == 1,
+            "rejected immediate changes restore the saved checkbox and report the read-only error")
+    end
+    options.positionTrailLength:SetText("12")
+    options.positionTrailLength.scripts.OnTextChanged(options.positionTrailLength, true)
+    options.positionTrailLength.scripts.OnEnterPressed(options.positionTrailLength)
+    assert(direct.db.position.trailLength == 8 and options.positionTrailLength:GetText() == "8"
+        and options.feedback.color[1] == 1, "read-only rejection also preserves the saved trail length")
+end
 
 -- Options use one category window and navigate back to the same welcome window.
 do
@@ -1422,24 +1789,28 @@ do
         and options.applyGroup:GetText() == "Use key" and options.leaveGroup:GetText() == "Leave group"
         and options.feedback:GetText() == "",
         "leaving group hides its page and clears key drafts, focus and confirmation")
-    options.autoJoin:SetChecked(true)
+    options.autoJoin:Click()
     navigationWorld:completeJoin(navigation:GetGroupChannelName(), 9)
-    assert(options.secret:GetText() == "" and options.autoJoin:GetChecked() and not navigation.db.chat.autoJoin,
-        "status updates on another category cannot restore keys or apply preference drafts")
+    assert(options.secret:GetText() == "" and options.autoJoin:GetChecked() and navigation.db.chat.autoJoin,
+        "status updates on another category retain applied preferences and cannot restore keys")
     options.tabs.position:Click()
-    options.positionSharing:SetChecked(true)
-    options.positionRetention:SetChecked(false)
+    options.positionSharing:Click()
+    options.positionRetention:Click()
+    options.positionTrails:Click()
+    options.positionTrailLength:UserInput("1")
     options.tabs.chat:Click()
-    assert(options.autoJoin:GetChecked() and not navigation.db.chat.autoJoin,
-        "chat preferences remain drafts while visiting another category")
+    assert(options.autoJoin:GetChecked() and navigation.db.chat.autoJoin,
+        "chat preferences stay applied while visiting another category")
     options.tabs.position:Click()
     command("options")
     assert(options.selectedTab == "position" and options.pages.position:IsVisible()
         and not options.pages.group:IsVisible() and not options.pages.chat:IsVisible()
         and options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
-        and not navigation.db.position.sharing and navigation.db.position.keepLastKnown
+        and not options.positionTrails:GetChecked() and options.positionTrailLength:GetText() == "1"
+        and navigation.db.position.sharing and not navigation.db.position.keepLastKnown
+        and not navigation.db.position.showTrails and navigation.db.position.trailLength == 1
         and navigationEnvironment.namedFrameCreations.LockInToolsOptions == 1,
-        "repeated options commands reuse the same category window and preserve its unsaved preferences")
+        "category changes and repeated options commands retain immediately applied preferences")
     options.welcome:Click()
     local welcome = navigation.welcomePanel
     assert(welcome and welcome:IsVisible() and not options:IsVisible()
@@ -1449,7 +1820,8 @@ do
     welcome.joinGroup:Click()
     welcome.options:Click()
     assert(options:IsVisible() and not welcome:IsVisible() and options.selectedTab == "position"
-        and not options.positionSharing:GetChecked() and options.positionRetention:GetChecked()
+        and options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
+        and not options.positionTrails:GetChecked() and options.positionTrailLength:GetText() == "1"
         and welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == ""
         and welcome.joinGroup:GetText() == "Join friend",
         "welcome navigation closes and cleans its form while reusing the selected options category")
@@ -1810,7 +2182,7 @@ do
     late:OpenOptions()
     local options = late.optionsPanel
     options.tabs.chat:Click()
-    options.autoJoin:SetChecked(true)
+    options.autoJoin:Click()
     options.tabs.group:Click()
     options.secret:UserInput(OTHER_SECRET)
     options.applyGroup:Click()
@@ -1818,11 +2190,11 @@ do
     registration(skin)
     assert(options.skinApplied and options.TitleText.font[1] == appearance.font
         and options.secret:GetText() == OTHER_SECRET and options.applyGroup:GetText() == "Confirm switch"
-        and options.autoJoin:GetChecked() and not late.db.chat.autoJoin,
-        "a late skin callback styles existing windows without applying their unsaved drafts")
+        and options.autoJoin:GetChecked() and late.db.chat.autoJoin,
+        "a late skin callback preserves group confirmation and applied feature preferences")
     options.applyGroup:Click()
     assert(late:GetGroupSecret() == OTHER_SECRET and options.secret:GetText() == ""
-        and options.secret.password and #lateWorld.joinCalls == 0,
+        and options.secret.password and #lateWorld.joinCalls >= 1,
         "confirmation and hidden-key rules still work after skinning an open form")
 end
 
@@ -1867,5 +2239,5 @@ do
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: startup, migration, shared identity, chat/data connections, positions, retries, group lifecycle, themed options and welcome")
+print("PASS: startup, migration, minimap button, shared identity, chat/data connections, positions, retries, group lifecycle, themed options and welcome")
 

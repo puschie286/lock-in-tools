@@ -4,15 +4,18 @@ Share world-map positions with friends using the same [group key](group.md), int
 
 ## Use and behavior
 
-1. Open `/lit options`, enable **Enable position sharing**, and click **Save position settings** on each client. **Keep last-known positions** starts enabled.
+1. Open `/lit options` and enable **Enable position sharing** on each client. Sharing and **Keep last-known positions** apply and save immediately; retention starts enabled.
 2. Check `/lit status` for the group-data connection and position state, then open the world map. Group data reconnects automatically regardless of the position preference. `/lit data leave` temporarily disconnects without leaving the group or human chat; `/lit data join` requests an immediate retry.
 3. Open the world map's filter dropdown and use **Show player icons** under **LockInTools** to hide or show the addon's player pins and names. It starts enabled, applies immediately and is saved account-wide across reloads and characters. Sharing, incoming updates, class discovery and last-known retention continue while icons are hidden; showing them again uses the latest received locations.
+4. In **Shared positions**, **Show movement trails** applies and saves immediately. Trails start enabled with a 10-second length. **Trail length (seconds)** applies as you type a whole number from 1–30; invalid or blank input preserves the saved length and returns to it on Enter or focus loss. These display preferences are saved account-wide and do not change position sharing or sampling.
 
 The model checks movement every two seconds. It broadcasts changed serialized map/coordinates, or a heartbeat after 15 seconds without an accepted send: normally every 16 seconds with two-second polling. Unavailable positions use the same suppression and heartbeat. Failed sends retry the current sample on the next tick, without a backlog. Reconnecting, switching groups or re-enabling sharing resets suppression.
 
 Pins show player names without update ages and use native 16-pixel class icons. Active peers have full-color icons; 60 seconds without a valid newer position update dims them to grayscale with **(Offline)**. This means no recent position data here, not confirmed logout. Retained peers restored after reload also start offline. Peers or saved positions without class information keep the cyan/gray square until their class is learned. Pins use their own map coordinates or native map rectangles; when no usable rectangle exists, native world-coordinate conversion places them on overlapping maps such as Thunder Bluff and Mulgore. Positions outside the displayed map are omitted.
 
-While the map is visible, online pins move linearly from their displayed position to each new position over two seconds. A new target continues from the current displayed point; class updates and other peers do not restart the movement. This adds up to about two seconds of visual delay without predicting movement or increasing network traffic. Opening or switching the map, first sightings, presence changes, source-zone changes and jumps exceeding 10% of the source map snap to the latest coordinates. Offline pins stay fixed, and animation stops at the last received position. Smoothing never changes saved coordinates.
+While the map is visible, online pins move linearly from their displayed position to each new position over two seconds. A new target continues from the current displayed point; class updates and other peers do not restart the movement. Smoothing adds up to two seconds after receipt without predicting movement or increasing network traffic; sampling and network delay remain. Delayed updates can leave pins waiting at the last received target. Opening or switching the map, first sightings, presence changes, source-zone changes and jumps exceeding 10% of the source map snap to the latest coordinates. Offline pins stay fixed, and animation stops at the last received position. Smoothing never changes saved coordinates.
+
+Movement trails are fading cyan lines behind the displayed, smoothed pins. Length means recent elapsed seconds, so a trail also fades away after a player stops. Trails are recorded only while visible and are never saved or transmitted. Closing/reopening or switching maps, hiding player icons, disabling trails, offline/removed peers, group changes, source-zone changes and large jumps start a fresh path rather than connecting unrelated positions. Changing only trail settings preserves sampling, send suppression and connections. Native lines are pooled with at most 64 history points per visible player; map zoom, clipping, line appearance and performance with 6–10 players remain in-game checks.
 
 Last-known coordinates and known classes persist across reloads and characters; changing or leaving the group clears them. An unavailable-position update confirms activity and preserves previous coordinates when retention is enabled. With retention off, unavailable updates remove pins immediately and silence removes them after 60 seconds. Disabling sharing hides pins and stops position sampling/receiving while preserving retained locations; the shared data connection remains available to other features.
 
@@ -32,6 +35,23 @@ Each moving sender produces up to 30 position broadcasts/minute; unchanged posit
 
 ## Live evidence
 
+### Smoothing comparison (offline only)
+
+The current baseline remains two-second updates with a two-second linear glide. Synthetic steady travel with exact delivery and no network delay gives these tradeoffs; the alternatives below are evaluated proposals, not addon settings or implemented changes.
+
+| Updates / glide | Average lag during steady travel | Motion |
+| --- | --- | --- |
+| 2 s / 2 s linear (current) | 2 s | Continuous, constant speed |
+| 2 s / 0.35 s ease-out | About 1.09 s | Fast catch-up, then stationary for 82.5% of each cycle |
+| 2 s / 1 s linear | 1.5 s | Moves for one second, then pauses for one second |
+| 2 s / 2 s ease-out | 1.5 s | Continuous, but repeatedly speeds up and slows down |
+| 1 s / 1 s linear | 1 s | Continuous, constant speed; doubles movement traffic to 60 broadcasts/minute |
+| Bounded velocity prediction | Near zero in ideal steady travel | Can overshoot stops/turns and move backward when correcting |
+
+Stops can take nearly four seconds to settle with the current baseline: almost two seconds to sample the stop, then two seconds to finish the glide. Turns appear late and can cut corners; delayed/lost packets can cause a pause. Prediction improves ideal travel but cannot infer a stop from silence because unchanged samples are suppressed; any experiment needs a timeout, correction behavior and explicit handling of unavailable positions, map changes and teleports. Two-second linear smoothing remains the selected behavior for its overall motion; the alternatives are comparisons only. Synthetic checks also cover stops, right-angle turns, reversals, delivery jitter, lost updates, unavailable coordinates, large jumps and source-zone changes; they do not establish native rendering or server capacity.
+
+### Transport observations
+
 Transport checks using a now-removed standalone probe ran on client **1.60.1/70450**; they do not establish production pin rendering or recovery.
 
 | Test | Observed result |
@@ -44,6 +64,8 @@ The channel run used five-second probe samples, not production movement suppress
 
 ## In-game checks
 
+- In **Shared positions**, toggle sharing, retention and trails and check immediate effects and independent saved choices. Confirm trails start enabled at 10 seconds; type 1 and 30 and check immediate duration changes and fading after stopping. Invalid/blank lengths must preserve the saved length, revert on Enter or focus loss and leave the other controls usable. Toggle trails off/on during movement; pin motion must remain two-second linear and new trails must start at the displayed point. Reopen settings, reload or switch characters to check persistence, and verify newer-schema settings cannot be edited.
+- Follow two moving peers while panning, zooming and resizing the map. Trails should stay attached to their own pins, remain underneath icons and names, and clip to the map. Check fading when stationary, map close/reopen, icon filtering, zone changes, teleports, offline/removed peers and group changes without connecting old paths. Repeat with 6–10 clients to check appearance and performance.
 - Open the world map's filter dropdown and check **LockInTools → Show player icons** starts checked. With sharing enabled and a moving peer visible, uncheck it and confirm all addon icons and names disappear immediately. Keep moving both clients, then check it again: peers must appear at their latest location and continue moving. Leave it unchecked through `/reload` and a character switch, then confirm it stays unchecked. Check offline and retained peers follow the same filter, expiry continues while hidden, and toggling it leaves position-sharing settings unchanged.
 - Watch a moving peer with the world map open: pins should move smoothly between two-second updates. Stop and confirm the pin reaches the last received position without continuing beyond it. Close/reopen or switch maps during movement and check immediate placement; source-zone changes and large jumps must snap. Class updates and other peers' movement must not interrupt a pin's progress.
 - With two updated clients sharing a key, internal realm and faction, enable sharing and confirm matching class icons, moving pins near two-second updates, unchanged/unavailable heartbeats near 16 seconds, and grayscale offline icons after 60 seconds of position silence. Check names, self-echo exclusion, retention on/off and restored classes after reload. Connect a third client while peers are moving: it must learn their classes from replies, and both peers must learn its class from the request. Repeat simultaneous joins, reconnects, sharing toggles and group changes; class traffic must stop after each exchange. Check older clients still exchange positions and class-only messages cannot keep stale coordinates online.

@@ -146,6 +146,9 @@ local fingerprint = addon:GetGroupFingerprint()
 assert(addon.db.schemaVersion == 3 and addon.db.group.secret == "otter-4827")
 assert(addon.db.position.sharing == false and addon.db.position.keepLastKnown == true)
 assert(addon:GetShowPlayerIcons() == true and addon.db.position.showPlayerIcons == true)
+local defaultTrails, defaultTrailLength = addon:GetPositionTrailSettings()
+assert(defaultTrails == true and defaultTrailLength == 10
+    and addon.db.position.showTrails == true and addon.db.position.trailLength == 10)
 assert(next(addon:GetSharedPositions()) == nil)
 world:connect()
 world:advance(10)
@@ -199,6 +202,82 @@ do
     display.savedDataReadOnly, display.RefreshPositionPins = nil, nil
     assert(display:SetShowPlayerIcons(true) and display:GetShowPlayerIcons() == true,
         "The display setting remains available before the map provider is loaded")
+end
+
+-- Trail settings are account-wide display preferences with bounded whole-second lengths.
+do
+    local getter = addon.GetPositionTrailSettings
+    for _, uninitialized in ipairs({ {}, { db = false }, { db = {} }, { db = { position = "invalid" } } }) do
+        local enabled, length = getter(uninitialized)
+        assert(enabled == true and length == 10, "Trail defaults are available before saved settings initialize")
+    end
+    for _, invalid in ipairs({ "false", 0, {} }) do
+        local profile = copy(addon.db)
+        profile.position.showTrails = invalid
+        local enabled, length = getter({ db = profile })
+        assert(enabled == true and length == 10, "Malformed trail visibility reads safely without mutation")
+        assert(profile.position.showTrails == invalid)
+        local repaired = newAddon(profile)
+        assert(repaired.db.position.showTrails == true, "Writable profiles repair malformed trail visibility")
+    end
+    for _, invalid in ipairs({ 0, 31, 1.5, "10", math.huge, -math.huge, 0 / 0, true, {} }) do
+        local profile = copy(addon.db)
+        profile.position.trailLength = invalid
+        local enabled, length = getter({ db = profile })
+        assert(enabled == true and length == 10, "Malformed trail lengths read as the default")
+        local repaired = newAddon(profile)
+        assert(repaired.db.position.trailLength == 10, "Writable profiles repair malformed trail lengths")
+    end
+    local trails, clock = newAddon()
+    clock:login()
+    clock:connect()
+    assert(trails:SetPositionSharing(true))
+    clock:advance(2)
+    local state, timer = trails.positionState, trails.positionState.timer
+    local stateBefore, databaseBefore = copy(state), copy(trails.db)
+    local sent, samples, refreshes, optionsRefreshes = #clock.sent, clock.samples, clock.refreshes, 0
+    function trails:RefreshOptions() optionsRefreshes = optionsRefreshes + 1 end
+    assert(trails:SetPositionTrailSettings(false, 17))
+    local enabled, length = trails:GetPositionTrailSettings()
+    assert(enabled == false and length == 17 and clock.refreshes == refreshes + 1 and optionsRefreshes == 1)
+    databaseBefore.position.showTrails, databaseBefore.position.trailLength = false, 17
+    assert(equal(trails.db, databaseBefore) and equal(state, stateBefore) and state.timer == timer
+        and #clock.sent == sent and clock.samples == samples and trails:IsDataConnected(),
+        "Trail preferences only refresh visuals, preserving peers, sampling, sends and discovery")
+    clock:advance(2)
+    assert(clock.samples == samples + 1 and #clock.sent == sent,
+        "Changing trails preserves two-second sampling and unchanged-position suppression")
+    local restored = newAddon(copy(trails.db))
+    enabled, length = restored:GetPositionTrailSettings()
+    assert(enabled == false and length == 17, "Trail preferences survive a reload or another character")
+    assert(trails:SetPositionTrailSettings(true, 1))
+    assert(trails:SetPositionTrailSettings(true, 30), "Both trail length bounds are accepted")
+
+    local before, stateSnapshot = copy(trails.db), copy(state)
+    refreshes, optionsRefreshes = clock.refreshes, 0
+    local function rejected(value, seconds)
+        local changed, problem = trails:SetPositionTrailSettings(value, seconds)
+        assert(changed == false and type(problem) == "string")
+        assert(equal(trails.db, before) and equal(state, stateSnapshot)
+            and clock.refreshes == refreshes and optionsRefreshes == 0,
+            "Rejected trail settings do not mutate preferences, state or UI")
+    end
+    for _, invalid in ipairs({ 0, 31, 1.5, "10", math.huge, -math.huge, 0 / 0, true, {} }) do
+        rejected(false, invalid)
+    end
+    rejected(false, nil)
+    rejected("false", 10)
+    rejected(nil, 10)
+    trails.initialized = false
+    rejected(false, 10)
+    trails.initialized = true
+    trails.positionState = nil
+    local changed, problem = trails:SetPositionTrailSettings(false, 10)
+    assert(changed == false and type(problem) == "string" and equal(trails.db, before))
+    trails.positionState, trails.savedDataReadOnly = state, true
+    rejected(false, 10)
+    trails.savedDataReadOnly, trails.RefreshPositionPins, trails.RefreshOptions = nil, nil, nil
+    assert(trails:SetPositionTrailSettings(false, 10), "Trail preferences work before the map UI loads")
 end
 
 -- Incoming updates use the actual sender and replace only an older valid position.

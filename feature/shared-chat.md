@@ -4,7 +4,7 @@ Native WoW chat for friends using the same [group key](group.md), faction and re
 
 ## Use
 
-1. Use `/lit` to share a key or join a friend's group. Shared chat joins automatically by default. In `/lit options`, enable **Automatically join shared chat on login** and click **Save chat settings** if needed; alternatively, use `/lit join`.
+1. Use `/lit` to share a key or join a friend's group. Shared chat joins automatically by default. In `/lit options`, enable **Automatically join shared chat on login** if needed; the choice applies and saves immediately. Alternatively, use `/lit join`.
 2. Wait for **Joined**, then use `/lit chat` to type in normal WoW chat.
 
 ## Joining and leaving
@@ -28,6 +28,6 @@ Native password admission depends on WoW's ownership rules. **Joined** confirms 
 - Record build, region, faction and realm/ruleset. Two ungrouped friends should exchange messages across zones, guilds, layers and instances; changing unrelated channel numbers must keep `/lit chat` targeting correctly.
 - Check **LockInTools** and **LockInTools Data** labels in chat prefixes, join/leave notices and addon status, plus **LockInTools** in the `/lit chat` composer header. Click a channel label and send via its `/number`; routing and normal message text must remain correct. Repeat after `/reload` and a group switch, keeping unrelated channel labels unchanged.
 - Reverse join order, transfer ownership, let the owner/everyone leave, then rejoin an empty room. Wrong passwords must fail clearly without retry loops; inspect access before password application.
-- Reload, relog and switch characters without duplicate requests. Addon/native leave must stay paused across zone changes; disabling autojoin must prevent later addon requests.
+- Toggle autojoin in settings and confirm join requests start or stop immediately while confirmed membership is retained. Reopen settings, reload, relog and switch characters to check the saved choice without duplicate requests. Addon/native leave must stay paused across zone changes.
 - Switch groups with both channels attached to multiple chat windows, then leave the group. Old entries must disappear from the channel list and window settings, including a join that completes after the switch. Reload/relog with leftover old addon channels and verify cleanup while retaining the current group and unrelated channels.
 - Check restricted/unavailable APIs and combat transitions for errors. Repeat routing and password checks when moving from beta to a release client.

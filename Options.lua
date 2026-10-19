@@ -56,31 +56,29 @@ local function ApplyGroup(panel)
     addon:RefreshOptions()
 end
 
-local function SaveChatSettings(panel)
-    local success, message = addon:SetChatAutoJoin(panel.autoJoin:GetChecked() and true or false)
-    if not success then
-        SetFeedback(panel, message or "Unable to save chat settings.", true)
-        return
-    end
-
-    SetFeedback(panel, "Chat settings saved.", false)
-    addon:RefreshOptions()
+local function BindPreference(panel, checkbox, getter, setter)
+    checkbox:SetScript("OnClick", function(button)
+        local success, message = setter(addon, button:GetChecked() and true or false)
+        if not success then button:SetChecked(getter()) end
+        SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
+        addon:RefreshOptions()
+    end)
 end
 
-local function SavePositionSettings(panel)
-    local success, message = addon:SetPositionRetention(panel.positionRetention:GetChecked() and true or false)
-    if not success then
-        SetFeedback(panel, message or "Unable to save position settings.", true)
-        return
+local function ApplyTrailLength(panel, finish)
+    if not panel.trailLengthEdited then return end
+    local enabled, savedLength = addon:GetPositionTrailSettings()
+    local length = tonumber(panel.positionTrailLength:GetText())
+    local success, message = true
+    if length ~= savedLength then
+        success, message = addon:SetPositionTrailSettings(enabled, length)
     end
-
-    success, message = addon:SetPositionSharing(panel.positionSharing:GetChecked() and true or false)
-    if not success then
-        SetFeedback(panel, message or "Unable to save position settings.", true)
-        return
+    if finish then
+        panel.trailLengthEdited = nil
+        local _, currentLength = addon:GetPositionTrailSettings()
+        panel.positionTrailLength:SetText(tostring(currentLength))
     end
-
-    SetFeedback(panel, "Position settings saved.", false)
+    SetFeedback(panel, success and "" or (message or "Unable to change the trail length."), not success)
     addon:RefreshOptions()
 end
 
@@ -212,6 +210,7 @@ local function CreateOptionsPanel()
     panel.autoJoin = UI:Checkbox(chat)
     panel.autoJoin:SetPoint("TOPLEFT", 12, -102)
     panel.autoJoin:SetSize(28, 28)
+    BindPreference(panel, panel.autoJoin, function() return addon.db.chat.autoJoin end, addon.SetChatAutoJoin)
     local autoJoinLabel = UI:Label(chat, "Automatically join shared chat on login", 13)
     autoJoinLabel:SetPoint("LEFT", panel.autoJoin, "RIGHT", 2, 0)
 
@@ -219,16 +218,9 @@ local function CreateOptionsPanel()
     panel.status:SetPoint("TOPLEFT", 16, -148)
     panel.status:SetWidth(648)
 
-    panel.save = UI:Button(chat, "Save chat settings", "primary")
-    panel.save:SetSize(148, 32)
-    panel.save:SetPoint("TOPLEFT", 16, -208)
-    panel.save:SetScript("OnClick", function()
-        SaveChatSettings(panel)
-    end)
-
     panel.join = UI:Button(chat, "Join chat")
     panel.join:SetSize(96, 32)
-    panel.join:SetPoint("LEFT", panel.save, "RIGHT", 8, 0)
+    panel.join:SetPoint("TOPLEFT", 16, -208)
     panel.join:SetScript("OnClick", function()
         SetFeedback(panel)
         addon:JoinChatChannel(true)
@@ -257,27 +249,57 @@ local function CreateOptionsPanel()
     positionIntroduction:SetWidth(648)
 
     panel.positionSharing = UI:Checkbox(position)
-    panel.positionSharing:SetPoint("TOPLEFT", 12, -102)
+    panel.positionSharing:SetPoint("TOPLEFT", 12, -94)
     panel.positionSharing:SetSize(28, 28)
+    BindPreference(panel, panel.positionSharing, function() return addon.db.position.sharing end,
+        addon.SetPositionSharing)
     local positionSharingLabel = UI:Label(position, "Enable position sharing", 13)
     positionSharingLabel:SetPoint("LEFT", panel.positionSharing, "RIGHT", 2, 0)
 
     panel.positionRetention = UI:Checkbox(position)
-    panel.positionRetention:SetPoint("TOPLEFT", 12, -138)
+    panel.positionRetention:SetPoint("TOPLEFT", 12, -130)
     panel.positionRetention:SetSize(28, 28)
+    BindPreference(panel, panel.positionRetention, function() return addon.db.position.keepLastKnown end,
+        addon.SetPositionRetention)
     local positionRetentionLabel = UI:Label(position, "Keep last-known positions", 13)
     positionRetentionLabel:SetPoint("LEFT", panel.positionRetention, "RIGHT", 2, 0)
 
-    panel.positionStatus = UI:Label(position, "", 12, "muted")
-    panel.positionStatus:SetPoint("TOPLEFT", 16, -180)
-    panel.positionStatus:SetWidth(648)
+    panel.positionTrails = UI:Checkbox(position)
+    panel.positionTrails:SetPoint("TOPLEFT", 12, -166)
+    panel.positionTrails:SetSize(28, 28)
+    BindPreference(panel, panel.positionTrails, function() return addon:GetPositionTrailSettings() end,
+        function(self, enabled)
+            local _, length = self:GetPositionTrailSettings()
+            return self:SetPositionTrailSettings(enabled, length)
+        end)
+    local positionTrailsLabel = UI:Label(position, "Show movement trails", 13)
+    positionTrailsLabel:SetPoint("LEFT", panel.positionTrails, "RIGHT", 2, 0)
 
-    panel.savePosition = UI:Button(position, "Save position settings", "primary")
-    panel.savePosition:SetSize(184, 32)
-    panel.savePosition:SetPoint("TOPLEFT", 16, -244)
-    panel.savePosition:SetScript("OnClick", function()
-        SavePositionSettings(panel)
+    local trailLengthLabel = UI:Label(position, "Trail length (seconds)", 13, "muted")
+    trailLengthLabel:SetPoint("TOPLEFT", 346, -130)
+    panel.positionTrailLength = UI:EditBox(position)
+    panel.positionTrailLength:SetPoint("TOPLEFT", 346, -152)
+    panel.positionTrailLength:SetSize(84, 32)
+    panel.positionTrailLength:SetAutoFocus(false)
+    panel.positionTrailLength:SetNumeric(true)
+    panel.positionTrailLength:SetScript("OnEscapePressed", function(editBox) editBox:ClearFocus() end)
+    panel.positionTrailLength:SetScript("OnEnterPressed", function(editBox)
+        ApplyTrailLength(panel, true)
+        editBox:ClearFocus()
     end)
+    panel.positionTrailLength:SetScript("OnEditFocusLost", function() ApplyTrailLength(panel, true) end)
+    panel.positionTrailLength:SetScript("OnTextChanged", function(_, userInput)
+        if userInput then
+            panel.trailLengthEdited = true
+            ApplyTrailLength(panel, false)
+        end
+    end)
+    local trailLengthHint = UI:Label(position, "1–30 seconds", 12, "muted")
+    trailLengthHint:SetPoint("LEFT", panel.positionTrailLength, "RIGHT", 12, 0)
+
+    panel.positionStatus = UI:Label(position, "", 12, "muted")
+    panel.positionStatus:SetPoint("TOPLEFT", 16, -206)
+    panel.positionStatus:SetWidth(648)
 
     panel.feedback = UI:Label(panel, "", 13)
     panel.feedback:SetPoint("TOPLEFT", 24, -434)
@@ -288,6 +310,9 @@ local function CreateOptionsPanel()
         if panel.selectedTab == "group" then
             HideSecret(panel, true)
             ResetConfirmation(panel)
+        elseif panel.selectedTab == "position" then
+            ApplyTrailLength(panel, true)
+            panel.positionTrailLength:ClearFocus()
         end
         panel.selectedTab = name
         for category, page in pairs(panel.pages) do
@@ -323,11 +348,17 @@ local function CreateOptionsPanel()
         panel.autoJoin:SetChecked(addon.db.chat.autoJoin)
         panel.positionSharing:SetChecked(addon.db.position.sharing)
         panel.positionRetention:SetChecked(addon.db.position.keepLastKnown)
+        local showTrails, trailLength = addon:GetPositionTrailSettings()
+        panel.positionTrails:SetChecked(showTrails)
+        panel.trailLengthEdited = nil
+        panel.positionTrailLength:SetText(tostring(trailLength))
         SetFeedback(panel)
         addon:RefreshOptions()
     end)
     panel:SetScript("OnHide", function()
         HideSecret(panel, true)
+        ApplyTrailLength(panel, true)
+        panel.positionTrailLength:ClearFocus()
         ResetConfirmation(panel)
         panel:StopMovingOrSizing()
     end)
@@ -348,7 +379,7 @@ function addon:RefreshOptions()
     panel.status:SetText("Status: " .. self:GetChatStatusText())
     panel.positionStatus:SetText("Status: " .. self:GetPositionStatusText())
 
-    -- Status events must preserve the group key and feature preferences being edited.
+    -- Status events must preserve the group key and trail-length text being edited.
     local editable = not self.savedDataReadOnly
     local hasGroup = self:HasGroup()
     panel.secret:SetEnabled(editable)
@@ -357,10 +388,10 @@ function addon:RefreshOptions()
     panel.toggleSecret:SetEnabled(editable)
     panel.leaveGroup:SetEnabled(editable and hasGroup)
     panel.autoJoin:SetEnabled(editable)
-    panel.save:SetEnabled(editable)
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
-    panel.savePosition:SetEnabled(editable)
+    panel.positionTrails:SetEnabled(editable)
+    panel.positionTrailLength:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup)
     panel.leave:SetEnabled(self.ready and hasGroup)
     if not editable then
