@@ -141,6 +141,84 @@ function addon:GetGroupChannelPassword() return self.groupState and self.groupSt
 function addon:GetGroupDataChannelName() return self.groupState and self.groupState.dataChannelName end
 function addon:GetGroupDataChannelPassword() return self.groupState and self.groupState.dataChannelPassword end
 
+local function IsSecret(value)
+    return issecretvalue and issecretvalue(value)
+end
+
+local function ForEachChatFrame(callback)
+    if ChatFrameUtil and type(ChatFrameUtil.ForEachChatFrame) == "function" then
+        ChatFrameUtil.ForEachChatFrame(callback)
+    elseif DEFAULT_CHAT_FRAME then
+        callback(DEFAULT_CHAT_FRAME)
+    end
+end
+
+function addon:IsObsoleteGroupChannel(name)
+    if IsSecret(name) or type(name) ~= "string" or #name ~= 31 then return false end
+    local normalized = name:lower()
+    -- Match the complete generated namespace, never arbitrary LIT-prefixed rooms.
+    if not normalized:match("^lit%x+$") and not normalized:match("^litdata%x+$") then return false end
+    local chat, data = self:GetGroupChannelName(), self:GetGroupDataChannelName()
+    return (not chat or normalized ~= chat:lower()) and (not data or normalized ~= data:lower())
+end
+
+function addon:LeaveGroupChannel(name)
+    if IsSecret(name) or type(name) ~= "string" or name == "" then return end
+    -- Leaving membership alone can retain saved chat-window subscriptions.
+    ForEachChatFrame(function(frame)
+        if type(frame.RemoveChannel) == "function" then pcall(frame.RemoveChannel, frame, name) end
+    end)
+    if type(LeaveChannelByName) == "function" then pcall(LeaveChannelByName, name) end
+end
+
+function addon:CleanupGroupChannels()
+    if not self.ready or self.savedDataReadOnly then return end
+    local obsolete = {}
+    local function collect(name)
+        if self:IsObsoleteGroupChannel(name) then obsolete[name:lower()] = name end
+    end
+    if type(GetChannelList) == "function" then
+        local function collectJoined(...)
+            for index = 2, select("#", ...), 3 do collect(select(index, ...)) end
+        end
+        collectJoined(GetChannelList())
+    end
+    ForEachChatFrame(function(frame)
+        for _, name in pairs(frame.channelList or {}) do collect(name) end
+    end)
+    -- Snapshot first: native leaves can renumber channels and mutate frame lists.
+    for _, name in pairs(obsolete) do self:LeaveGroupChannel(name) end
+end
+
+function addon:InitializeGroupChannelCleanup()
+    if self.groupChannelCleanupFrame then return end
+    local frame = CreateFrame("Frame")
+    self.groupChannelCleanupFrame = frame
+    frame:RegisterEvent("CHAT_MSG_CHANNEL_NOTICE")
+    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    frame:RegisterEvent("UPDATE_CHAT_WINDOWS")
+    frame:SetScript("OnEvent", function(_, event, ...)
+        if not self.ready or self.savedDataReadOnly then return end
+        if event == "CHAT_MSG_CHANNEL_NOTICE" then
+            local reason, name = ..., select(9, ...)
+            if not IsSecret(reason) and (reason == "YOU_JOINED" or reason == "YOU_CHANGED")
+                and self:IsObsoleteGroupChannel(name) then
+                -- An abandoned asynchronous join may finish after the group changes.
+                self:LeaveGroupChannel(name)
+            end
+        elseif event == "UPDATE_CHAT_WINDOWS" then
+            if self.groupChannelCleanupScheduled then return end
+            self.groupChannelCleanupScheduled = true
+            C_Timer.After(0, function()
+                self.groupChannelCleanupScheduled = nil
+                self:CleanupGroupChannels()
+            end)
+        else
+            self:CleanupGroupChannels()
+        end
+    end)
+end
+
 function addon:GetGroupStatusText()
     if self.groupState then return self.groupState.fingerprint end
     if self.invalidGroupSecret then return "Stored group key is invalid. Enter a valid group key." end

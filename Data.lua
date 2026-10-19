@@ -52,6 +52,7 @@ end
 
 function addon:InitializeData()
     if self.dataState then return end
+    self:InitializeGroupChannelCleanup()
     self.dataState = { features = {}, phase = "idle", attempts = 0, generation = 0,
         channelName = self:GetGroupDataChannelName() }
     self.dataFrame = CreateFrame("Frame")
@@ -122,7 +123,7 @@ function addon:OnDataGroupChanged()
     state.phase, state.detail = "idle", nil
     state.attempts, state.pending, state.paused, state.failed = 0, false, false, false
     state.wanted = self:HasGroup() and not self.savedDataReadOnly
-    if previous and type(LeaveChannelByName) == "function" then pcall(LeaveChannelByName, previous) end
+    if previous then self:LeaveGroupChannel(previous) end
     -- Group.lua must finish clearing old feature data before a new connection can dispatch.
     if state.nativeStarted and Wanted(self) then self:ScheduleDataCheck(1) end
     Refresh(self)
@@ -238,7 +239,7 @@ function addon:LeaveDataChannel()
     state.phase, state.detail = "paused", nil
     Disconnect(self)
     local name = self:GetGroupDataChannelName()
-    if name and type(LeaveChannelByName) == "function" then pcall(LeaveChannelByName, name) end
+    if name then self:LeaveGroupChannel(name) end
     Refresh(self)
     return true
 end

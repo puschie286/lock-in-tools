@@ -11,7 +11,7 @@ Native WoW chat for friends using the same [group key](group.md), faction and re
 
 - `/lit join` works with autojoin disabled. `/lit leave` pauses reconnection for this session and keeps the group.
 - Disabling autojoin stops future addon join requests but keeps confirmed membership; WoW may independently restore permanent channels.
-- Changing or leaving the group cancels pending requests and leaves its previous channel, including independently restored membership. Unrelated channels are preserved.
+- Changing or leaving the group cancels pending requests, leaves its previous channels and removes their saved subscriptions from every chat window. Late joins for an old group are left again. Login, world entry and restored chat settings also clean up obsolete names matching the addon's complete generated channel format; the current group's channels and unrelated channels are preserved.
 
 ## Behavior and limits
 
@@ -29,4 +29,5 @@ Native password admission depends on WoW's ownership rules. **Joined** confirms 
 - Check **LockInTools** and **LockInTools Data** labels in chat prefixes, join/leave notices and addon status, plus **LockInTools** in the `/lit chat` composer header. Click a channel label and send via its `/number`; routing and normal message text must remain correct. Repeat after `/reload` and a group switch, keeping unrelated channel labels unchanged.
 - Reverse join order, transfer ownership, let the owner/everyone leave, then rejoin an empty room. Wrong passwords must fail clearly without retry loops; inspect access before password application.
 - Reload, relog and switch characters without duplicate requests. Addon/native leave must stay paused across zone changes; disabling autojoin must prevent later addon requests.
+- Switch groups with both channels attached to multiple chat windows, then leave the group. Old entries must disappear from the channel list and window settings, including a join that completes after the switch. Reload/relog with leftover old addon channels and verify cleanup while retaining the current group and unrelated channels.
 - Check restricted/unavailable APIs and combat transitions for errors. Repeat routing and password checks when moving from beta to a release client.

@@ -264,7 +264,7 @@ function addon:LeaveChatChannel()
     self:SetChatPhase("paused")
     local name = self:GetGroupChannelName()
     if name then
-        LeaveChannelByName(name)
+        self:LeaveGroupChannel(name)
     end
 end
 
@@ -307,8 +307,9 @@ function addon:OnGroupChanged(previousChannelName)
     -- Leaving/changing the addon group disconnects its transport, even if WoW
     -- restored membership independently. Unrelated custom channels are retained.
     if previousChannelName then
-        LeaveChannelByName(previousChannelName)
+        self:LeaveGroupChannel(previousChannelName)
     end
+    self:CleanupGroupChannels()
     local state = self.chatState
     state.attempts, state.pending, state.paused, state.failed = 0, false, false, false
     state.ownedName, state.passwordSet = nil, false
@@ -349,6 +350,7 @@ function addon:OpenChatInput()
 end
 
 function addon:OnChatLogin()
+    self:CleanupGroupChannels()
     local state = self.chatState
     state.wanted = self.db.chat.autoJoin and self:HasGroup()
     if state.wanted then
@@ -362,6 +364,7 @@ end
 function addon:InitializeChat()
     self.chatState = { phase = "idle", attempts = 0, generation = 0 }
     self:InitializeChatDisplay()
+    self:InitializeGroupChannelCleanup()
     self.chatFrame = CreateFrame("Frame")
     self.chatFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
     self.chatFrame:RegisterEvent("CHANNEL_UI_UPDATE")

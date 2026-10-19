@@ -6,7 +6,7 @@ local function loadAddon(savedVariables, loggedIn)
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
         dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, prefixes = {},
-        resolverCalls = {}, callbacks = {}, hookCalls = {},
+        resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
         optionsOpened = 0, welcomeOpened = 0,
     }
     local function channelByName(name)
@@ -44,15 +44,30 @@ local function loadAddon(savedVariables, loggedIn)
         end
         return box
     end
-    local editBox = newEditBox()
-    local chatFrame = { channelList = {}, editBox = editBox }
-    function chatFrame:AddMessage(message) messages[#messages + 1] = message end
-    function chatFrame:GetID() return 1 end
-    function chatFrame:GetEditBox() return self.editBox end
-    function chatFrame:AddChannel(name)
-        world.addCalls[#world.addCalls + 1] = name
-        self.channelList[#self.channelList + 1] = name
+    local function newChatFrame()
+        local frame = { channelList = {}, zoneChannelList = {}, editBox = newEditBox(), id = #world.chatFrames + 1 }
+        function frame:AddMessage(message) messages[#messages + 1] = message end
+        function frame:GetID() return self.id end
+        function frame:GetEditBox() return self.editBox end
+        function frame:AddChannel(name)
+            world.addCalls[#world.addCalls + 1] = name
+            self.channelList[#self.channelList + 1] = name
+            self.zoneChannelList[#self.zoneChannelList + 1] = 0
+        end
+        function frame:RemoveChannel(name)
+            world.removeCalls[#world.removeCalls + 1] = { frame = self, name = name }
+            for index = #self.channelList, 1, -1 do
+                if self.channelList[index]:lower() == name:lower() then
+                    table.remove(self.channelList, index)
+                    table.remove(self.zoneChannelList, index)
+                end
+            end
+        end
+        world.chatFrames[#world.chatFrames + 1] = frame
+        return frame
     end
+    local chatFrame = newChatFrame()
+    local editBox = chatFrame.editBox
     local function openChat(text, frame)
         world.openedChat[#world.openedChat + 1] = { text = text, frame = frame }
         return editBox
@@ -86,7 +101,9 @@ local function loadAddon(savedVariables, loggedIn)
         ChatFrameUtil = {
             ChooseBoxForSend = function() return editBox end,
             OpenChat = openChat,
-            ForEachChatFrame = function(callback) callback(chatFrame) end,
+            ForEachChatFrame = function(callback)
+                for _, frame in ipairs(world.chatFrames) do callback(frame) end
+            end,
             ResolvePrefixedChannelName = function(...)
                 local arguments = capture(...)
                 world.resolverCalls[#world.resolverCalls + 1] = arguments
@@ -116,6 +133,17 @@ local function loadAddon(savedVariables, loggedIn)
             local channel = channelByName(identifier)
             if channel then return channel.id, channel.name end
             return 0, nil
+        end,
+        GetChannelList = function()
+            local channels, result = {}, {}
+            for _, channel in pairs(world.channels) do channels[#channels + 1] = channel end
+            table.sort(channels, function(first, second) return first.id < second.id end)
+            for _, channel in ipairs(channels) do
+                result[#result + 1] = channel.id
+                result[#result + 1] = channel.name
+                result[#result + 1] = false
+            end
+            return unpack(result)
         end,
         JoinPermanentChannel = function(name, password, frameID)
             assert(type(password) == "string" and #password == 31, "every join uses a derived password")
@@ -158,7 +186,7 @@ local function loadAddon(savedVariables, loggedIn)
             end,
         },
         LeaveChannelByName = function(name)
-            local calls = name:match("^LITDATA") and world.dataLeaveCalls or world.leaveCalls
+            local calls = name:lower():match("^litdata") and world.dataLeaveCalls or world.leaveCalls
             calls[#calls + 1] = name
             world.channels[name:lower()] = nil
         end,
@@ -250,6 +278,7 @@ local function loadAddon(savedVariables, loggedIn)
         return "|Hchannel:CHANNEL:" .. id .. "|h[" .. label .. "]|h " .. text
     end
     world.newEditBox = newEditBox
+    function world:newChatFrame() return newChatFrame() end
     world.fire, world.editBox = fire, editBox
     return addon, environment, messages, fire, world
 end
@@ -652,6 +681,154 @@ pendingSwitchWorld:completeJoin(nextRoom, 3)
 pendingSwitchWorld:advance(120)
 assert(#pendingSwitchWorld.joinCalls == 2 and pendingSwitchWorld.joinCalls[1] == room
     and pendingSwitchWorld.joinCalls[2] == nextRoom, "cancel pending retries on group switch")
+
+-- Remove accumulated native memberships and saved chat-window entries at login.
+do
+    local cleanup, _, _, startupFire, startup = loadAddon(settings(SECRET, false), false)
+    startupFire("ADDON_LOADED", "LockInTools")
+    local currentChat, currentData = cleanup:GetGroupChannelName(), cleanup:GetGroupDataChannelName()
+    local obsoleteChat = "lIt" .. string.rep("A", 28)
+    local obsoleteData = "litDATA" .. string.rep("b", 24)
+    local frameOnly = "LIT" .. string.rep("c", 28)
+    local unrelated = { "General", "LITFriends", "LIT" .. string.rep("d", 27),
+        "LITDATA" .. string.rep("e", 25), "LIT" .. string.rep("g", 28) }
+    startup:restore(currentChat:upper(), 2)
+    startup:restore(currentData:lower(), 3)
+    startup:restore(obsoleteChat, 4)
+    startup:restore(obsoleteData, 5)
+    for index, name in ipairs(unrelated) do startup:restore(name, 10 + index) end
+    local primary, secondary = startup.chatFrames[1], startup:newChatFrame()
+    primary:AddChannel(currentChat:upper())
+    primary:AddChannel(obsoleteChat)
+    primary:AddChannel(obsoleteData)
+    secondary:AddChannel(obsoleteChat:lower())
+    secondary:AddChannel(frameOnly)
+    secondary:AddChannel("General")
+    startupFire("PLAYER_LOGIN")
+    assert(not startup.channels[obsoleteChat:lower()] and not startup.channels[obsoleteData:lower()],
+        "login leaves accumulated addon channels, with case-insensitive native names")
+    assert(#primary.channelList == 1 and primary.channelList[1] == currentChat:upper()
+        and #primary.zoneChannelList == 1 and #secondary.channelList == 1
+        and secondary.channelList[1] == "General" and #secondary.zoneChannelList == 1,
+        "cleanup detaches obsolete and frame-only names from every chat window")
+    assert(startup.channels[currentChat:lower()] and startup.channels[currentData:lower()]
+        and #startup.joinCalls == 0 and #startup.dataJoinCalls == 0 and cleanup:IsDataConnected(),
+        "restored current channels survive cleanup with chat autojoin disabled")
+    for _, name in ipairs(unrelated) do
+        assert(startup.channels[name:lower()], "cleanup preserves unrelated names and incomplete namespace lookalikes")
+    end
+    local oldLeaves = #startup.leaveCalls
+    local restoredLater = "LIT" .. string.rep("f", 28)
+    startup:restore(restoredLater, 30)
+    secondary:AddChannel(restoredLater)
+    startupFire("PLAYER_ENTERING_WORLD", false, false)
+    assert(not startup.channels[restoredLater:lower()] and #secondary.channelList == 1
+        and #startup.leaveCalls == oldLeaves + 1, "world entry cleans channels restored after login")
+    startupFire("UPDATE_CHAT_WINDOWS")
+    startupFire("UPDATE_CHAT_WINDOWS")
+    secondary:AddChannel(frameOnly)
+    secondary:AddChannel(currentData)
+    startup:advance(0)
+    assert(#secondary.channelList == 2 and secondary.channelList[1] == "General"
+        and secondary.channelList[2] == currentData and #secondary.zoneChannelList == 2,
+        "deferred window-update cleanup removes old subscriptions restored by native handlers")
+    assert(startup.channels[currentChat:lower()] and startup.channels[currentData:lower()]
+        and cleanup:IsDataConnected(), "window-update cleanup preserves current memberships")
+end
+
+-- Switching and leaving detach both transports from every native chat window.
+do
+    local switching, _, _, _, clock = loadAddon(settings(), false)
+    clock:initialize()
+    clock:advance(1)
+    local oldChat, oldData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
+    clock:completeJoin(oldChat, 2)
+    clock:completeJoin(oldData, 3)
+    local primary, secondary = clock.chatFrames[1], clock:newChatFrame()
+    primary:AddChannel(oldData)
+    primary:AddChannel("General")
+    secondary:AddChannel(oldChat:lower())
+    secondary:AddChannel(oldData:upper())
+    secondary:AddChannel("Unrelated")
+    assert(switching:SetGroupSecret(OTHER_SECRET))
+    assert(not clock.channels[oldChat:lower()] and not clock.channels[oldData:lower()]
+        and #primary.channelList == 1 and primary.channelList[1] == "General"
+        and #secondary.channelList == 1 and secondary.channelList[1] == "Unrelated",
+        "a group switch leaves old memberships and detaches both channel names from every window")
+    local newChat, newData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
+    clock:advance(1)
+    clock:completeJoin(newChat, 4)
+    clock:completeJoin(newData, 5)
+    primary:AddChannel(newData)
+    secondary:AddChannel(newChat)
+    secondary:AddChannel(newData)
+    assert(switching:LeaveGroup())
+    assert(not clock.channels[newChat:lower()] and not clock.channels[newData:lower()]
+        and #primary.channelList == 1 and #primary.zoneChannelList == 1
+        and #secondary.channelList == 1 and #secondary.zoneChannelList == 1,
+        "leaving the group removes both transport entries without damaging other frame channels")
+end
+
+-- A pending old join can finish after a switch or after the group is cleared.
+do
+    local switching, _, _, _, clock = loadAddon(settings(), false)
+    clock:initialize()
+    clock:advance(1)
+    local oldChat, oldData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
+    assert(#clock.joinCalls == 1 and #clock.dataJoinCalls == 1)
+    assert(switching:SetGroupSecret(OTHER_SECRET))
+    local newChat, newData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
+    clock:advance(1)
+    clock:completeJoin(newChat, 4)
+    clock:completeJoin(newData, 5)
+    local primary, secondary = clock.chatFrames[1], clock:newChatFrame()
+    for _, notice in ipairs({ "YOU_JOINED", "YOU_CHANGED" }) do
+        local chatLeaves, dataLeaves = #clock.leaveCalls, #clock.dataLeaveCalls
+        primary:AddChannel(oldChat:upper())
+        secondary:AddChannel(oldData:lower())
+        clock:restore(oldChat:upper(), 6)
+        clock:notice(notice, oldChat:upper(), 6)
+        clock:restore(oldData:lower(), 7)
+        clock:notice(notice, oldData:lower(), 7)
+        assert(not clock.channels[oldChat:lower()] and not clock.channels[oldData:lower()]
+            and #clock.leaveCalls == chatLeaves + 1 and #clock.dataLeaveCalls == dataLeaves + 1,
+            "late and repeated old join notices leave the obsolete native memberships again")
+        assert(#primary.channelList == 1 and primary.channelList[1]:lower() == newChat:lower()
+            and #secondary.channelList == 0 and switching.chatState.phase == "joined"
+            and switching:IsDataConnected() and clock.channels[newChat:lower()] and clock.channels[newData:lower()],
+            "late old joins remove stale window entries without disrupting the current group")
+    end
+    assert(switching:LeaveGroup())
+    primary:AddChannel(newChat)
+    secondary:AddChannel(newData)
+    clock:completeJoin(newChat, 4)
+    clock:completeJoin(newData, 5)
+    assert(not clock.channels[newChat:lower()] and not clock.channels[newData:lower()]
+        and #primary.channelList == 0 and #secondary.channelList == 0 and not switching:IsDataConnected(),
+        "late native joins are still left when no group remains configured")
+end
+
+-- Manual transport leaves remove their own entries and preserve the other route.
+do
+    local leaving, _, _, _, clock = loadAddon(settings(), false)
+    clock:initialize()
+    clock:advance(1)
+    local chat, data = leaving:GetGroupChannelName(), leaving:GetGroupDataChannelName()
+    clock:completeJoin(chat, 2)
+    clock:completeJoin(data, 3)
+    local primary, secondary = clock.chatFrames[1], clock:newChatFrame()
+    primary:AddChannel(data)
+    secondary:AddChannel(chat)
+    secondary:AddChannel(data)
+    leaving:LeaveChatChannel()
+    assert(#primary.channelList == 1 and primary.channelList[1] == data and #secondary.channelList == 1
+        and secondary.channelList[1] == data and leaving:IsDataConnected(),
+        "manual chat leave removes saved chat-window entries while data stays connected")
+    assert(leaving:LeaveDataChannel())
+    assert(#primary.channelList == 0 and #secondary.channelList == 0,
+        "manual data leave removes its native window entries too")
+end
+
 local _, _, _, _, unanswered = loadAddon(settings(), false)
 unanswered:initialize()
 unanswered:advance(300)
