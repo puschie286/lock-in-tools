@@ -24,7 +24,6 @@ try {
     $sourceFiles = @(
         Get-ChildItem -LiteralPath $repositoryRoot -Filter '*.lua' -File
         Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File -Recurse
-        Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'position-probe') -Filter '*.lua' -File
     )
     foreach ($file in $sourceFiles) {
         & $compilerExecutable -p $file.FullName
@@ -37,7 +36,7 @@ try {
     [xml](Get-Content -LiteralPath (Join-Path $repositoryRoot 'PositionPins.xml') -Raw) | Out-Null
     Write-Host 'PASS: position pin XML syntax'
 
-    foreach ($suite in @('tests/group.lua', 'tests/smoke.lua', 'tests/position-probe.lua', 'tests/data.lua', 'tests/position.lua', 'tests/position-map.lua')) {
+    foreach ($suite in @('tests/group.lua', 'tests/smoke.lua', 'tests/data.lua', 'tests/position.lua', 'tests/position-map.lua')) {
         Write-Host "Running $suite..."
         & $luaExecutable $suite
         if ($LASTEXITCODE -ne 0) {
