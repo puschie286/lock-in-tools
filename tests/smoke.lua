@@ -11,7 +11,7 @@ local function loadAddon(savedVariables, loggedIn)
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
         dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, prefixes = {},
         resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
-        optionsOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
+        optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
     }
     local function channelByName(name)
@@ -295,7 +295,15 @@ local function loadAddon(savedVariables, loggedIn)
         chunk("LockInTools", addon)
     end
     addon.OpenOptions = function() world.optionsOpened = world.optionsOpened + 1 end
-    addon.OpenWelcome = function() world.welcomeOpened = world.welcomeOpened + 1 end
+    addon.OpenContent = function() world.contentOpened = world.contentOpened + 1 end
+    addon.OpenOverview = function(self)
+        world.overviewOpened = world.overviewOpened + 1
+        self:OpenContent()
+    end
+    addon.OpenWelcome = function(self)
+        world.welcomeOpened = world.welcomeOpened + 1
+        self:OpenContent()
+    end
     addon.RefreshOptions = function() end
     local function fire(event, ...)
         local count = #frames
@@ -397,17 +405,19 @@ do
     entryEvent("PLAYER_LOGIN")
     entry:InitializeMinimapButton()
     assert(entryWorld.minimapButtonCreations == 1 and #api.Minimap.hooks == 1
-        and not entry.optionsPanel and not entry.welcomePanel and not entry.db.minimap,
+        and not entry.optionsPanel and not entry.contentPanel and not entry.welcomePanel and not entry.db.minimap,
         "repeated login and initialization reuse the button without building windows or saving defaults")
     button:Click("LeftButton")
     button:Click("RightButton")
     button:Click("MiddleButton")
-    assert(entryWorld.optionsOpened == 1 and entryWorld.welcomeOpened == 1,
-        "left and right clicks open their windows while other clicks do nothing")
+    assert(entryWorld.contentOpened == 1 and entryWorld.optionsOpened == 1
+        and entryWorld.overviewOpened == 0 and entryWorld.welcomeOpened == 0,
+        "left-click opens Content and right-click opens Settings while other clicks do nothing")
     button.scripts.OnEnter(button)
     assert(api.GameTooltip.shown and api.GameTooltip.owner == button and api.GameTooltip.anchor == "ANCHOR_LEFT"
-        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 3,
-        "hover explains the minimap actions")
+        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 2
+        and api.GameTooltip.lines[1] == "Left-click: Content" and api.GameTooltip.lines[2] == "Right-click: Settings",
+        "hover labels the two screen shortcuts without a drag note")
     button.scripts.OnLeave(button)
     assert(not api.GameTooltip.shown)
 
@@ -426,7 +436,7 @@ do
     button.scripts.OnDragStop(button)
     assert(not button.scripts.OnUpdate and near(entry.db.minimap.angle, 45)
         and entryWorld.cursorReads == cursorReads
-        and entryWorld.optionsOpened == 1 and entryWorld.welcomeOpened == 1,
+        and entryWorld.contentOpened == 1 and entryWorld.optionsOpened == 1 and entryWorld.welcomeOpened == 0,
         "drag stop saves the last displayed angle without a cursor resample or opening a window")
     api.Minimap:SetSize(200, 160)
     assert(at(button, api.Minimap, 108 / math.sqrt(2), 88 / math.sqrt(2)),
@@ -496,7 +506,7 @@ do
     readOnlyButton.scripts.OnDragStart(readOnlyButton)
     readOnlyButton.scripts.OnUpdate(readOnlyButton)
     readOnlyButton.scripts.OnDragStop(readOnlyButton)
-    assert(readOnlyWorld.optionsOpened == 1 and readOnlyWorld.welcomeOpened == 1
+    assert(readOnlyWorld.contentOpened == 1 and readOnlyWorld.optionsOpened == 1 and readOnlyWorld.welcomeOpened == 0
         and at(readOnlyButton, readOnlyApi.Minimap, 78, 0)
         and readOnlyApi.LockInToolsDB == futureSettings and futureSettings.minimap == originalMinimap
         and originalMinimap.angle == 120 and originalMinimap.futureField == "keep"
@@ -516,17 +526,22 @@ assert(addon.db.schemaVersion == 3 and addon.db.showWelcome == true)
 assert(addon.db.chat.autoJoin == true and not addon:HasGroup())
 fire("PLAYER_LOGIN")
 assert(addon.ready and #messages == 1, "announce once at login")
-assert(world.welcomeOpened == 1, "show initial welcome after login when no group is configured")
+assert(world.contentOpened == 1 and world.welcomeOpened == 0,
+    "show Content after login when initial setup is enabled and no group is configured")
 fire("PLAYER_LOGIN")
-assert(#messages == 1 and world.welcomeOpened == 1, "do not repeat welcome on duplicate login events")
+assert(#messages == 1 and world.contentOpened == 1, "do not repeat Content on duplicate login events")
 world:advance(30)
 assert(#world.joinCalls == 0 and #world.dataJoinCalls == 0,
     "an unconfigured group must not join a channel")
 local command = environment.SlashCmdList.LOCKINTOOLS
 command("")
-assert(world.welcomeOpened == 2, "bare /lit opens welcome")
+assert(world.contentOpened == 2, "bare /lit opens Content")
 command("welcome")
-assert(world.welcomeOpened == 3, "/lit welcome reopens welcome")
+assert(world.contentOpened == 3 and world.welcomeOpened == 1, "/lit welcome remains a Content compatibility alias")
+command("content")
+assert(world.contentOpened == 4, "/lit content opens Content")
+command("overview")
+assert(world.contentOpened == 5 and world.overviewOpened == 1, "/lit overview opens Content's Overview")
 command("options")
 assert(world.optionsOpened == 1, "/lit options opens feature settings")
 local messageStart = #messages + 1
@@ -548,7 +563,7 @@ local reloaded, reloadedEnvironment, reloadedMessages, reloadEvent, reloadWorld 
 reloadEvent("ADDON_LOADED", "LockInTools")
 assert(reloaded.ready and reloadedEnvironment.LockInToolsDB == persisted)
 assert(not reloaded.db.showWelcome and #reloadedMessages == 0 and reloaded.db.futureField.keep)
-assert(reloadWorld.welcomeOpened == 0, "configured groups do not reopen welcome at login")
+assert(reloadWorld.contentOpened == 0, "configured groups do not reopen Content at login")
 assert(reloaded:GetGroupSecret() == SECRET, "retain group across reload")
 assert(reloaded:GetGroupFingerprint() == addon:GetGroupFingerprint())
 assert(reloaded:GetGroupChannelName() == addon:GetGroupChannelName())
@@ -564,7 +579,7 @@ for _, legacy in ipairs({
     migrationWorld:initialize()
     migrationWorld:advance(30)
     assert(migrated.db.schemaVersion == 3 and migrated.db.showWelcome == false)
-    assert(migrationWorld.welcomeOpened == 0, "disabled welcome stays disabled during migration")
+    assert(migrationWorld.contentOpened == 0, "disabled initial Content stays disabled during migration")
     assert(not migrated:HasGroup() and #migrationWorld.joinCalls == 0,
         "migration does not reinterpret a legacy channel name as a group secret")
 end
@@ -578,7 +593,7 @@ assert(not olderAddon:LeaveGroup() and olderAddon.savedDataReadOnly)
 assert(olderEnvironment.LockInToolsDB == newer and newer.schemaVersion == 4)
 assert(not newer.showWelcome and newer.important == "keep" and newer.group.secret == SECRET)
 assert(newer.chat.autoJoin == false)
-assert(olderWorld.welcomeOpened == 0, "read-only saved data does not trigger initial setup")
+assert(olderWorld.contentOpened == 0, "read-only saved data does not trigger initial setup")
 assert(#olderWorld.joinCalls == 0 and #olderWorld.dataJoinCalls == 0,
     "read-only startup does not join either group channel")
 for _, damaged in ipairs({ false, "invalid", { schemaVersion = "bad", showWelcome = "bad", chat = "bad" } }) do
@@ -1341,11 +1356,16 @@ local function loadOptions(uiAddon, uiEnvironment)
             for _, callback in ipairs(widget.hooks[script] or {}) do callback(...) end
         end
     end
-    for _, name in ipairs({ "SetPoint", "SetAllPoints", "SetFrameStrata", "SetClampedToScreen",
-        "SetMovable", "EnableMouse", "RegisterForDrag", "StartMoving", "StopMovingOrSizing",
+    for _, name in ipairs({ "SetAllPoints", "SetFrameStrata", "SetClampedToScreen",
+        "SetMovable", "EnableMouse", "RegisterForDrag",
         "SetJustifyH", "SetAutoFocus", "SetTextInsets", "SetMotionScriptsWhileDisabled", "Raise" }) do
         methods[name] = function() end
     end
+    function methods:SetPoint(...) self.point = { ... } end
+    function methods:GetPoint() if self.point then return unpack(self.point) end end
+    function methods:ClearAllPoints() self.point = nil end
+    function methods:StartMoving() self.moving = true end
+    function methods:StopMovingOrSizing() self.moving = false end
     function methods:SetSize(width, height) self.width, self.height = width, height end
     function methods:SetWidth(width) self.width = width end
     function methods:SetHeight(height) self.height = height end
@@ -1421,7 +1441,11 @@ local function loadOptions(uiAddon, uiEnvironment)
         table.insert(self.hooks[script], callback)
         updateScript(self, script)
     end
-    function methods:CreateFontString() return makeWidget() end
+    function methods:CreateFontString()
+        local fontString = makeWidget()
+        fontString.parent = self
+        return fontString
+    end
     function methods:CreateTexture()
         local texture = makeWidget()
         texture.parent = self
@@ -1705,6 +1729,14 @@ assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, tr
 readOnly.optionsPanel.tabs.chat:Click()
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true)
     and not readOnly.optionsPanel.autoJoin:IsEnabled(), "category changes retain the read-only notice and disabled edits")
+readOnly.optionsPanel.content:Click()
+assert(readOnly.contentPanel.pages.overview:IsVisible() and not readOnly.optionsPanel:IsShown()
+    and readOnly.contentPanel.feedback:GetText():find("Update LockInTools", 1, true),
+    "Content retains the newer-schema read-only notice")
+readOnly.contentPanel.options:Click()
+assert(readOnly.optionsPanel.selectedTab == "chat" and not readOnly.optionsPanel.autoJoin:IsEnabled()
+    and readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true),
+    "returning to Settings restores its page without enabling read-only edits")
 
 -- Programmatic refreshes never save preferences or recursively apply normalized trail text.
 do
@@ -1783,90 +1815,165 @@ do
         and options.feedback.color[1] == 1, "read-only rejection also preserves the saved trail length")
 end
 
--- Options use one category window and navigate back to the same welcome window.
+-- Content and Settings are separate lazy windows with settings-only key management.
 do
-    local navigation, navigationEnvironment, _, _, navigationWorld = loadAddon(settings(SECRET, false), false)
+    local navigation, api, _, _, navigationWorld = loadAddon(settings(SECRET, false), false)
     navigationWorld:initialize()
-    loadOptions(navigation, navigationEnvironment)
-    local command = navigationEnvironment.SlashCmdList.LOCKINTOOLS
+    loadOptions(navigation, api)
+    local command = api.SlashCmdList.LOCKINTOOLS
+    local function positioned(window, x, y)
+        local point = window.point
+        return point and point[1] == "TOPLEFT" and point[2] == api.UIParent
+            and point[3] == "TOPLEFT" and point[4] == x and point[5] == y
+    end
     command("options")
     local options = navigation.optionsPanel
+    assert(options and options:IsVisible() and not navigation.contentPanel and not navigation.welcomePanel,
+        "opening Settings lazily creates only its own window")
     assert(options.selectedTab == "group" and options.tabs.group.themeTab.selected
         and not options.tabs.chat.themeTab.selected and options.pages.group:IsVisible()
-        and not options.pages.chat:IsVisible() and not options.pages.position:IsVisible(),
-        "options initially show only the group category")
-    assert(options.welcome:GetText() == "Back to welcome", "options provide an explicit return to welcome")
+        and not options.pages.chat:IsVisible() and not options.pages.position:IsVisible()
+        and not options.tabs.overview and not options.pages.overview
+        and not options.screenTabs and not options.selectedScreen and not options.SelectScreen,
+        "Settings contains Group, Shared chat and Shared positions without Content navigation tabs")
+    local settingsPages = 0
+    for _, page in pairs(options.pages) do
+        settingsPages = settingsPages + 1
+        assert(page.point[1] == "TOPLEFT" and page.point[3] == -116
+            and -page.point[3] + page:GetHeight() == options:GetHeight() - 20,
+            "every Settings page fills the available height with a small bottom margin")
+    end
+    assert(settingsPages == 3 and options.content:GetText() == "Content"
+        and options.content.point[1] == "TOPRIGHT" and options.content.point[3] == -12
+        and options.content:GetHeight() == 32 and options.feedback.parent == options.pages.group
+        and options.feedback.point[1] == "BOTTOMLEFT",
+        "Settings has exactly three pages and its Content switch in the header")
     options.secret:UserInput(OTHER_SECRET)
     options.secret:SetFocus()
     options.applyGroup:Click()
     command("options")
     options.tabs.group:Click()
+    options.SelectTab("unknown")
+    navigation:OpenOptions("unknown")
     assert(navigation.optionsPanel == options and options.secret:GetText() == OTHER_SECRET
         and options.applyGroup:GetText() == "Confirm switch" and options.secret.focused,
-        "reopening visible options or choosing the current category preserves pending group edits")
+        "reopening Settings and current or invalid page selections preserve pending group edits")
+    options.toggleSecret:Click()
+    options.selectKey:Click()
+    options:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 42, -70)
+    options.content:Click()
+    local content = navigation.contentPanel
+    assert(content and content ~= options and content:IsVisible() and not options:IsVisible()
+        and content.selectedTab == "overview" and content.tabs.overview.themeTab.selected
+        and content.pages.overview:IsVisible() and content.options:GetText() == "Settings"
+        and content.options.point[1] == "TOPRIGHT" and content.options.point[3] == -12
+        and content.options:GetHeight() == 32 and content.TitleText:GetText() == "LockInTools"
+        and positioned(content, 42, -70),
+        "Content opens its own Overview window with a header Settings switch and closes Settings")
+    local contentPages = 0
+    for _ in pairs(content.pages) do contentPages = contentPages + 1 end
+    assert(contentPages == 1 and not content.secret and not content.ownSecret and not content.friendSecret
+        and not content.createGroup and not content.joinGroup and not content.selectKey,
+        "Content contains only Overview and no group-key form")
+    assert(options.secret:GetText() == "" and options.secret.password and not options.secret.focused
+        and options.ownSecret:GetText() == "" and not options.ownSecret.focused
+        and options.applyGroup:GetText() == "Use key" and navigation:GetGroupSecret() == SECRET,
+        "opening Content clears hidden Settings key fields, reveal state, focus and switch confirmation")
+    navigation:RefreshOptions()
+    assert(options.ownSecret:GetText() == "", "background status refresh cannot restore a hidden copy field")
+    content.options:Click()
+    assert(options:IsVisible() and not content:IsVisible() and options.selectedTab == "group"
+        and options.ownSecret:GetText() == SECRET,
+        "the Settings button restores the remembered Group page and its saved copy field")
+    options.leaveGroup:Click()
+    options.content:Click()
+    content.options:Click()
+    assert(options.leaveGroup:GetText() == "Leave group" and navigation:GetGroupSecret() == SECRET,
+        "changing windows cancels a pending leave-group confirmation")
+    options.secret:UserInput(OTHER_SECRET)
+    options.secret:SetFocus()
+    options.applyGroup:Click()
     options.tabs.chat:Click()
     assert(options.selectedTab == "chat" and options.pages.chat:IsVisible()
         and not options.pages.group:IsVisible() and not options.pages.position:IsVisible()
-        and options.secret:GetText() == "" and options.secret.password and options.secret.focusCleared
-        and options.applyGroup:GetText() == "Use key" and options.leaveGroup:GetText() == "Leave group"
+        and options.secret:GetText() == "" and options.secret.password and not options.secret.focused
+        and options.ownSecret:GetText() == "" and options.applyGroup:GetText() == "Use key"
         and options.feedback:GetText() == "",
-        "leaving group hides its page and clears key drafts, focus and confirmation")
+        "leaving Group clears copying, drafts, focus and confirmation")
+    navigation:RefreshOptions()
+    assert(options.ownSecret:GetText() == "", "refreshing another settings page cannot reveal the saved key")
     options.autoJoin:Click()
     navigationWorld:completeJoin(navigation:GetGroupChannelName(), 9)
-    assert(options.secret:GetText() == "" and options.autoJoin:GetChecked() and navigation.db.chat.autoJoin,
-        "status updates on another category retain applied preferences and cannot restore keys")
+    assert(options.autoJoin:GetChecked() and navigation.db.chat.autoJoin and options.secret:GetText() == "",
+        "status updates retain applied chat preferences without restoring keys")
     options.tabs.position:Click()
     options.positionSharing:Click()
     options.positionRetention:Click()
     options.positionTrails:Click()
     options.positionTrailLength:UserInput("1")
-    options.tabs.chat:Click()
-    assert(options.autoJoin:GetChecked() and navigation.db.chat.autoJoin,
-        "chat preferences stay applied while visiting another category")
-    options.tabs.position:Click()
-    command("options")
+    options.positionTrailLength:SetFocus()
+    options.positionTrailLength:UserInput("0")
+    options.content:Click()
+    assert(options.positionTrailLength:GetText() == "1" and not options.positionTrailLength.focused
+        and navigation.db.position.trailLength == 1,
+        "changing windows restores an invalid trail draft and clears its focus")
+    content.options:Click()
     assert(options.selectedTab == "position" and options.pages.position:IsVisible()
-        and not options.pages.group:IsVisible() and not options.pages.chat:IsVisible()
         and options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
         and not options.positionTrails:GetChecked() and options.positionTrailLength:GetText() == "1"
         and navigation.db.position.sharing and not navigation.db.position.keepLastKnown
         and not navigation.db.position.showTrails and navigation.db.position.trailLength == 1
-        and navigationEnvironment.namedFrameCreations.LockInToolsOptions == 1,
-        "category changes and repeated options commands retain immediately applied preferences")
-    options.welcome:Click()
-    local welcome = navigation.welcomePanel
-    assert(welcome and welcome:IsVisible() and not options:IsVisible()
-        and welcome.ownSecret:GetText() == SECRET and navigation:GetGroupSecret() == SECRET,
-        "Back to welcome opens the saved key and closes options")
-    welcome.friendSecret:UserInput(OTHER_SECRET)
-    welcome.joinGroup:Click()
-    welcome.options:Click()
-    assert(options:IsVisible() and not welcome:IsVisible() and options.selectedTab == "position"
-        and options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
-        and not options.positionTrails:GetChecked() and options.positionTrailLength:GetText() == "1"
-        and welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == ""
-        and welcome.joinGroup:GetText() == "Join friend",
-        "welcome navigation closes and cleans its form while reusing the selected options category")
-    options.tabs.group:Click()
-    options.leaveGroup:Click()
-    assert(options.leaveGroup:GetText() == "Confirm leave", "leaving a group still requires confirmation")
-    options.toggleSecret:Click()
-    command("welcome")
-    assert(welcome:IsVisible() and not options:IsVisible() and options.secret:GetText() == ""
-        and options.secret.password and options.leaveGroup:GetText() == "Leave group"
-        and navigation:GetGroupSecret() == SECRET,
-        "the welcome command clears options secrets and confirmations while enforcing window exclusivity")
+        and options.feedback.parent == options.pages.position,
+        "Settings remembers its page and all immediately applied preferences")
+    for _, entry in ipairs({ "", "content", "overview", "welcome" }) do
+        command(entry)
+        assert(content:IsVisible() and not options:IsVisible() and content.pages.overview:IsVisible(),
+            "Content commands and the old welcome alias reuse the Content window")
+        command("options")
+        assert(options:IsVisible() and not content:IsVisible() and options.selectedTab == "position",
+            "the options command returns to the remembered Settings page")
+    end
+    navigation:OpenOptions("overview")
+    assert(content:IsVisible() and not options:IsVisible(), "the old Overview options route opens Content")
+    navigation.minimapButton:Click("RightButton")
+    assert(options:IsVisible() and not content:IsVisible() and options.selectedTab == "position",
+        "minimap right-click opens Settings at its remembered page")
+    navigation.minimapButton:Click("LeftButton")
+    assert(content:IsVisible() and not options:IsVisible() and content.selectedTab == "overview",
+        "minimap left-click opens Content with Overview")
+    content.scripts.OnDragStart(content)
+    content:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 85, -45)
+    content.options:Click()
+    assert(positioned(options, 85, -45) and not content.moving,
+        "the header switch follows Content's dragged position and stops its movement")
+    options.scripts.OnDragStart(options)
+    options:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", -130, -90)
+    options.CloseButton:Click()
+    navigation.minimapButton:Click("LeftButton")
+    assert(positioned(content, -130, -90) and not options.moving,
+        "Content follows Settings' last position after dragging and closing Settings")
+    content.scripts.OnDragStart(content)
+    content:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 180, -65)
+    content.CloseButton:Click()
+    navigation.minimapButton:Click("RightButton")
+    assert(positioned(options, 180, -65) and not content.moving,
+        "Settings follows Content's last position after dragging and closing Content")
+    options.scripts.OnDragStart(options)
+    options:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 260, -110)
+    options.scripts.OnDragStop(options)
     command("options")
-    assert(options:IsVisible() and not welcome:IsVisible() and welcome.ownSecret:GetText() == "",
-        "the options command also closes and cleans an existing welcome window")
-    command("")
-    assert(welcome:IsVisible() and not options:IsVisible()
-        and navigationEnvironment.namedFrameCreations.LockInToolsOptions == 1
-        and navigationEnvironment.namedFrameCreations.LockInToolsWelcome == 1,
-        "all navigation paths keep one instance of each window")
+    assert(positioned(options, 260, -110), "reopening the current Settings view does not restore an older position")
+    options.content:Click()
+    command("content")
+    assert(positioned(content, 260, -110), "reopening Content preserves the shared position")
+    assert(api.namedFrameCreations.LockInToolsContent == 1 and api.namedFrameCreations.LockInToolsOptions == 1
+        and not api.namedFrameCreations.LockInToolsWelcome and not navigation.welcomePanel
+        and #api.UISpecialFrames == 2 and contains(api.UISpecialFrames, "LockInToolsContent")
+        and contains(api.UISpecialFrames, "LockInToolsOptions"),
+        "all navigation paths reuse exactly two Escape-closeable windows without an old welcome window")
 end
 
--- Overview reuses category navigation, pages every player and invokes native party actions.
+-- Overview is the Content page, pages every player and invokes native party actions.
 do
     local overview, api, _, _, overviewWorld = loadAddon(settings(SECRET, false), false)
     local invites, requests, grouped, mayInvite = {}, {}, false, true
@@ -1898,19 +2005,27 @@ do
     local command = api.SlashCmdList.LOCKINTOOLS
     command("options")
     local options = overview.optionsPanel
-    assert(options.selectedTab == "group" and not options.pages.overview:IsVisible(),
-        "adding overview preserves the initial Group category")
+    assert(options.selectedTab == "group" and not overview.contentPanel and snapshotCalls == 0,
+        "opening Settings does not activate Content or request an Overview snapshot")
     options.secret:UserInput(OTHER_SECRET)
     options.secret:SetFocus()
     options.applyGroup:Click()
     command("overview")
-    local page = options.overviewPage
-    assert(options.selectedTab == "overview" and page:IsVisible() and snapshotCalls == 1
+    local content = overview.contentPanel
+    local page = content.overviewPage
+    assert(content.selectedTab == "overview" and not options:IsVisible()
+        and page:IsVisible() and page.active and snapshotCalls == 1
         and options.secret:GetText() == "" and not options.secret.focused
         and options.applyGroup:GetText() == "Use key" and overview:GetGroupSecret() == SECRET,
-        "overview command selects its category and clears group-key drafts and confirmation")
+        "overview command opens Content and clears group-key drafts and confirmation")
+    command("overview")
+    command("content")
+    content.tabs.overview:Click()
+    overview:OpenOptions("overview")
+    assert(page.active and page.scripts.OnUpdate and snapshotCalls == 1,
+        "reopening Content or selecting its current Overview page does not repeat activation or snapshots")
     assert(page.summary:GetText():find("11 active", 1, true)
-        and page.pagination:GetText() == "Page 1 / 3" and not page.previous:IsEnabled() and page.next:IsEnabled()
+        and page.pagination:GetText() == "Page 1 / 2" and not page.previous:IsEnabled() and page.next:IsEnabled()
         and page.rows[1].name:GetText():find("(you)", 1, true),
         "overview includes the local character and paginates more than ten known players")
     assert(page.rows[2].name:GetText() == "Alpha-TestRealm" and page.rows[2].level:GetText() == "21"
@@ -1930,22 +2045,21 @@ do
     page.rows[2].invite:Click()
     page.rows[3].request:Click()
     assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and #requests == 1 and requests[1] == "Bravo-TestRealm"
-        and options.feedback:GetText():find("invitation notices", 1, true),
+        and content.feedback:GetText():find("invitation notices", 1, true),
         "overview clicks invoke the real guarded native actions with complete names")
     mayInvite = false
     page.rows[2].invite:Click()
     assert(#invites == 1 and not page.rows[2].invite:IsEnabled()
-        and options.feedback:GetText() == "You cannot invite players right now.",
+        and content.feedback:GetText() == "You cannot invite players right now.",
         "an enabled stale row cannot bypass the action-time permission check")
     mayInvite = true
     overview:RefreshOverview()
     page.next:Click()
-    assert(page.rows[1].playerID == "delta-testrealm" and page.pagination:GetText() == "Page 2 / 3")
-    page.next:Click()
-    assert(page.rows[1].playerID == "hotel-testrealm" and not page.rows[4]:IsShown()
+    assert(#page.rows == 6 and page.rows[1].playerID == "foxtrot-testrealm"
+        and page.pagination:GetText() == "Page 2 / 2" and page.rows[5].playerID == "juliet-testrealm"
+        and not page.rows[6]:IsShown()
         and not page.next:IsEnabled() and page.previous:IsEnabled(),
-        "pagination exposes all players and hides unused pooled rows")
-    page.previous:Click()
+        "full-height Overview pages six players at a time and hides unused pooled rows")
     page.previous:Click()
     overviewWorld:advance(60)
     assert(page.scripts.OnUpdate, "only the active overview page installs an age refresh")
@@ -1953,17 +2067,27 @@ do
     assert(page.rows[2].position:GetText():find("3m ago", 1, true)
         and page.rows[2].seen:GetText():find("1m ago", 1, true) and snapshotCalls == 1,
         "visible age updates do not trigger repeated roster snapshots")
-    options.CloseButton:Click()
-    assert(not page.active and not page.scripts.OnUpdate, "closing options stops live overview work")
+    content.CloseButton:Click()
+    assert(not page.active and not page.scripts.OnUpdate, "closing Content stops live overview work")
     command("options")
-    assert(options.selectedTab == "overview" and page.active and snapshotCalls == 2,
-        "reopening options restores overview and requests one bounded snapshot")
+    assert(options.selectedTab == "group"
+        and options.pages.group:IsVisible() and not page.active and not page.scripts.OnUpdate
+        and snapshotCalls == 1,
+        "opening Settings does not reactivate the hidden Content page")
+    options.content:Click()
+    assert(content.selectedTab == "overview" and page.active and snapshotCalls == 2,
+        "returning to Content reactivates Overview with one bounded snapshot")
+    content.options:Click()
     options.tabs.chat:Click()
-    assert(not page.active and not page.scripts.OnUpdate)
-    command("overview")
-    assert(snapshotCalls == 3 and options.selectedTab == "overview")
+    assert(options.selectedTab == "chat"
+        and not page.active and not page.scripts.OnUpdate,
+        "opening Settings deactivates Overview and stops its age updates")
     overview:OpenOptions("unknown")
-    assert(options.selectedTab == "overview", "invalid direct category names preserve the selected page")
+    assert(options.selectedTab == "chat" and options.pages.chat:IsVisible() and snapshotCalls == 2,
+        "invalid settings page names preserve the selected page without activating Content")
+    command("overview")
+    assert(snapshotCalls == 3 and content.selectedTab == "overview" and content:IsVisible()
+        and not options:IsVisible())
     page.next:Click()
     positions, overview.rosterState.peers = {}, {}
     overview:RefreshOverview()
@@ -1975,209 +2099,224 @@ do
         "leaving the global group clears the overview while it remains open")
 end
 
--- Welcome creates one persisted key and keeps copying separate from joining a friend.
+-- Initial Content setup creates one saved key; copying and friend import live only in Settings > Group.
 do
-    local initial, initialEnvironment, initialMessages, _, initialWorld = loadAddon(nil, false)
+    local initial, api, initialMessages, _, initialWorld = loadAddon(nil, false)
     local generatedCalls = 0
-    initialEnvironment.math = setmetatable({ random = function(_, maximum)
+    api.math = setmetatable({ random = function(_, maximum)
         generatedCalls = generatedCalls + 1
         return maximum == 64 and 48 or 4827
     end }, { __index = math })
-    loadOptions(initial, initialEnvironment)
+    loadOptions(initial, api)
     initialWorld:initialize()
-    local welcome = initial.welcomePanel
+    local content = initial.contentPanel
     local initialKey = "otter-4827"
     local initialRoom = initial:GetGroupChannelName()
-    assert(welcome and welcome:IsShown() and initial.optionsPanel == nil,
-        "first login opens welcome without constructing feature settings")
+    assert(content and content:IsShown() and not initial.optionsPanel and not initial.welcomePanel
+        and not content.ownSecret and not content.friendSecret,
+        "first login opens only Content with no key-sharing form")
     assert(initial:GetGroupSecret() == initialKey and initial.db.group.secret == initialKey
-        and generatedCalls == 2, "welcome generates and saves one copyable group key")
-    assert(welcome.ownSecret:GetText() == initialKey and not welcome.ownSecret.password,
-        "welcome visibly displays the persisted key")
+        and generatedCalls == 2, "initial Content setup generates and saves one group key")
     assert(#initialWorld.joinCalls == 1 and initialWorld.joinCalls[1] == initialRoom,
         "initial group creation uses normal chat autojoin once")
     initialWorld.fire("PLAYER_LOGIN")
     assert(generatedCalls == 2 and #initialWorld.joinCalls == 1,
         "duplicate login does not regenerate the key or request another join")
-    assert(contains(initialEnvironment.UISpecialFrames, "LockInToolsWelcome"),
-        "Escape can close the welcome screen")
-    local unfocusedPaints = welcome.ownSecret.texturePaints
-    welcome.ownSecret:SetFocus()
-    assert(welcome.ownSecret.highlighted and welcome.ownSecret.texturePaints > unfocusedPaints,
-        "focusing the saved key keeps both copy highlighting and the native focus outline")
-    welcome.ownSecret:ClearFocus()
-    welcome.selectKey:Click()
-    assert(welcome.ownSecret.focused and welcome.ownSecret.highlighted,
-        "select key focuses and highlights the visible key for copying")
-    welcome.ownSecret:UserInput("accidental-edit")
-    assert(welcome.ownSecret:GetText() == initialKey and initial:GetGroupSecret() == initialKey,
+    content.options:Click()
+    local options = initial.optionsPanel
+    assert(options:IsShown() and not content:IsShown() and options.selectedTab == "group"
+        and options.ownSecret:GetText() == initialKey and not options.ownSecret.password,
+        "Settings > Group displays the saved key for sharing")
+    local unfocusedPaints = options.ownSecret.texturePaints
+    options.ownSecret:SetFocus()
+    assert(options.ownSecret.highlighted and options.ownSecret.texturePaints > unfocusedPaints,
+        "focusing the saved key keeps copy highlighting and the native focus outline")
+    options.ownSecret:ClearFocus()
+    options.selectKey:Click()
+    assert(options.ownSecret.focused and options.ownSecret.highlighted,
+        "Select key focuses and highlights the saved key for copying")
+    options.ownSecret:UserInput("accidental-edit")
+    assert(options.ownSecret:GetText() == initialKey and initial:GetGroupSecret() == initialKey,
         "typing into the copy field cannot change the saved key")
 
-    local restored, restoredEnvironment, _, restoredEvent, restoredWorld = loadAddon(initial.db, true)
-    restoredEnvironment.math = setmetatable({ random = function()
+    local restored, restoredApi, _, restoredEvent, restoredWorld = loadAddon(initial.db, true)
+    restoredApi.math = setmetatable({ random = function()
         error("a persisted key must not be regenerated")
     end }, { __index = math })
-    loadOptions(restored, restoredEnvironment)
+    loadOptions(restored, restoredApi)
     restoredEvent("ADDON_LOADED", "LockInTools")
-    assert(restored.ready and restored.welcomePanel == nil and restored:GetGroupSecret() == initialKey,
+    assert(restored.ready and not restored.contentPanel and not restored.optionsPanel
+        and restored:GetGroupSecret() == initialKey,
         "loading after login preserves the key without reopening completed setup")
-    restoredEnvironment.SlashCmdList.LOCKINTOOLS("welcome")
-    assert(restored.welcomePanel.ownSecret:GetText() == initialKey,
-        "welcome reopens with the same key after reload")
-    restored.welcomePanel.done:Click()
+    restoredApi.SlashCmdList.LOCKINTOOLS("welcome")
+    restored.contentPanel.options:Click()
+    assert(restored.optionsPanel.ownSecret:GetText() == initialKey and not restored.welcomePanel,
+        "the legacy welcome command reaches the same saved key through Content and Settings")
+    restored.optionsPanel.CloseButton:Click()
     restoredWorld:advance(1)
-    assert(restoredWorld.joinCalls[1] == initialRoom, "the saved welcome key restores the same channel")
+    assert(restoredWorld.joinCalls[1] == initialRoom, "the saved setup key restores the same channel")
 
-    welcome.friendSecret:UserInput("   ")
-    welcome.joinGroup:Click()
-    assert(initial:GetGroupSecret() == initialKey and welcome.feedback:GetText() ~= ""
-        and welcome.feedback.color[1] == 1, "blank friend input reports an error without changing groups")
-    welcome.friendSecret:UserInput("invalid--key")
-    welcome.joinGroup:Click()
-    welcome.joinGroup:Click()
+    options.secret:UserInput("   ")
+    options.applyGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and options.feedback:GetText() ~= ""
+        and options.feedback.color[1] == 1, "blank friend input reports an error without changing groups")
+    options.secret:UserInput("invalid--key")
+    options.applyGroup:Click()
+    options.applyGroup:Click()
     assert(initial:GetGroupSecret() == initialKey and #initialWorld.leaveCalls == 0,
-        "an invalid friend's key preserves the current group and its transport")
-    welcome.friendSecret:UserInput("  OTTER-4827  ")
-    welcome.joinGroup:Click()
-    assert(initial:GetGroupSecret() == initialKey and welcome.joinGroup:GetText() == "Join friend"
-        and #initialWorld.leaveCalls == 0 and #initialWorld.joinCalls == 1,
-        "the same canonical key succeeds immediately without switching transport")
-
-    welcome.friendSecret:UserInput("first-friend")
-    welcome.joinGroup:Click()
-    assert(initial:GetGroupSecret() == initialKey and welcome.joinGroup:GetText() == "Confirm switch",
-        "joining a friend requires confirmation before changing every feature's group")
-    welcome.friendSecret:UserInput("other-friend")
-    assert(welcome.joinGroup:GetText() == "Join friend", "editing the key resets switch confirmation")
-    welcome.joinGroup:Click()
-    assert(initial:GetGroupSecret() == initialKey and welcome.joinGroup:GetText() == "Confirm switch")
+        "an invalid friend's key preserves the group and its transport")
+    options.secret:UserInput("  OTTER-4827  ")
+    options.applyGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and options.applyGroup:GetText() == "Use key"
+        and options.secret:GetText() == "" and #initialWorld.leaveCalls == 0 and #initialWorld.joinCalls == 1,
+        "the same canonical friendly key succeeds without confirmation or transport switching")
+    options.secret:UserInput("first-friend")
+    options.applyGroup:Click()
+    assert(initial:GetGroupSecret() == initialKey and options.applyGroup:GetText() == "Confirm switch",
+        "importing a friend's key requires confirmation before changing every feature's group")
+    options.secret:UserInput("other-friend")
+    assert(options.applyGroup:GetText() == "Use key", "editing the friend key resets switch confirmation")
+    options.applyGroup:Click()
     initialWorld:completeJoin(initialRoom, 7)
-    assert(welcome.friendSecret:GetText() == "other-friend"
-        and welcome.joinGroup:GetText() == "Confirm switch" and welcome.ownSecret:GetText() == initialKey,
-        "asynchronous chat updates preserve the friend's draft and confirmation")
-    welcome.joinGroup:Click()
+    assert(options.secret:GetText() == "other-friend" and options.applyGroup:GetText() == "Confirm switch"
+        and options.ownSecret:GetText() == initialKey,
+        "asynchronous chat updates preserve the friend's draft, confirmation and saved copy field")
+    options.applyGroup:Click()
     assert(initial:GetGroupSecret() == "other-friend" and initial.db.group.secret == "other-friend"
-        and welcome.ownSecret:GetText() == "other-friend", "confirmed friend key becomes the displayed saved key")
+        and options.ownSecret:GetText() == "other-friend" and options.secret:GetText() == "",
+        "a confirmed friend key becomes the saved copy field and clears the import draft")
     assert(initialWorld.leaveCalls[1] == initialRoom
         and initialWorld.joinCalls[2] == initial:GetGroupChannelName(),
-        "welcome switches groups through the existing channel lifecycle")
-    assert(initial.optionsPanel == nil, "welcome refreshes without requiring an options panel")
-
+        "Group friend import uses the existing channel lifecycle")
     assert(initial:SetGroupSecret(SECRET))
-    assert(welcome.ownSecret:GetText() == SECRET, "welcome follows group changes made outside its form")
+    assert(options.ownSecret:GetText() == SECRET, "the saved copy field follows external group changes")
     local previousLeaves = #initialWorld.leaveCalls
-    welcome.friendSecret:UserInput("  " .. SECRET:lower() .. "  ")
-    welcome.joinGroup:Click()
+    options.secret:UserInput("  " .. SECRET:lower() .. "  ")
+    options.applyGroup:Click()
     assert(initial:GetGroupSecret() == SECRET and #initialWorld.leaveCalls == previousLeaves
-        and welcome.joinGroup:GetText() == "Join friend", "legacy keys retain canonical same-group behavior")
-    welcome.friendSecret:UserInput(OTHER_SECRET)
-    welcome.joinGroup:Click()
-    welcome.selectKey:Click()
-    welcome.friendSecret:SetFocus()
-    welcome.done:Click()
-    assert(not welcome:IsShown() and welcome.ownSecret:GetText() == ""
-        and welcome.friendSecret:GetText() == "" and welcome.ownSecret.focusCleared
-        and welcome.friendSecret.focusCleared, "closing welcome clears plaintext, drafts and focus")
-    initial:OpenWelcome()
-    assert(initial.welcomePanel == welcome and welcome.ownSecret:GetText() == SECRET
-        and welcome.friendSecret:GetText() == "" and welcome.joinGroup:GetText() == "Join friend"
-        and generatedCalls == 2, "reopening restores the saved key and resets pending confirmation")
+        and options.applyGroup:GetText() == "Use key" and options.secret:GetText() == "",
+        "legacy keys retain canonical same-group behavior without confirmation")
+    options.secret:UserInput(OTHER_SECRET)
+    options.applyGroup:Click()
+    options.selectKey:Click()
+    options.secret:SetFocus()
+    options.CloseButton:Click()
+    assert(not options:IsShown() and options.ownSecret:GetText() == "" and options.secret:GetText() == ""
+        and not options.ownSecret.focused and not options.secret.focused,
+        "closing Settings clears plaintext keys, drafts and focus")
+    initial:OpenOptions()
+    assert(initial.optionsPanel == options and options.ownSecret:GetText() == SECRET
+        and options.secret:GetText() == "" and options.applyGroup:GetText() == "Use key"
+        and generatedCalls == 2, "reopening Group restores only the saved key without regenerating it")
     -- Hiding UIParent fires OnHide while the child's own IsShown flag stays true.
-    welcome.friendSecret:UserInput(OTHER_SECRET)
-    welcome.joinGroup:Click()
-    welcome.scripts.OnHide(welcome)
+    options.secret:UserInput(OTHER_SECRET)
+    options.applyGroup:Click()
+    options.scripts.OnHide(options)
     initial:RefreshOptions()
-    assert(welcome:IsShown() and welcome.ownSecret:GetText() == ""
-        and welcome.friendSecret:GetText() == "" and welcome.joinGroup:GetText() == "Join friend",
+    assert(options:IsShown() and options.ownSecret:GetText() == "" and options.secret:GetText() == ""
+        and options.applyGroup:GetText() == "Use key",
         "hiding the whole interface clears keys and prevents background refresh from restoring them")
-    welcome.scripts.OnShow(welcome)
-    assert(welcome.ownSecret:GetText() == SECRET, "showing the interface restores the saved key")
-    welcome.options:Click()
-    assert(initial.optionsPanel and initial.optionsPanel:IsShown() and not welcome:IsShown(),
-        "the welcome options button opens feature settings")
+    options.scripts.OnShow(options)
+    assert(options.ownSecret:GetText() == SECRET, "showing the interface restores Group's saved copy field")
+    options.tabs.chat:Click()
+    initial:RefreshOptions()
+    assert(options.ownSecret:GetText() == "" and options.secret:GetText() == "",
+        "hidden Group fields stay empty while another settings page is active")
     assert(not contains(initialMessages, initialKey) and not contains(initialMessages, "other-friend")
         and not contains(initialMessages, SECRET) and not contains(initialMessages, OTHER_SECRET),
-        "welcome never prints either person's key to chat")
+        "Content and Group never print either person's key to chat")
 end
 
--- Manual setup respects disabled autojoin; generation failures still allow friend import.
+-- Manual Content setup respects autojoin; Group import remains available after generation failure.
 do
-    local manualWelcome, manualEnvironment, _, _, manualWelcomeWorld = loadAddon(settings("", false), false)
-    loadOptions(manualWelcome, manualEnvironment)
-    manualWelcomeWorld:initialize()
-    assert(manualWelcome.welcomePanel == nil, "welcome off suppresses automatic setup")
-    manualEnvironment.SlashCmdList.LOCKINTOOLS("")
-    assert(manualWelcome:HasGroup() and #manualWelcomeWorld.joinCalls == 0,
-        "manually opening welcome saves a key while respecting disabled autojoin")
-    local manualPanel = manualWelcome.welcomePanel
-    manualPanel.friendSecret:UserInput("manual-friend")
-    manualPanel.joinGroup:Click()
-    manualPanel.joinGroup:Click()
-    assert(manualWelcome:GetGroupSecret() == "manual-friend" and #manualWelcomeWorld.joinCalls == 0
-        and not manualWelcome.db.chat.autoJoin, "friend import preserves feature preferences")
+    local manual, api, _, _, manualWorld = loadAddon(settings("", false), false)
+    loadOptions(manual, api)
+    manualWorld:initialize()
+    assert(not manual.contentPanel and not manual.optionsPanel, "welcome off suppresses automatic Content setup")
+    api.SlashCmdList.LOCKINTOOLS("")
+    assert(manual:HasGroup() and #manualWorld.joinCalls == 0,
+        "manually opening Content saves a key while respecting disabled autojoin")
+    manual.contentPanel.options:Click()
+    local options = manual.optionsPanel
+    options.secret:UserInput("manual-friend")
+    options.applyGroup:Click()
+    options.applyGroup:Click()
+    assert(manual:GetGroupSecret() == "manual-friend" and options.ownSecret:GetText() == "manual-friend"
+        and #manualWorld.joinCalls == 0 and not manual.db.chat.autoJoin,
+        "Group friend import preserves disabled autojoin")
 
-    local failed, failedEnvironment, failedMessages, _, failedWorld = loadAddon(nil, false)
+    local failed, failedApi, failedMessages, _, failedWorld = loadAddon(nil, false)
     local attempts = 0
-    failedEnvironment.math = setmetatable({ random = function()
+    failedApi.math = setmetatable({ random = function()
         attempts = attempts + 1
         error("private generator failure")
     end }, { __index = math })
-    loadOptions(failed, failedEnvironment)
+    loadOptions(failed, failedApi)
     failedWorld:initialize()
-    local failedPanel = failed.welcomePanel
-    assert(failedPanel and failedPanel:IsShown() and not failed:HasGroup()
-        and failed.db.group.secret == "" and failedPanel.ownSecret:GetText() == "",
-        "generation failure leaves saved group data empty")
-    assert(failedPanel.friendSecret:IsEnabled() and failedPanel.joinGroup:IsEnabled()
-        and failedPanel.feedback:GetText() ~= "", "friend import remains available after generation failure")
+    assert(failed.contentPanel and failed.contentPanel:IsShown() and not failed:HasGroup()
+        and failed.db.group.secret == "" and failed.contentPanel.feedback:GetText() ~= "",
+        "initial generation failure leaves Content usable and saved group data empty")
     failed:RefreshOptions()
     assert(attempts == 1, "status refresh does not retry failed key generation")
-    failedPanel.friendSecret:UserInput("friend-4827")
-    failedPanel.joinGroup:Click()
-    assert(failed:GetGroupSecret() == "friend-4827" and failedPanel.ownSecret:GetText() == "friend-4827"
-        and #failedWorld.joinCalls == 1, "a friend's key can be saved immediately when no group exists")
+    failed.contentPanel.options:Click()
+    local failedOptions = failed.optionsPanel
+    assert(failedOptions.secret:IsEnabled() and failedOptions.applyGroup:IsEnabled()
+        and failedOptions.ownSecret:GetText() == "", "Group import remains available after generation failure")
+    failedOptions.createGroup:Click()
+    assert(not failed:HasGroup() and failedOptions.secret:GetText() == "" and failedOptions.feedback:GetText() ~= "",
+        "a failed Group create action preserves saved data and reports a useful error")
+    failedOptions.secret:UserInput("friend-4827")
+    failedOptions.applyGroup:Click()
+    assert(failed:GetGroupSecret() == "friend-4827" and failedOptions.ownSecret:GetText() == "friend-4827"
+        and #failedWorld.joinCalls == 1, "a friend's key saves immediately when no group exists")
     assert(not contains(failedMessages, "private generator failure") and not contains(failedMessages, "friend-4827"))
 end
 
--- Do not replace damaged or newer-schema saved keys while opening welcome.
+-- Content and Group preserve damaged and newer-schema saved data.
 do
     local invalidSettings = settings("damaged secret", false)
     invalidSettings.showWelcome = true
-    local invalid, invalidEnvironment, _, _, invalidWorld = loadAddon(invalidSettings, false)
-    invalidEnvironment.math = setmetatable({ random = function()
+    local invalid, api, _, _, invalidWorld = loadAddon(invalidSettings, false)
+    api.math = setmetatable({ random = function()
         error("damaged stored keys must not be replaced")
     end }, { __index = math })
-    loadOptions(invalid, invalidEnvironment)
+    loadOptions(invalid, api)
     invalidWorld:initialize()
     assert(invalid.invalidGroupSecret and invalid.db.group.secret == "damaged secret"
-        and invalid.welcomePanel.ownSecret:GetText() == "" and #invalidWorld.joinCalls == 0,
-        "welcome preserves an invalid saved key for explicit repair")
-    invalid.welcomePanel.done:Click()
+        and invalid.contentPanel:IsShown() and not invalid.optionsPanel and #invalidWorld.joinCalls == 0,
+        "initial Content preserves an invalid saved key for explicit repair")
+    invalid.contentPanel.options:Click()
+    assert(invalid.optionsPanel.ownSecret:GetText() == "" and invalid.optionsPanel.secret:IsEnabled(),
+        "Group permits explicit repair without exposing the invalid saved key")
+    invalid.optionsPanel.content:Click()
     invalid:OpenWelcome()
-    assert(invalid.db.group.secret == "damaged secret" and invalid.welcomePanel.friendSecret:IsEnabled(),
-        "reopening does not silently replace damaged settings")
+    assert(invalid.db.group.secret == "damaged secret" and not invalid.welcomePanel,
+        "the compatibility alias does not replace damaged settings or create another window")
 
     local futureSettings = { schemaVersion = 4, showWelcome = true, important = "keep",
         group = { secret = SECRET }, chat = { autoJoin = false } }
-    local future, futureEnvironment, _, _, futureWorld = loadAddon(futureSettings, false)
-    futureEnvironment.math = setmetatable({ random = function()
+    local future, futureApi, _, _, futureWorld = loadAddon(futureSettings, false)
+    futureApi.math = setmetatable({ random = function()
         error("read-only preferences must not generate a key")
     end }, { __index = math })
-    loadOptions(future, futureEnvironment)
+    loadOptions(future, futureApi)
     futureWorld:initialize()
-    assert(future.savedDataReadOnly and future.welcomePanel == nil,
-        "newer schemas do not automatically start setup")
+    assert(future.savedDataReadOnly and not future.contentPanel and not future.optionsPanel,
+        "newer schemas do not automatically start Content setup")
     future:OpenWelcome()
-    assert(not future.welcomePanel.friendSecret:IsEnabled() and not future.welcomePanel.joinGroup:IsEnabled()
-        and future.welcomePanel.ownSecret:GetText() == "", "read-only welcome disables saved edits")
-    future.welcomePanel.joinGroup:Click()
-    assert(futureEnvironment.LockInToolsDB == futureSettings and futureSettings.schemaVersion == 4
+    future.contentPanel.options:Click()
+    local options = future.optionsPanel
+    assert(not options.secret:IsEnabled() and not options.applyGroup:IsEnabled()
+        and not options.createGroup:IsEnabled() and options.ownSecret:GetText() == "",
+        "read-only Group disables saved edits and leaves the copy field empty")
+    options.applyGroup:Click()
+    assert(futureApi.LockInToolsDB == futureSettings and futureSettings.schemaVersion == 4
         and futureSettings.group.secret == SECRET and futureSettings.important == "keep"
         and futureSettings.showWelcome and not futureSettings.chat.autoJoin and #futureWorld.joinCalls == 0,
-        "opening read-only welcome leaves the original saved data untouched")
+        "opening read-only Content and Group leaves the original saved data untouched")
 end
 
--- Optional skins must preserve lazy creation and the forms' existing behavior.
+-- Optional skins must preserve lazy Content/Settings creation and Group privacy.
 local function skinFixture()
     local state = { font = "SkinFont-A.ttf", accent = { 0.2, 0.8, 0.4 }, looks = {}, shells = 0, tabs = 0 }
     local skin = {}
@@ -2218,21 +2357,21 @@ do
         registration = callback
     end)
     assert(registrations == 1 and type(registration) == "function"
-        and not disabled.optionsPanel and not disabled.welcomePanel,
+        and not disabled.optionsPanel and not disabled.contentPanel,
         "registering an installed but disabled skin does not construct windows")
     registration(nil)
     registration("unsupported")
     disabledEnvironment.UIParent:SetSize(640, 480)
     disabled:OpenOptions()
-    disabled:OpenWelcome()
-    assert(not disabled.optionsPanel.skinApplied and not disabled.welcomePanel.skinApplied
+    disabled:OpenContent()
+    assert(not disabled.optionsPanel.skinApplied and not disabled.contentPanel.skinApplied
         and disabled.optionsPanel.TitleText.font[1] == "Fonts\\FRIZQT__.TTF"
         and disabled:GetGroupSecret() == SECRET and registrations == 1,
         "disabled or invalid optional skins retain usable native windows and the saved key")
     assert(disabled.optionsPanel.scale > 0 and disabled.optionsPanel.scale < 1
         and disabled.optionsPanel:GetWidth() * disabled.optionsPanel.scale <= disabledEnvironment.UIParent:GetWidth()
         and disabled.optionsPanel:GetHeight() * disabled.optionsPanel.scale <= disabledEnvironment.UIParent:GetHeight()
-        and disabled.welcomePanel:GetHeight() * disabled.welcomePanel.scale <= disabledEnvironment.UIParent:GetHeight(),
+        and disabled.contentPanel:GetHeight() * disabled.contentPanel.scale <= disabledEnvironment.UIParent:GetHeight(),
         "both native windows fit a viewport smaller than their preferred size")
     disabled:OpenOptions()
     disabled.optionsPanel.secret:UserInput(OTHER_SECRET)
@@ -2250,63 +2389,71 @@ end
 do
     local skin, appearance = skinFixture()
     local early, _, earlyMessages = loadSkinnedOptions(function(_, callback) callback(skin) end)
-    assert(not early.optionsPanel and not early.welcomePanel and appearance.shells == 0,
-        "an enabled skin callback before first use preserves lazy windows")
-    early:OpenWelcome()
-    local welcome = early.welcomePanel
-    assert(welcome.skinApplied and welcome.TitleText.font[1] == appearance.font
-        and welcome.TitleText.font[2] == 16
-        and welcome.ownSecret:GetText() == SECRET,
-        "a window created after the skin callback receives its font while preserving heading size")
-    welcome.friendSecret:UserInput(OTHER_SECRET)
-    welcome.joinGroup:Click()
-    welcome.friendSecret:SetFocus()
+    assert(not early.optionsPanel and not early.contentPanel and appearance.shells == 0,
+        "an enabled skin callback before first use preserves both lazy windows")
+    early:OpenContent()
+    local content = early.contentPanel
+    assert(content.skinApplied and content.TitleText.font[1] == appearance.font
+        and content.TitleText.font[2] == 16 and not content.ownSecret,
+        "Content receives the optional font while keeping its heading size and key-free UI")
     appearance.font = "SkinFont-B.ttf"
     appearance.accent = { 0.9, 0.3, 0.6 }
     for _, callback in ipairs(appearance.looks) do callback() end
-    assert(welcome.TitleText.font[1] == appearance.font and welcome.friendSecret.focused
-        and welcome.friendSecret:GetText() == OTHER_SECRET and welcome.joinGroup:GetText() == "Confirm switch"
-        and early:GetGroupSecret() == SECRET,
-        "live appearance updates preserve focus, key drafts and pending confirmation")
-    early:OpenOptions()
+    assert(content.TitleText.font[1] == appearance.font and not early.optionsPanel,
+        "live Content appearance changes preserve lazy Settings creation")
+    content.options:Click()
     local options = early.optionsPanel
     assert(options.skinApplied and options.TitleText.font[1] == appearance.font
         and options.positionSharing:GetCheckedTexture().vertexColor[1] == appearance.accent[1]
         and appearance.shells == 2,
-        "a later-created settings window uses the current font and accent")
+        "later-created Settings uses the current font and accent")
+    options.secret:UserInput(OTHER_SECRET)
+    options.applyGroup:Click()
+    options.secret:SetFocus()
+    appearance.font = "SkinFont-C.ttf"
+    appearance.accent = { 0.4, 0.6, 1 }
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(options.TitleText.font[1] == appearance.font and options.secret.focused
+        and options.secret:GetText() == OTHER_SECRET and options.applyGroup:GetText() == "Confirm switch"
+        and options.ownSecret:GetText() == SECRET and early:GetGroupSecret() == SECRET,
+        "live Settings appearance changes preserve Group focus, saved copy key and pending confirmation")
     options.tabs.position:Click()
     assert(options.tabs.position.skinTabApplied and options.tabs.position.skinTabSelected
         and not options.tabs.group.skinTabSelected and not options.tabs.chat.skinTabSelected,
-        "the optional skin selects exactly the active category tab")
+        "the optional skin selects exactly the active Settings category")
     options.tabs.position.scripts.OnEnter(options.tabs.position)
     options.tabs.position.scripts.OnLeave(options.tabs.position)
     assert(options.tabs.position:GetFontString().alpha == 0,
         "selecting and hovering a skinned tab keeps its replaced native label hidden")
-    appearance.accent = { 0.4, 0.6, 1 }
     for _, callback in ipairs(appearance.looks) do callback() end
     assert(options.positionSharing:GetCheckedTexture().vertexColor[1] == appearance.accent[1]
         and options.positionSharing:GetCheckedTexture().vertexColor[3] == appearance.accent[3]
         and options.selectedTab == "position" and options.pages.position:IsVisible()
         and options.tabs.position.skinTabSelected and not options.tabs.group.skinTabSelected
         and options.tabs.position:GetFontString().alpha == 0,
-        "appearance updates refresh accents while retaining the active category and its skin selection")
-    early:OpenWelcome()
-    welcome.friendSecret:UserInput(OTHER_SECRET)
-    welcome.joinGroup:Click()
-    welcome.CloseButton:Click()
-    assert(not welcome:IsShown() and welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == "",
-        "the styled title-bar close button keeps hidden-key cleanup")
+        "appearance updates retain the Settings page and its skin selection")
+    options.content:Click()
     for _, callback in ipairs(appearance.looks) do callback() end
-    assert(welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == "",
-        "restyling a hidden window never restores cleared keys")
-    early:OpenWelcome()
-    assert(welcome.ownSecret:GetText() == SECRET and welcome.joinGroup:GetText() == "Join friend"
+    assert(content:IsVisible() and not options:IsVisible() and content.pages.overview:IsVisible()
+        and content.tabs.overview.skinTabApplied and content.tabs.overview.skinTabSelected
+        and content.tabs.overview:GetFontString().alpha == 0 and options.ownSecret:GetText() == "",
+        "restyling Content keeps Overview selected and hidden Group keys empty")
+    early:OpenOptions("group")
+    options.secret:UserInput(OTHER_SECRET)
+    options.applyGroup:Click()
+    options.CloseButton:Click()
+    assert(not options:IsShown() and options.ownSecret:GetText() == "" and options.secret:GetText() == "",
+        "the styled Settings close button preserves hidden-key cleanup")
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(options.ownSecret:GetText() == "" and options.secret:GetText() == "",
+        "restyling hidden Settings never restores cleared keys")
+    early:OpenOptions()
+    assert(options.ownSecret:GetText() == SECRET and options.applyGroup:GetText() == "Use key"
         and appearance.shells == 2 and #appearance.looks == 1,
-        "reopening reuses styled windows and clears pending confirmation without repeating skin registration")
+        "reopening reuses both styled windows and resets confirmation without registering the skin again")
     assert(not contains(earlyMessages, SECRET) and not contains(earlyMessages, OTHER_SECRET),
         "skin refresh never prints key fields")
 end
-
 do
     local registration
     local late, _, _, lateWorld = loadSkinnedOptions(function(_, callback) registration = callback end)
@@ -2341,7 +2488,13 @@ do
         and options.selectedTab == "chat" and options.pages.chat:IsVisible()
         and not options.pages.group:IsVisible() and options.tabs.chat.themeTab.selected
         and options.tabs.chat:GetFontString().alpha ~= 0,
-        "a skin without tab-selection support leaves native category navigation usable")
+        "a skin without tab-selection support leaves native Settings categories usable")
+    options.content:Click()
+    local content = partial.contentPanel
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(not content.tabs.overview.skinTabApplied and content.tabs.overview.themeTab.selected
+        and content.tabs.overview:GetFontString().alpha ~= 0 and content.pages.overview:IsVisible(),
+        "a skin without tab-selection support also leaves Content navigation usable")
 end
 
 do
@@ -2355,20 +2508,20 @@ do
         throwing[name] = function() error("optional appearance failure") end
     end
     local resilient, _, resilientMessages = loadSkinnedOptions(function(_, callback) callback(throwing) end)
-    resilient:OpenWelcome()
-    resilient.welcomePanel.friendSecret:UserInput(OTHER_SECRET)
-    resilient.welcomePanel.joinGroup:Click()
-    resilient.welcomePanel.joinGroup:Click()
-    resilient.welcomePanel.CloseButton:Click()
-    assert(resilient:GetGroupSecret() == OTHER_SECRET and not resilient.welcomePanel:IsShown()
-        and resilient.welcomePanel.ownSecret:GetText() == "" and resilient.welcomePanel.friendSecret:GetText() == "",
+    resilient:OpenOptions()
+    resilient.optionsPanel.secret:UserInput(OTHER_SECRET)
+    resilient.optionsPanel.applyGroup:Click()
+    resilient.optionsPanel.applyGroup:Click()
+    resilient.optionsPanel.CloseButton:Click()
+    assert(resilient:GetGroupSecret() == OTHER_SECRET and not resilient.optionsPanel:IsShown()
+        and resilient.optionsPanel.ownSecret:GetText() == "" and resilient.optionsPanel.secret:GetText() == "",
         "throwing skin methods cannot block group confirmation or hidden-key cleanup")
-    assert(resilient.welcomePanel.CloseButton:GetFontString().alpha ~= 0,
+    assert(resilient.optionsPanel.CloseButton:GetFontString().alpha ~= 0,
         "failed close-button skinning keeps the native close symbol visible")
     assert(not contains(resilientMessages, "optional appearance failure") and not contains(resilientMessages, OTHER_SECRET),
         "optional skin errors do not expose internal errors or key contents")
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: startup, migration, minimap button, shared identity, chat/data connections, positions, retries, group lifecycle, themed options and welcome")
+print("PASS: startup, migration, minimap button, shared identity, chat/data connections, positions, retries, group lifecycle, themed Content and Settings")
 

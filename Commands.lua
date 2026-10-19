@@ -1,15 +1,15 @@
 local _, addon = ...
 
 function addon:ShowHelp()
-    self:Print("/lit or /lit welcome - Show your key and connect with friends.")
-    self:Print("/lit options - Open group and feature options.")
+    self:Print("/lit or /lit content - Open Content and your player overview.")
+    self:Print("/lit options - Open Settings for your group and features.")
     self:Print("/lit overview - Show group players and party actions.")
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
     self:Print("/lit data join or /lit data leave - Retry or briefly disconnect shared data; it reconnects automatically.")
     self:Print("/lit status - Show addon and client information.")
-    self:Print("/lit welcome on|off - Enable or disable the login message and initial welcome screen.")
+    self:Print("/lit welcome on|off - Enable or disable the login message and initial Content view.")
 end
 
 function addon:ShowStatus()
@@ -20,7 +20,7 @@ function addon:ShowStatus()
 
     if self.initialized then
         local settingsState = self.savedDataReadOnly and "read-only" or "available"
-        self:Print("Saved settings " .. settingsState .. "; login welcome "
+        self:Print("Saved settings " .. settingsState .. "; initial Content view "
             .. (self.db.showWelcome and "on." or "off."))
         self:Print("Group: " .. self:GetGroupStatusText())
         self:Print("Shared chat: " .. self:GetChatStatusText())
@@ -34,7 +34,9 @@ function addon:HandleCommand(message)
     command = command:lower()
     argument = argument:lower()
 
-    if (command == "" or command == "welcome") and argument == "" then
+    if (command == "" or command == "content") and argument == "" then
+        self:OpenContent()
+    elseif command == "welcome" and argument == "" then
         self:OpenWelcome()
     elseif command == "options" and argument == "" then
         self:OpenOptions()

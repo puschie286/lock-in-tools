@@ -88,7 +88,7 @@ function addon:OnLogin()
     end
 
     if self.db.showWelcome then
-        self:Print("Loaded. Type /lit to connect with friends.")
+        self:Print("Loaded. Type /lit to open Content.")
     end
 
     self:OnChatLogin()
@@ -96,7 +96,7 @@ function addon:OnLogin()
     self:OnPositionLogin()
     self:OnRosterLogin()
     if self.db.showWelcome and not self:HasGroup() and not self.savedDataReadOnly then
-        self:OpenWelcome()
+        self:OpenContent()
     end
 end
 
@@ -112,7 +112,7 @@ function addon:SetShowWelcome(enabled)
     end
 
     self.db.showWelcome = enabled
-    self:Print("Login welcome " .. (enabled and "enabled." or "disabled."))
+    self:Print("Login message and initial Content view " .. (enabled and "enabled." or "disabled."))
 end
 
 addon.frame = CreateFrame("Frame")

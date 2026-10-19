@@ -74,16 +74,15 @@ function addon:InitializeMinimapButton()
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 
     button:SetScript("OnClick", function(_, mouseButton)
-        if mouseButton == "LeftButton" then self:OpenOptions()
-        elseif mouseButton == "RightButton" then self:OpenWelcome() end
+        if mouseButton == "LeftButton" then self:OpenContent()
+        elseif mouseButton == "RightButton" then self:OpenOptions() end
     end)
     button:SetScript("OnEnter", function()
         if button.dragging then return end
         GameTooltip:SetOwner(button, "ANCHOR_LEFT")
         GameTooltip:SetText("LockInTools")
-        GameTooltip:AddLine("Left-click: settings", 1, 1, 1)
-        GameTooltip:AddLine("Right-click: welcome", 1, 1, 1)
-        GameTooltip:AddLine("Drag to move around the minimap", 0.7, 0.7, 0.7)
+        GameTooltip:AddLine("Left-click: Content", 1, 1, 1)
+        GameTooltip:AddLine("Right-click: Settings", 1, 1, 1)
         GameTooltip:Show()
     end)
     button:SetScript("OnLeave", function() GameTooltip:Hide() end)

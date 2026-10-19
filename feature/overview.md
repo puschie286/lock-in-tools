@@ -1,6 +1,6 @@
 # Player overview
 
-Open `/lit overview` or **Overview** in `/lit options` to see your group's discovered characters. Four players appear per page with their name, level, last position, activity and party actions.
+Open `/lit`, `/lit content` or `/lit overview` to see your group's discovered characters on **Content → Overview**. Six players appear per page with their name, level, last position, activity and party actions; page controls sit below the roster. The **Settings** header button opens group and feature preferences.
 
 ## Discovery and optional positions
 
@@ -16,6 +16,7 @@ The roster is a list of locally discovered characters, not every key holder. Dis
 
 ## In-game checks
 
+- Open Overview directly, switch to Settings and back to Content, and check that Settings retains its selected page and only one window is visible.
 - With two clients sharing a key, check discovery and levels while chat and position sharing are off, then enable positions and check their age.
 - Check paging, retained inactive players after reload, and roster clearing after a group change.
 - Check party actions and native confirmations with eligible and unavailable players. Actual delivery, native eligibility and rendering remain unvalidated.

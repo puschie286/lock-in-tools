@@ -1,6 +1,6 @@
 local _, addon = ...
 local UI = addon.Theme
-local ROWS_PER_PAGE = 4
+local ROWS_PER_PAGE = 6
 
 local function Age(stamp, now)
     if type(stamp) ~= "number" then return "age unknown" end
@@ -54,8 +54,11 @@ local function ActionButton(row, panel, label, action, x, width)
 end
 
 function addon:CreateOverviewPage(panel)
-    local page = UI:Section(panel, 20, 116, 680, 300, "Players")
+    local page = UI:Section(panel, 20, 116, 680, 414, "Players")
     panel.pages.overview, panel.overviewPage = page, page
+    panel.feedback = UI:Label(page, "", 13)
+    panel.feedback:SetPoint("TOPLEFT", 16, -345)
+    panel.feedback:SetSize(648, 26)
     page.pageNumber, page.rows = 1, {}
     page.summary = UI:Label(page, "", 12, "muted")
     page.summary:SetPoint("TOPLEFT", 16, -45)
@@ -88,13 +91,13 @@ function addon:CreateOverviewPage(panel)
         page.rows[index] = row
     end
     page.previous = UI:Button(page, "Previous")
-    page.previous:SetPoint("TOPLEFT", 16, -262)
+    page.previous:SetPoint("BOTTOMLEFT", 16, 12)
     page.previous:SetSize(82, 26)
     page.next = UI:Button(page, "Next")
-    page.next:SetPoint("TOPRIGHT", -16, -262)
+    page.next:SetPoint("BOTTOMRIGHT", -16, 12)
     page.next:SetSize(82, 26)
     page.pagination = UI:Label(page, "", 12, "muted")
-    page.pagination:SetPoint("CENTER", page, "TOP", 0, -275)
+    page.pagination:SetPoint("CENTER", page, "BOTTOM", 0, 25)
     page.previous:SetScript("OnClick", function()
         page.pageNumber = page.pageNumber - 1
         addon:RefreshOverview()
@@ -130,7 +133,7 @@ function addon:CreateOverviewPage(panel)
 end
 
 function addon:RefreshOverview()
-    local panel = self.optionsPanel
+    local panel = self.contentPanel
     local page = panel and panel.overviewPage
     if not page or not page:IsVisible() or panel.selectedTab ~= "overview" then return end
     local players, now = self:GetOverviewPlayers(), GetServerTime()
@@ -139,7 +142,7 @@ function addon:RefreshOverview()
     local pages = math.max(1, math.ceil(#players / ROWS_PER_PAGE))
     page.pageNumber = math.max(1, math.min(page.pageNumber, pages))
     if not self:HasGroup() then
-        page.summary:SetText("Choose a group key in Group to see your friends.")
+        page.summary:SetText("Choose a group key in Settings > Group to see your friends.")
     elseif #players == 0 then
         page.summary:SetText("Waiting for players on this realm and faction.")
     else
@@ -168,5 +171,5 @@ function addon:RefreshOverview()
 end
 
 function addon:OpenOverview()
-    self:OpenOptions("overview")
+    self:OpenContent()
 end

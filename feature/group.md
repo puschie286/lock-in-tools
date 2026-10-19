@@ -4,11 +4,11 @@ One account-wide group key connects friends across all LockInTools features. The
 
 ## Setup and management
 
-Open `/lit` for the welcome screen. It creates a key when none is saved; use **Select key** and Ctrl+C to share it. To join a friend, enter their key, choose **Join friend**, then **Confirm switch**. Shared chat joins automatically when autojoin is enabled.
+Open `/lit options` and select **Group** to share or manage your key. Use **Select key** and Ctrl+C to copy the saved key. To join a friend, enter their key, choose **Use key**, then confirm the switch. Shared chat joins automatically when autojoin is enabled.
 
-Use `/lit options` to create, reveal, replace or leave a group. Switching and leaving require confirmation, affect every feature and clear the old group's channels and cached peers. [Leaving chat](shared-chat.md) alone keeps the group. Closing a window clears its displayed key fields without deleting the saved key.
+The same page lets you create, reveal, replace or leave a group. Switching and leaving require confirmation, affect every feature and clear the old group's channels and cached peers. [Leaving chat](shared-chat.md) alone keeps the group. Leaving Group or closing Settings clears displayed key fields and drafts without deleting the saved key.
 
-`/lit help` lists commands, `/lit status` shows the public group fingerprint and feature state, and `/lit welcome on|off` controls the login welcome.
+`/lit` opens Content and its Overview page. Initial login setup creates a key only when none is saved; `/lit welcome on|off` controls whether Content opens for this setup. `/lit help` lists commands, and `/lit status` shows the public group fingerprint and feature state.
 
 ## Shared data pipeline
 

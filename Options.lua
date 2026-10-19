@@ -10,6 +10,20 @@ local function SetFeedback(panel, message, isError)
     end
 end
 
+local function ShowPanel(panel)
+    local previous = addon.activePanel
+    if previous and previous ~= panel then
+        previous:StopMovingOrSizing()
+        local point, relativeTo, relativePoint, x, y = previous:GetPoint()
+        panel:ClearAllPoints()
+        panel:SetPoint(point, relativeTo, relativePoint, x, y)
+        previous:Hide()
+    end
+    addon.activePanel = panel
+    panel:Show()
+    panel:Raise()
+end
+
 local function ResetConfirmation(panel)
     panel.pendingSecret = nil
     panel.confirmLeave = false
@@ -27,14 +41,22 @@ local function HideSecret(panel, clear)
     end
 end
 
+local function ClearGroupKeys(panel)
+    HideSecret(panel, true)
+    panel.pages.group.showingKeys = false
+    panel.ownSecret:SetText("")
+    panel.ownSecret:ClearFocus()
+    ResetConfirmation(panel)
+end
+
 local function ApplyGroup(panel)
-    local secret = panel.secret:GetText()
+    local secret = panel.secret:GetText():match("^%s*(.-)%s*$")
     if secret:match("^%s*$") then
         SetFeedback(panel, "Enter a group key first.", true)
         return
     end
 
-    if addon:HasGroup() and secret ~= addon:GetGroupSecret()
+    if addon:HasGroup() and secret:lower() ~= addon:GetGroupSecret():lower()
         and panel.pendingSecret ~= secret then
         ResetConfirmation(panel)
         panel.pendingSecret = secret
@@ -84,8 +106,9 @@ end
 
 local function CreateOptionsPanel()
     local panel = UI:Window("LockInToolsOptions", 720, 550)
+    panel.TitleText:SetText("LockInTools - Settings")
     panel.tabs, panel.pages = {}, {}
-    local group = UI:Section(panel, 20, 116, 680, 300, "Your group")
+    local group = UI:Section(panel, 20, 116, 680, 414, "Your group")
     panel.pages.group = group
 
     panel.groupStatus = UI:Label(group, "", 13, "muted")
@@ -97,11 +120,35 @@ local function CreateOptionsPanel()
     introduction:SetPoint("TOPLEFT", 16, -76)
     introduction:SetWidth(648)
 
-    local secretLabel = UI:Label(group, "Group key", 13, "muted")
-    secretLabel:SetPoint("TOPLEFT", 16, -109)
+    local ownLabel = UI:Label(group, "Your saved key", 13, "muted")
+    ownLabel:SetPoint("TOPLEFT", 16, -109)
+
+    panel.ownSecret = UI:EditBox(group)
+    panel.ownSecret:SetPoint("TOPLEFT", 16, -132)
+    panel.ownSecret:SetSize(500, 34)
+    panel.ownSecret:SetAutoFocus(false)
+    panel.ownSecret:SetScript("OnTextChanged", function(editBox)
+        local secret = group.showingKeys and addon:GetGroupSecret() or ""
+        if editBox:GetText() ~= secret then editBox:SetText(secret) end
+    end)
+    panel.ownSecret:SetScript("OnEditFocusGained", function(editBox) editBox:HighlightText() end)
+    panel.ownSecret:SetScript("OnEscapePressed", function(editBox) editBox:ClearFocus() end)
+    panel.ownSecret:SetScript("OnEnterPressed", function(editBox) editBox:ClearFocus() end)
+
+    panel.selectKey = UI:Button(group, "Select key")
+    panel.selectKey:SetPoint("TOPLEFT", 528, -132)
+    panel.selectKey:SetSize(132, 34)
+    panel.selectKey:SetScript("OnClick", function()
+        panel.ownSecret:SetFocus()
+        panel.ownSecret:HighlightText()
+        SetFeedback(panel, "Press Ctrl+C to copy your key, then share it with your friends.", false)
+    end)
+
+    local secretLabel = UI:Label(group, "Friend's key or a new group key", 13, "muted")
+    secretLabel:SetPoint("TOPLEFT", 16, -181)
 
     panel.secret = UI:EditBox(group)
-    panel.secret:SetPoint("TOPLEFT", 16, -132)
+    panel.secret:SetPoint("TOPLEFT", 16, -204)
     panel.secret:SetSize(500, 34)
     panel.secret:SetAutoFocus(false)
     panel.secret:SetPassword(true)
@@ -120,14 +167,14 @@ local function CreateOptionsPanel()
 
     panel.applyGroup = UI:Button(group, "Use key", "primary")
     panel.applyGroup:SetSize(132, 34)
-    panel.applyGroup:SetPoint("TOPLEFT", 528, -132)
+    panel.applyGroup:SetPoint("TOPLEFT", 528, -204)
     panel.applyGroup:SetScript("OnClick", function()
         ApplyGroup(panel)
     end)
 
     panel.createGroup = UI:Button(group, "Create group")
     panel.createGroup:SetSize(132, 30)
-    panel.createGroup:SetPoint("TOPLEFT", 16, -180)
+    panel.createGroup:SetPoint("TOPLEFT", 16, -252)
     panel.createGroup:SetScript("OnClick", function()
         ResetConfirmation(panel)
         local key, message = addon:GenerateGroupKey()
@@ -197,10 +244,16 @@ local function CreateOptionsPanel()
     end)
 
     local privacyHint = UI:Label(group, "Share the same key with your friends.", 12, "muted")
-    privacyHint:SetPoint("TOPLEFT", 16, -224)
+    privacyHint:SetPoint("TOPLEFT", 16, -296)
     privacyHint:SetWidth(648)
 
-    local chat = UI:Section(panel, 20, 116, 680, 300, "Shared chat")
+    group:SetScript("OnShow", function()
+        group.showingKeys = true
+        addon:RefreshOptions()
+    end)
+    group:SetScript("OnHide", function() ClearGroupKeys(panel) end)
+
+    local chat = UI:Section(panel, 20, 116, 680, 414, "Shared chat")
     panel.pages.chat = chat
     local chatIntroduction = UI:Label(chat,
         "Your group selects its shared channel automatically. Friends must be on the same realm and faction.", 13, "muted")
@@ -241,7 +294,7 @@ local function CreateOptionsPanel()
     chatHint:SetPoint("TOPLEFT", 16, -254)
     chatHint:SetWidth(648)
 
-    local position = UI:Section(panel, 20, 116, 680, 300, "Shared positions")
+    local position = UI:Section(panel, 20, 116, 680, 414, "Shared positions")
     panel.pages.position = position
     local positionIntroduction = UI:Label(position,
         "See your friends on the world map. Keep their last-known positions when they go offline.", 13, "muted")
@@ -301,33 +354,33 @@ local function CreateOptionsPanel()
     panel.positionStatus:SetPoint("TOPLEFT", 16, -206)
     panel.positionStatus:SetWidth(648)
 
-    panel.feedback = UI:Label(panel, "", 13)
-    panel.feedback:SetPoint("TOPLEFT", 24, -434)
-    panel.feedback:SetWidth(672)
-
-    addon:CreateOverviewPage(panel)
+    for _, page in pairs(panel.pages) do
+        page.feedback = UI:Label(page, "", 13)
+        page.feedback:SetPoint("BOTTOMLEFT", 16, 16)
+        page.feedback:SetSize(648, 26)
+    end
 
     local function SelectTab(name)
         if not panel.pages[name] then return end
         if panel.selectedTab == name then return end
         if panel.selectedTab == "group" then
-            HideSecret(panel, true)
-            ResetConfirmation(panel)
+            ClearGroupKeys(panel)
         elseif panel.selectedTab == "position" then
             ApplyTrailLength(panel, true)
             panel.positionTrailLength:ClearFocus()
         end
         panel.selectedTab = name
+        panel.feedback = panel.pages[name].feedback
         for category, page in pairs(panel.pages) do
             if category == name then page:Show() else page:Hide() end
             UI:SetTabSelected(panel.tabs[category], category == name)
         end
+        group.showingKeys = name == "group" and panel:IsVisible()
         SetFeedback(panel)
         addon:RefreshOptions()
-        if name == "overview" then panel.overviewPage:Activate() end
     end
     panel.SelectTab = SelectTab
-    local categories = { { "overview", "Overview", 130 }, { "group", "Group", 134 }, { "chat", "Shared chat", 152 },
+    local categories = { { "group", "Group", 134 }, { "chat", "Shared chat", 152 },
         { "position", "Shared positions", 172 } }
     local tabX = 20
     for _, category in ipairs(categories) do
@@ -341,15 +394,16 @@ local function CreateOptionsPanel()
     end
     SelectTab("group")
 
-    panel.welcome = UI:Button(panel, "Back to welcome")
-    panel.welcome:SetPoint("TOPLEFT", 24, -492)
-    panel.welcome:SetSize(160, 34)
-    panel.welcome:SetScript("OnClick", function() addon:OpenWelcome() end)
+    panel.content = UI:Button(panel, "Content")
+    panel.content:SetPoint("TOPRIGHT", -54, -12)
+    panel.content:SetSize(110, 32)
+    panel.content:SetScript("OnClick", function() addon:OpenContent() end)
 
     panel:SetScript("OnShow", function()
         UI:Fit(panel)
         ResetConfirmation(panel)
         HideSecret(panel, true)
+        group.showingKeys = panel.selectedTab == "group"
         panel.autoJoin:SetChecked(addon.db.chat.autoJoin)
         panel.positionSharing:SetChecked(addon.db.position.sharing)
         panel.positionRetention:SetChecked(addon.db.position.keepLastKnown)
@@ -359,14 +413,11 @@ local function CreateOptionsPanel()
         panel.positionTrailLength:SetText(tostring(trailLength))
         SetFeedback(panel)
         addon:RefreshOptions()
-        if panel.selectedTab == "overview" then panel.overviewPage:Activate() end
     end)
     panel:SetScript("OnHide", function()
-        HideSecret(panel, true)
+        ClearGroupKeys(panel)
         ApplyTrailLength(panel, true)
         panel.positionTrailLength:ClearFocus()
-        ResetConfirmation(panel)
-        panel.overviewPage:Deactivate()
         panel:StopMovingOrSizing()
     end)
 
@@ -376,7 +427,7 @@ local function CreateOptionsPanel()
 end
 
 function addon:RefreshOptions()
-    self:RefreshWelcome()
+    self:RefreshContent()
     local panel = self.optionsPanel
     if not panel or not self.initialized then
         return
@@ -385,7 +436,11 @@ function addon:RefreshOptions()
     panel.groupStatus:SetText("Group: " .. self:GetGroupStatusText())
     panel.status:SetText("Status: " .. self:GetChatStatusText())
     panel.positionStatus:SetText("Status: " .. self:GetPositionStatusText())
-    self:RefreshOverview()
+
+    local secret = panel.pages.group.showingKeys and self:GetGroupSecret() or ""
+    if panel.ownSecret:GetText() ~= secret then panel.ownSecret:SetText(secret) end
+    panel.ownSecret:SetEnabled(secret ~= "")
+    panel.selectKey:SetEnabled(secret ~= "")
 
     -- Status events must preserve the group key and trail-length text being edited.
     local editable = not self.savedDataReadOnly
@@ -405,203 +460,75 @@ function addon:RefreshOptions()
     if not editable then
         HideSecret(panel, true)
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
+    elseif self.invalidGroupSecret and panel.selectedTab == "group" then
+        SetFeedback(panel, "Your saved key is invalid. Enter a friend's key or create a group to replace it.", true)
     end
 end
 
 function addon:OpenOptions(category)
+    if category == "overview" then self:OpenOverview(); return end
     if not self.initialized then
         self:Print("Still loading. Please try again after login.")
         return
     end
 
-    if self.welcomePanel then self.welcomePanel:Hide() end
+    if self.contentPanel then self.contentPanel:Hide() end
     if not self.optionsPanel then
         self.optionsPanel = CreateOptionsPanel()
     end
 
     if category then self.optionsPanel.SelectTab(category) end
-    self.optionsPanel:Show()
-    self.optionsPanel:Raise()
+    ShowPanel(self.optionsPanel)
 end
 
-local function ResetWelcomeConfirmation(panel)
-    panel.pendingSecret = nil
-    panel.joinGroup:SetText("Join friend")
-end
+local function CreateContentPanel()
+    local panel = UI:Window("LockInToolsContent", 720, 550)
+    panel.TitleText:SetText("LockInTools")
+    panel.tabs, panel.pages = {}, {}
+    panel.selectedTab = "overview"
+    addon:CreateOverviewPage(panel)
 
-local function JoinFriend(panel)
-    local secret = panel.friendSecret:GetText():match("^%s*(.-)%s*$")
-    if secret == "" then
-        ResetWelcomeConfirmation(panel)
-        SetFeedback(panel, "Enter your friend's key first.", true)
-        return
+    panel.tabs.overview = UI:Button(panel, "Overview", "tab")
+    panel.tabs.overview:SetPoint("TOPLEFT", 20, -66)
+    panel.tabs.overview:SetSize(130, 34)
+    UI:SetTabSelected(panel.tabs.overview, true)
+    panel.SelectTab = function(name)
+        if name == "overview" then panel.overviewPage:Activate() end
     end
+    panel.tabs.overview:SetScript("OnClick", function() panel.SelectTab("overview") end)
 
-    if addon:HasGroup() and secret:lower() ~= addon:GetGroupSecret():lower()
-        and panel.pendingSecret ~= secret then
-        ResetWelcomeConfirmation(panel)
-        panel.pendingSecret = secret
-        panel.joinGroup:SetText("Confirm switch")
-        SetFeedback(panel, "Click Confirm switch to use your friend's key for all LockInTools features.", true)
-        return
-    end
-
-    local success, message = addon:SetGroupSecret(secret)
-    ResetWelcomeConfirmation(panel)
-    if not success then
-        SetFeedback(panel, message or "Unable to save your friend's key.", true)
-        return
-    end
-
-    panel.friendSecret:SetText("")
-    panel.friendSecret:ClearFocus()
-    SetFeedback(panel, "Key saved. You and your friends now use the same group.", false)
-    addon:RefreshOptions()
-end
-
-local function CreateWelcomePanel()
-    local panel = UI:Window("LockInToolsWelcome", 620, 550)
-    local heading = UI:Label(panel, "Welcome to LockInTools", 22, "heading")
-    heading:SetPoint("TOPLEFT", 24, -76)
-
-    local introduction = UI:Label(panel,
-        "Playing together starts with the same key. Share yours, or enter a friend's key below.", 14, "muted")
-    introduction:SetPoint("TOPLEFT", 24, -114)
-    introduction:SetWidth(572)
-
-    local own = UI:Section(panel, 20, 170, 580, 112, "Your secret key")
-    panel.ownSecret = UI:EditBox(own)
-    panel.ownSecret:SetPoint("TOPLEFT", 16, -43)
-    panel.ownSecret:SetSize(410, 34)
-    panel.ownSecret:SetAutoFocus(false)
-    panel.ownSecret:SetPassword(false)
-    -- Keep the saved key selectable for copying without accepting edits.
-    panel.ownSecret:SetScript("OnTextChanged", function(editBox)
-        local secret = panel.showingKeys and addon:GetGroupSecret() or ""
-        if editBox:GetText() ~= secret then
-            editBox:SetText(secret)
-        end
-    end)
-    panel.ownSecret:SetScript("OnEditFocusGained", function(editBox)
-        editBox:HighlightText()
-    end)
-    panel.ownSecret:SetScript("OnEscapePressed", function(editBox)
-        editBox:ClearFocus()
-    end)
-    panel.ownSecret:SetScript("OnEnterPressed", function(editBox)
-        editBox:ClearFocus()
-    end)
-
-    panel.selectKey = UI:Button(own, "Select key", "primary")
-    panel.selectKey:SetPoint("TOPLEFT", 438, -43)
-    panel.selectKey:SetSize(126, 34)
-    panel.selectKey:SetScript("OnClick", function()
-        panel.ownSecret:SetFocus()
-        panel.ownSecret:HighlightText()
-        SetFeedback(panel, "Press Ctrl+C to copy your key, then share it with your friends.", false)
-    end)
-
-    local copyHint = UI:Label(own,
-        "This key is saved. Select it and press Ctrl+C to copy it.", 12, "muted")
-    copyHint:SetPoint("TOPLEFT", 16, -86)
-    copyHint:SetWidth(548)
-
-    local friend = UI:Section(panel, 20, 294, 580, 96, "Have a friend's key?")
-    panel.friendSecret = UI:EditBox(friend)
-    panel.friendSecret:SetPoint("TOPLEFT", 16, -43)
-    panel.friendSecret:SetSize(410, 34)
-    panel.friendSecret:SetAutoFocus(false)
-    panel.friendSecret:SetScript("OnEscapePressed", function(editBox)
-        editBox:ClearFocus()
-    end)
-    panel.friendSecret:SetScript("OnEnterPressed", function()
-        JoinFriend(panel)
-    end)
-    panel.friendSecret:SetScript("OnTextChanged", function(_, userInput)
-        if userInput then
-            ResetWelcomeConfirmation(panel)
-            SetFeedback(panel)
-        end
-    end)
-
-    panel.joinGroup = UI:Button(friend, "Join friend", "primary")
-    panel.joinGroup:SetPoint("TOPLEFT", 438, -43)
-    panel.joinGroup:SetSize(126, 34)
-    panel.joinGroup:SetScript("OnClick", function()
-        JoinFriend(panel)
-    end)
-
-    panel.feedback = UI:Label(panel, "", 13)
-    panel.feedback:SetPoint("TOPLEFT", 24, -406)
-    panel.feedback:SetWidth(572)
-
-    local realmHint = UI:Label(panel, "", 12, "muted")
-    realmHint:SetPoint("TOPLEFT", 24, -452)
-    realmHint:SetWidth(572)
-    realmHint:SetText("Shared chat works with friends on the same realm and faction.")
-
-    panel.options = UI:Button(panel, "More options")
-    panel.options:SetPoint("TOPLEFT", 24, -492)
-    panel.options:SetSize(148, 34)
-    panel.options:SetScript("OnClick", function()
-        addon:OpenOptions()
-    end)
-
-    panel.done = UI:Button(panel, "Done", "primary")
-    panel.done:SetPoint("TOPLEFT", 458, -492)
-    panel.done:SetSize(138, 34)
-    panel.done:SetScript("OnClick", function()
-        panel:Hide()
-    end)
+    panel.options = UI:Button(panel, "Settings")
+    panel.options:SetPoint("TOPRIGHT", -54, -12)
+    panel.options:SetSize(110, 32)
+    panel.options:SetScript("OnClick", function() addon:OpenOptions() end)
 
     panel:SetScript("OnShow", function()
         UI:Fit(panel)
-        panel.showingKeys = true
-        ResetWelcomeConfirmation(panel)
         SetFeedback(panel)
-        addon:RefreshWelcome()
+        addon:RefreshContent()
+        panel.overviewPage:Activate()
     end)
     panel:SetScript("OnHide", function()
-        panel.showingKeys = false
-        panel.ownSecret:SetText("")
-        panel.ownSecret:ClearFocus()
-        panel.friendSecret:SetText("")
-        panel.friendSecret:ClearFocus()
-        ResetWelcomeConfirmation(panel)
-        SetFeedback(panel)
+        panel.overviewPage:Deactivate()
         panel:StopMovingOrSizing()
     end)
-
-    tinsert(UISpecialFrames, "LockInToolsWelcome")
+    tinsert(UISpecialFrames, "LockInToolsContent")
     UI:Finish(panel)
     return panel
 end
 
-function addon:RefreshWelcome()
-    local panel = self.welcomePanel
-    if not panel or not panel.showingKeys or not self.initialized then
-        return
-    end
-
-    local secret = self:GetGroupSecret()
-    if panel.ownSecret:GetText() ~= secret then
-        panel.ownSecret:SetText(secret)
-    end
-    panel.ownSecret:SetEnabled(secret ~= "")
-    panel.selectKey:SetEnabled(secret ~= "")
-    panel.friendSecret:SetEnabled(not self.savedDataReadOnly)
-    panel.joinGroup:SetEnabled(not self.savedDataReadOnly)
+function addon:RefreshContent()
+    local panel = self.contentPanel
+    if not panel or not self.initialized then return end
+    self:RefreshOverview()
     if self.savedDataReadOnly then
-        panel.friendSecret:SetText("")
-        panel.friendSecret:ClearFocus()
-        ResetWelcomeConfirmation(panel)
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
     elseif self.invalidGroupSecret then
-        SetFeedback(panel, "Your saved key is invalid. Enter a friend's key, or use More options to create a group.", true)
+        SetFeedback(panel, "Your saved key is invalid. Open Settings > Group to replace it.", true)
     end
 end
 
-function addon:OpenWelcome()
+function addon:OpenContent()
     if not self.initialized then
         self:Print("Still loading. Please try again after login.")
         return
@@ -619,11 +546,13 @@ function addon:OpenWelcome()
         end
     end
 
-    if not self.welcomePanel then
-        self.welcomePanel = CreateWelcomePanel()
-    end
-    self.welcomePanel:Show()
-    self.welcomePanel:Raise()
-    self:RefreshWelcome()
-    if problem then SetFeedback(self.welcomePanel, problem, true) end
+    if not self.contentPanel then self.contentPanel = CreateContentPanel() end
+    ShowPanel(self.contentPanel)
+    self:RefreshContent()
+    if problem then SetFeedback(self.contentPanel, problem, true) end
+end
+
+-- Keep the old command/API entry point without retaining a separate welcome view.
+function addon:OpenWelcome()
+    self:OpenContent()
 end
