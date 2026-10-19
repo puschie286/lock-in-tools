@@ -396,6 +396,9 @@ do
     connectedWorld:completeJoin(dataRoom, 7)
     assert(connected:IsDataConnected() and #connectedWorld.dataSends == 0
         and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
+    assert(connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("7. " .. dataRoom)
+        == "7. LockInTools Data" and connected:GetGroupDataChannelName() == dataRoom,
+        "the data alias changes its displayed label while retaining the native route")
     local connectedCommand = connectedEnvironment.SlashCmdList.LOCKINTOOLS
     connectedCommand("join")
     connectedWorld:completeJoin(chatRoom, 3)
@@ -410,6 +413,11 @@ do
     connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "Friend", nil, 0, 7, dataRoom)
     assert(connected:GetSharedPositions()["friend-testrealm"].online
         and connected.db.position.peers["friend-testrealm"], "production route delivers and retains peer positions")
+    connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "NameOnly", nil, 0, nil, dataRoom:lower())
+    connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "AliasOnly", nil, 0, nil, "LockInTools Data")
+    assert(connected:GetSharedPositions()["nameonly-testrealm"]
+        and not connected:GetSharedPositions()["aliasonly-testrealm"],
+        "name-only position routing uses the actual channel name, never the display alias")
     assert(connected:SetPositionSharing(false))
     connectedWorld:advance(2)
     assert(#connectedWorld.dataSends == 1 and connected:IsDataConnected()
@@ -428,6 +436,13 @@ do
     connectedWorld:advance(2)
     assert(#connectedWorld.dataSends == 2 and connectedWorld.dataSends[2].target == "14",
         "reconnected positions use the current local channel number")
+    assert(connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("14. " .. dataRoom)
+        == "14. LockInTools Data", "renumbering preserves the readable data label")
+    connectedWorld.fire("PLAYER_ENTERING_WORLD")
+    connectedWorld.fire("UPDATE_CHAT_WINDOWS")
+    connectedWorld:advance(0)
+    assert(connected:IsDataConnected() and connectedWorld.channels[dataRoom:lower()],
+        "automatic old-channel cleanup preserves the current aliased position transport")
     connectedWorld:restore("Unrelated", 19)
     assert(connected:SetGroupSecret(OTHER_SECRET))
     assert(not connected:IsDataConnected() and next(connected.db.position.peers) == nil
@@ -437,6 +452,22 @@ do
     assert(connectedWorld.dataJoinCalls[3] == connected:GetGroupDataChannelName()
         and connectedWorld.channels.unrelated and not connected.db.chat.autoJoin,
         "group switching reconnects data without changing chat preferences or unrelated channels")
+    local newDataRoom = connected:GetGroupDataChannelName()
+    connectedWorld:completeJoin(newDataRoom, 18)
+    connectedWorld:completeJoin(dataRoom, 14)
+    assert(connected:IsDataConnected() and not connectedWorld.channels[dataRoom:lower()],
+        "a late old-channel join cannot disconnect the new position transport")
+    connectedWorld:advance(1)
+    local switchedSend = assert(connectedWorld.dataSends[3], "positions resume automatically after the new group joins")
+    assert(switchedSend.target == "18"
+        and connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("18. " .. newDataRoom)
+            == "18. LockInTools Data", "positions use the new native number while the readable alias stays the same")
+    connectedEvent("CHAT_MSG_ADDON", switchedSend.prefix, switchedSend.message, "CHANNEL", "OldRoute", nil, 0, 14, dataRoom)
+    connectedEvent("CHAT_MSG_ADDON", switchedSend.prefix, switchedSend.message, "CHANNEL", "NewFriend", nil, 0, 18, newDataRoom)
+    assert(not connected:GetSharedPositions()["oldroute-testrealm"]
+        and connected:GetSharedPositions()["newfriend-testrealm"].online
+        and connected.db.position.peers["newfriend-testrealm"],
+        "alias-enabled group switching rejects old position packets and accepts the new group's updates")
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 

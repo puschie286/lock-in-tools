@@ -2,6 +2,8 @@
 
 The welcome and settings windows use a shared native style: dark panels, simple borders, clear labels and consistent buttons, fields and checkboxes. Windows remain draggable and scale down to fit smaller screens when opened. LockInTools works without a separate UI addon.
 
+The AddOns list uses the interlocking steel links with a blue glow as the addon icon. `Media/Icon.png` preserves the original artwork; `Media/Icon.tga` is the 256×256 uncompressed 32-bit texture referenced by `LockInTools.toc`.
+
 Use `/reload` after editing existing Lua files. Restart WoW after adding files to the manifest.
 
 ## Settings and navigation
@@ -21,6 +23,7 @@ The skin changes appearance only. Key copying, hidden-field cleanup, group confi
 EllesmereUI integration depends on its supported skin API. Missing or unsupported APIs leave the native style available. Offline mocks check callbacks and style selection; actual rendering, fonts, focus and client compatibility require in-game validation.
 
 - Check welcome and settings with EllesmereUI absent, installed with the LockInTools skin disabled, and enabled. With the skin enabled, change its accent and fonts while a window is visible, then open the other window for the first time. Disable the skin, reload and check both windows again.
+- After restarting WoW, check that the AddOns list shows the chain-link icon for LockInTools, upright and recognizable at its displayed size.
 - Open settings for the first time and confirm **Group** is selected. Switch through all three tabs, check only the selected category is visible and confirm unsaved preference choices survive. Prepare a key change/confirmation in **Group**, leave the tab and return; the draft must be cleared/masked and confirmation cancelled.
 - Move between **More options** and **Back to welcome** repeatedly; only one window may be visible. Repeat `/lit options` on each tab and check the same settings window and selected tab remain. Open welcome through `/lit` or `/lit welcome` while settings is visible and check settings hides with key cleanup.
 - Check readable text, clear enabled/disabled controls, field outlines and button hover states at different UI scales. Move each window, reopen it and check that its controls remain usable.
