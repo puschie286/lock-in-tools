@@ -6,6 +6,7 @@ function addon:ShowHelp()
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
+    self:Print("/lit data join or /lit data leave - Reconnect or leave shared feature data.")
     self:Print("/lit status - Show addon and client information.")
     self:Print("/lit welcome on|off - Enable or disable the login message and initial welcome screen.")
 end
@@ -46,6 +47,11 @@ function addon:HandleCommand(message)
         self:LeaveChatChannel()
     elseif command == "status" and argument == "" then
         self:ShowStatus()
+    elseif command == "data" and (argument == "join" or argument == "leave") then
+        local _, problem
+        if argument == "join" then _, problem = self:JoinDataChannel(true)
+        else _, problem = self:LeaveDataChannel() end
+        self:Print(problem or self:GetDataStatusText())
     elseif command == "welcome" and (argument == "on" or argument == "off") then
         self:SetShowWelcome(argument == "on")
     else

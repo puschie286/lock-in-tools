@@ -75,6 +75,7 @@ local function newAddon(saved, readOnly)
         end,
     }, { __index = _G })
     environment._G = environment
+    world.environment = environment
     local addon = {
         db = saved or { schemaVersion = 3, group = { secret = "otter-4827" } },
         initialized = true, ready = false, savedDataReadOnly = readOnly,
@@ -472,6 +473,51 @@ do
     assert(live:GetSharedPositions()["friend-testrealm"])
     clock:advance(1)
     assert(next(live:GetSharedPositions()) == nil, "Live-only pins disappear after 60 seconds without a heartbeat")
+end
+
+-- Native regional full names supplement legacy self detection without changing peer keys.
+do
+    local regional, clock = newAddon()
+    clock.environment.UnitFullName = function(unit)
+        assert(unit == "player")
+        return "Dar", "Mara"
+    end
+    local nativeName = "Dar Mara"
+    clock.environment.NameUtil = { GetUnmodifiedUnitFullName = function(unit)
+        assert(unit == "player")
+        return nativeName
+    end }
+    clock:login()
+    regional:SetPositionSharing(true)
+    for _, native in ipairs({ "Dar Mara", "Dar Mara-Test Realm" }) do
+        nativeName = native
+        for _, sender in ipairs({ "Dar Mara", "Dar Mara-Test Realm", "Dar Mara-TestRealm", "Dar-Mara" }) do
+            assert(not regional:ReceivePosition(sender, clock:position(37, 0.3, 0.7)),
+                "Exclude both native full-name echoes and the legacy self identity")
+        end
+    end
+    assert(next(regional:GetSharedPositions()) == nil and next(regional.db.position.peers) == nil,
+        "Self echoes must not create runtime or retained pins")
+    assert(regional:ReceivePosition("Friend-Test Realm", clock:position(37, 0.4, 0.6)))
+    local peer = assert(regional.db.position.peers["friend-testrealm"])
+    assert(peer.name == "Friend-Test Realm" and peer.x == 0.4,
+        "Native self detection must preserve existing peer names and canonical saved keys")
+    local restored, restoredClock = newAddon(copy(regional.db))
+    restoredClock:login()
+    assert(restored:GetSharedPositions()["friend-testrealm"].x == 0.4,
+        "Existing retained peer keys remain readable after a reload")
+
+    clock.environment.NameUtil.GetUnmodifiedUnitFullName = function() error("Native name unavailable") end
+    assert(regional:ReceivePosition("Other", clock:position(37, 0.5, 0.5)),
+        "A failing native name helper must not interrupt real peer updates")
+    assert(not regional:ReceivePosition("Dar-Mara", clock:position(37, 0.3, 0.7)),
+        "Legacy self detection remains active when the native helper fails")
+    local secretName = setmetatable({}, { __tostring = function() error("Secret name must not be inspected") end })
+    clock.environment.issecretvalue = function(value) return value == secretName end
+    clock.environment.NameUtil.GetUnmodifiedUnitFullName = function() return secretName end
+    assert(regional:ReceivePosition("Another", clock:position(37, 0.6, 0.4)),
+        "An unreadable native name must safely fall back to legacy self detection")
+    assert(not regional:ReceivePosition("Dar-Mara", clock:position(37, 0.3, 0.7)))
 end
 
 print("Position tests passed.")

@@ -1,54 +1,46 @@
 # Position sharing
 
-Position settings, sampling, retained locations and world-map pins are implemented. **Group communication remains planned and disconnected** pending live transport validation. Actual map rendering also needs an in-game check.
+Share world-map positions with friends using the same [group key](group.md), internal realm and faction. The addon connects through the separate **LITDATA** channel automatically; position sharing starts off. Whisper fallback is disabled pending validation.
 
 ## Use and behavior
 
-Open `/lit options` for **Enable position sharing** and **Keep last-known positions**. Sharing starts off; retention starts on. Disabling sharing hides pins and stops receiving/sampling while preserving retained locations.
+1. Open `/lit options`, enable **Enable position sharing**, and click **Save position settings** on each client. **Keep last-known positions** starts enabled.
+2. Check `/lit status` for the group-data connection and position state, then open the world map. `/lit data join` retries the connection; `/lit data leave` pauses it for this session without leaving the group or human chat.
 
-Pins show player names without update ages. Peers with recent data are cyan; 60 seconds without a valid newer update marks them gray with **(Offline)**. Cached peers restored after reload are also offline until a new update arrives. Offline means no recent data here; it does not confirm logout. Native map rectangles project positions onto their own zone and parent maps.
+The model checks movement every two seconds. It broadcasts changed serialized map/coordinates, or a heartbeat after 15 seconds without an accepted send: normally every 16 seconds with two-second polling. Unavailable positions use the same suppression and heartbeat. Failed sends retry the current sample on the next tick, without a backlog. Reconnecting, switching groups or re-enabling sharing resets suppression.
 
-Last-known coordinates persist across reloads and characters in the account-wide settings; switching or leaving the group clears them. With retention off, unavailable updates remove pins immediately and silence removes them after 60 seconds. An unavailable-position update confirms activity and, with retention on, preserves the previous coordinates.
+Pins show player names without update ages. Recent peers are cyan; 60 seconds without a valid newer update marks them gray with **(Offline)**. This means no recent data here, not confirmed logout. Retained peers restored after reload also start offline. Native map rectangles project coordinates onto their own zone and parent maps.
 
-The model samples every two seconds when a connection is supplied. It sends when the serialized map/coordinates change, excluding timestamps from the comparison, or once 15 seconds have passed since the last accepted send. With two-second polling, unchanged-position heartbeats normally arrive every 16 seconds; delayed sampling can extend this. Unavailable-position updates use the same suppression and heartbeat. Failed sends retry the latest current sample on the next tick without a backlog; reconnecting, switching groups or re-enabling sharing resets suppression. Until connected, status reads **Waiting for a group connection**, and the feature sends no network messages.
+Last-known coordinates persist across reloads and characters; changing or leaving the group clears them. An unavailable-position update confirms activity and preserves previous coordinates when retention is enabled. With retention off, unavailable updates remove pins immediately and silence removes them after 60 seconds. Disabling sharing hides pins and stops position sampling/receiving while preserving retained locations; the shared data connection remains available to other features.
 
-`Position.lua` owns the model and additive schema-3 preferences. `PositionMap.lua`/`PositionPins.xml` use native map pins without a library. Existing [group credentials](group.md) and newer-schema read-only behavior remain intact. Restart WoW after adding these files to the manifest.
+## Connection and limits
 
-Position sharing uses the [shared data pipeline](group.md#shared-data-pipeline) under the `position` identifier. It sends through `SendData` and registers its receiver once; the backend delivers WoW's sender to `ReceivePosition`. Reconnecting resets movement suppression. Group changes disconnect the backend until it reconnects to the new group. These paths are tested with mocked connections.
+`Position.lua` uses the [shared data pipeline](group.md#shared-data-pipeline) under `position`. `Data.lua` joins the temporary group-derived channel on login, independently of chat autojoin and the position preference. It broadcasts each packet once through `CHANNEL`; receiving requires the addon prefix and current group route. No roster lookup or whisper delivery is needed. Native full-name matching excludes self echoes.
 
-## Planned communication
+Delivery is supported within the validated internal-realm scope. Two clients on `ClassicBetaPvE` and `ClassicBetaPvE2` saw separate self-only channels despite matching PvE rulesets and faction. A [firsthand beta report](https://us.forums.blizzard.com/en/wow/t/wow-forever-custom-chat-channels-not-working-crossrealm-not-game-mode/2370263) describes the same split. Cross-internal-realm sharing is unsupported; there is no production whisper fallback.
 
-Prefer one addon broadcast through the group's separate **LITDATA** channel when peer delivery is proven; otherwise whisper to peers discovered through its roster. Other features will share this pipeline. Channel membership stays independent of shared-chat controls. A working broadcast does not depend on roster retrieval; whisper fallback does.
+This is a convenience feature for trusted friends. Messages are plain, without signing, encryption or authentication handshakes. Format, coordinate and ordering checks support correct behavior; channel membership does not authenticate individual peers. Never log group keys or passwords. Native acceptance confirms a send request, not delivery.
 
-The communication foundation will serve other features and should support **6–10 players**. Position updates require up to 30 broadcasts/minute per moving sender, or about 3.75/minute while unchanged. At ten players, whispering to the other nine requires up to 270 outgoing whispers/minute while moving or about 33.75/minute while unchanged. Idle rates assume the normal 16-second heartbeat cadence. Validate cadence, traffic and membership changes before connecting it; additional features will share client/server capacity.
+Each moving sender produces up to 30 broadcasts/minute; unchanged positions normally produce about 3.75/minute per sender, regardless of group size. Capacity for 6–10 players and other future features remains an in-game check. `PositionMap.lua`/`PositionPins.xml` use native map pins; actual rendering also remains unverified in game. Existing group credentials and newer-schema read-only behavior are preserved.
 
-This is a convenience feature for trusted friends. Use plain messages without signing or authentication handshakes. Check message format, coordinates and ordering for correct behavior. Ordering does not expire retained pins. Never log group keys or passwords.
+## Live evidence
 
-## Transport probe
+The standalone probe validated transport on client **1.60.1/70450**; it does not establish production pin rendering or recovery.
 
-The separate developer addon under `tools/position-probe/` is not loaded by `LockInTools.toc` and saves no settings or positions. Assemble it with:
+| Test | Observed result |
+| --- | --- |
+| Two ClassicBetaPvP/Horde clients, CHANNEL | Each received 21 valid peer positions; receive gaps were 4.95–5.04 and 4.77–5.25 seconds. Each accepted 23 sends with no send errors or rejected updates. |
+| ClassicBetaPvE/Alliance versus ClassicBetaPvE2/Alliance | Each accepted 23 channel sends but received only self echoes. Self-only rosters supplied no automatic-whisper targets; whisper delivery was not exercised. |
+| Solo ClassicBetaPvP/Horde, 2026-10-19 | Channel and whisper self receipts passed, with the native full name recognized. Self receipts do not prove peer delivery. |
 
-```powershell
-.\tools\position-probe\prepare.ps1
-```
+The channel run used five-second probe samples, not production movement suppression. Unsynchronized run overlap means send/receive totals are not a packet-loss measurement. An earlier 10.61-second gap coincided with reported loading; loading recovery still needs validation.
 
-Copy/link the resulting `tools/position-probe/package/LockInToolsPositionProbe` folder beside LockInTools in the client's `Interface/AddOns`. Restart WoW and enable **LockInTools Position Probe**. It stays inactive until started.
+## In-game checks
 
-- `/litprobe channel`: two-minute broadcast-only run, one sample every five seconds.
-- `/litprobe whisper`: two-minute whisper-only run, up to nine roster-discovered recipients per sender.
-- `/litprobe start`: quick comparison of both paths with independent receipt/order statistics.
-- `/litprobe self`: one-client coordinate, whisper and channel-echo check; does not prove peer delivery.
-- `/litprobe status`: per-path attempts/rate, API acceptance, payload bytes, errors, received positions and receipt gaps.
-- `/litprobe stop`: cancel and leave only the probe channel. Logout/group changes also stop it.
+- With two clients sharing a key, internal realm and faction, enable sharing and confirm moving pins near two-second updates, unchanged/unavailable heartbeats near 16 seconds, and gray offline pins after 60 seconds of silence. Check names, self-echo exclusion, retention on/off and restored peers after reload.
+- Check zone/continent projection, delayed map loading, combat, layers, unavailable coordinates and recovery after loading. Repeat with 6–10 clients and longer runs; inspect errors and update gaps.
+- Check automatic data connection with chat autojoin and sharing disabled, `/lit data leave`/`join`, channel renumbering and disconnect recovery. Changing/leaving the group must leave the old data channel and clear position caches while preserving unrelated channels and human-chat preferences.
 
-Use separate channel/whisper runs for performance comparisons so they do not compete for message allowance. The probe sends every five seconds even when unchanged; it does not use feature suppression or heartbeats. It samples/serializes once per interval, resolves channel numbers dynamically and isolates failures. Native roster selection may change the Channels panel selection; its completeness remains unverified. The diagnostic does not feed feature pins.
+For transport diagnostics, build the separate addon with `.\tools\position-probe\prepare.ps1`, install `tools/position-probe/package/LockInToolsPositionProbe` beside LockInTools, restart WoW and enable it. It is excluded from `LockInTools.toc` and stays inactive until started. `/litprobe channel` runs broadcasts every five seconds for two minutes; `/litprobe status` reports receipt gaps, traffic, filters and native errors; `/litprobe stop` stops and leaves only its channel. `/litprobe self` checks local receipts; `/litprobe roster` requests native chatlist evidence. `/litprobe whisper Full Character Name` temporarily tests an explicit peer without discovery. The optional roster-whisper and combined runs remain diagnostic only and do not enable a production fallback.
 
-## Validation and remaining work
-
-On two ungrouped clients sharing a key, realm and faction, run channel mode on both, then whisper mode on both. Confirm repeated peer positions near five-second intervals while moving. Repeat across zones, layers, combat, unavailable coordinates, channel leave/rejoin and local channel-number changes. Check errors/gaps and preserve ordinary chat/unrelated channels. Repeat with 6–10 clients for capacity.
-
-**Selection:** prefer broadcasts when repeated peer delivery passes on both clients; otherwise use whispers when roster discovery and whisper delivery pass. API acceptance, one receipt or self echoes are insufficient. If neither passes, communication remains unresolved.
-
-After connecting a validated transport, check moving updates near two-second intervals, unchanged/unavailable heartbeats near 16 seconds, and silence marking peers **(Offline)** after 60 seconds. Check cyan active pins, gray offline/restored pins, renewed activity, retention on/off, zone/continent projection, delayed map loading, reloads and character changes. Unavailable positions confirm activity; they remove pins immediately only with retention off. Disabling sharing hides pins; group changes clear caches.
-
-[Offline verification](../tests/testing.md) covers model behavior, native map callbacks and the probe. It does not establish rendering or actual server delivery. **Live validation remains pending: no second client is currently available; neither transport nor 6–10-player performance has been proven.**
+[Offline verification](../tests/testing.md) checks the model, native channel callbacks, map callbacks and probe. Delivery between clients, rendering and larger-group performance require the live checks above.

@@ -18,6 +18,12 @@ local function SenderName(name)
     return (character .. "-" .. realm:gsub("%s", "")):lower()
 end
 
+local function NativeSelfName()
+    if not NameUtil or type(NameUtil.GetUnmodifiedUnitFullName) ~= "function" then return nil end
+    local ok, name = pcall(NameUtil.GetUnmodifiedUnitFullName, "player")
+    if ok then return SenderName(name) end
+end
+
 local function Active(self)
     return self.positionState and self.ready and self:HasGroup()
         and self.db.position.sharing and not self.savedDataReadOnly
@@ -203,7 +209,7 @@ function addon:ReceivePosition(sender, payload)
     local ownName, ownRealm = UnitFullName("player")
     if IsSecret(ownName) or IsSecret(ownRealm) then return false end
     local own = ownName and SenderName(ownRealm and ownRealm ~= "" and (ownName .. "-" .. ownRealm) or ownName)
-    if not canonical or canonical == own then return false end
+    if not canonical or canonical == own or canonical == NativeSelfName() then return false end
     local fields = {}
     for value in (payload .. "|"):gmatch("([^|]*)|") do fields[#fields + 1] = value end
     local kind, stamp = fields[2], tonumber(fields[3])

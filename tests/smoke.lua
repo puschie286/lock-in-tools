@@ -5,6 +5,7 @@ local function loadAddon(savedVariables, loggedIn)
     local world = {
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
+        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, prefixes = {},
         optionsOpened = 0, welcomeOpened = 0,
     }
     local function channelByName(name)
@@ -45,6 +46,20 @@ local function loadAddon(savedVariables, loggedIn)
             end,
         },
         C_Timer = { NewTimer = newTimer, After = newTimer },
+        Enum = {
+            RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1 },
+            SendAddonMessageResult = { Success = 0 },
+        },
+        GetTime = function() return world.now end,
+        GetServerTime = function() return 2000000000 + math.floor(world.now) end,
+        GetNormalizedRealmName = function() return "TestRealm" end,
+        UnitFullName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
+        C_Map = {
+            GetBestMapForUnit = function() return 37 end,
+            GetPlayerMapPosition = function()
+                return { GetXY = function() return 0.25, 0.75 end }
+            end,
+        },
         DEFAULT_CHAT_FRAME = chatFrame,
         ChatFrameUtil = { ChooseBoxForSend = function() return editBox end, OpenChat = openChat },
         GetChannelName = function(identifier)
@@ -59,6 +74,12 @@ local function loadAddon(savedVariables, loggedIn)
             world.lastJoinPassword = password
             return 0, name
         end,
+        JoinTemporaryChannel = function(name, password)
+            assert(name:match("^LITDATA") and type(password) == "string" and #password == 31,
+                "group data uses its own derived credentials")
+            world.dataJoinCalls[#world.dataJoinCalls + 1] = name
+            return 0, name
+        end,
         SetChannelPassword = function(name, password)
             world.passwordCalls[#world.passwordCalls + 1] = { name = name, password = password }
         end,
@@ -68,12 +89,27 @@ local function loadAddon(savedVariables, loggedIn)
             local entry = assert(world.roster[displayIndex], "display index is separate from channel number")
             return entry.name, entry.header, false, entry.id, #(entry.members or {}), true, "CHANNEL_CATEGORY_CUSTOM"
         end,
-        C_ChatInfo = { GetChannelRosterInfo = function(displayIndex, rosterIndex)
-            local member = world.roster[displayIndex].members[rosterIndex]
-            return member.name, member.owner, member.moderator, member.guid
-        end },
+        C_ChatInfo = {
+            GetChannelRosterInfo = function(displayIndex, rosterIndex)
+                local member = world.roster[displayIndex].members[rosterIndex]
+                return member.name, member.owner, member.moderator, member.guid
+            end,
+            RegisterAddonMessagePrefix = function(prefix)
+                if world.prefixes[prefix] then return 1 end
+                world.prefixes[prefix] = true
+                return 0
+            end,
+            SendAddonMessage = function(prefix, message, distribution, target)
+                assert(distribution == "CHANNEL", "production data does not send whispers")
+                world.dataSends[#world.dataSends + 1] = {
+                    prefix = prefix, message = message, target = target,
+                }
+                return 0
+            end,
+        },
         LeaveChannelByName = function(name)
-            world.leaveCalls[#world.leaveCalls + 1] = name
+            local calls = name:match("^LITDATA") and world.dataLeaveCalls or world.leaveCalls
+            calls[#calls + 1] = name
             world.channels[name:lower()] = nil
         end,
         strlenutf8 = function(text)
@@ -187,7 +223,8 @@ assert(world.welcomeOpened == 1, "show initial welcome after login when no group
 fire("PLAYER_LOGIN")
 assert(#messages == 1 and world.welcomeOpened == 1, "do not repeat welcome on duplicate login events")
 world:advance(30)
-assert(#world.joinCalls == 0, "an unconfigured group must not join a channel")
+assert(#world.joinCalls == 0 and #world.dataJoinCalls == 0,
+    "an unconfigured group must not join a channel")
 local command = environment.SlashCmdList.LOCKINTOOLS
 command("")
 assert(world.welcomeOpened == 2, "bare /lit opens welcome")
@@ -245,11 +282,72 @@ assert(olderEnvironment.LockInToolsDB == newer and newer.schemaVersion == 4)
 assert(not newer.showWelcome and newer.important == "keep" and newer.group.secret == SECRET)
 assert(newer.chat.autoJoin == false)
 assert(olderWorld.welcomeOpened == 0, "read-only saved data does not trigger initial setup")
+assert(#olderWorld.joinCalls == 0 and #olderWorld.dataJoinCalls == 0,
+    "read-only startup does not join either group channel")
 for _, damaged in ipairs({ false, "invalid", { schemaVersion = "bad", showWelcome = "bad", chat = "bad" } }) do
     local repaired, _, _, _, repairedWorld = loadAddon(damaged, true)
     repairedWorld:initialize()
     assert(repaired.ready and repaired.db.schemaVersion == 3 and repaired.db.showWelcome == true)
     assert(type(repaired.db.chat) == "table" and not repaired:HasGroup())
+end
+
+-- Production startup connects shared data independently of human chat and position preferences.
+do
+    local connected, connectedEnvironment, connectedMessages, connectedEvent, connectedWorld =
+        loadAddon(settings(nil, false), false)
+    connectedEvent("ADDON_LOADED", "LockInTools")
+    assert(#connectedWorld.dataJoinCalls == 0 and not connected:IsDataConnected(),
+        "do not join data before login")
+    connectedEvent("PLAYER_LOGIN")
+    local dataRoom, chatRoom = connected:GetGroupDataChannelName(), connected:GetGroupChannelName()
+    assert(#connectedWorld.dataJoinCalls == 1 and connectedWorld.dataJoinCalls[1] == dataRoom
+        and #connectedWorld.joinCalls == 0 and not connected:IsDataConnected(),
+        "data joins asynchronously even with chat autojoin and position sharing off")
+    connectedWorld:completeJoin(dataRoom, 7)
+    assert(connected:IsDataConnected() and #connectedWorld.dataSends == 0
+        and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
+    local connectedCommand = connectedEnvironment.SlashCmdList.LOCKINTOOLS
+    connectedCommand("join")
+    connectedWorld:completeJoin(chatRoom, 3)
+    assert(#connectedWorld.addCalls == 1 and connectedWorld.addCalls[1] == chatRoom)
+    assert(connected:SetPositionSharing(true))
+    connectedWorld:advance(2)
+    local sent = assert(connectedWorld.dataSends[1], "enabling positions starts native broadcasts")
+    assert(sent.prefix == connected:GetDataPrefix() and sent.target == "7"
+        and sent.message:find("1|position|1|P|", 1, true) == 1)
+    connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "Self", nil, 0, 7, dataRoom)
+    assert(next(connected:GetSharedPositions()) == nil, "production route excludes own position echoes")
+    connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "Friend", nil, 0, 7, dataRoom)
+    assert(connected:GetSharedPositions()["friend-testrealm"].online
+        and connected.db.position.peers["friend-testrealm"], "production route delivers and retains peer positions")
+    assert(connected:SetPositionSharing(false))
+    connectedWorld:advance(2)
+    assert(#connectedWorld.dataSends == 1 and connected:IsDataConnected()
+        and next(connected:GetSharedPositions()) == nil, "position switch leaves the shared pipeline connected")
+    connectedCommand("data leave")
+    connectedWorld.fire("PLAYER_ENTERING_WORLD")
+    connectedWorld:advance(30)
+    assert(not connected:IsDataConnected() and #connectedWorld.dataJoinCalls == 1
+        and connectedWorld.dataLeaveCalls[1] == dataRoom and connectedWorld.channels[chatRoom:lower()],
+        "leaving data pauses retries and preserves native human chat")
+    connectedCommand("data join")
+    assert(#connectedWorld.dataJoinCalls == 2 and not connected:IsDataConnected())
+    connectedWorld:completeJoin(dataRoom, 14)
+    assert(connected:IsDataConnected())
+    assert(connected:SetPositionSharing(true))
+    connectedWorld:advance(2)
+    assert(#connectedWorld.dataSends == 2 and connectedWorld.dataSends[2].target == "14",
+        "reconnected positions use the current local channel number")
+    connectedWorld:restore("Unrelated", 19)
+    assert(connected:SetGroupSecret(OTHER_SECRET))
+    assert(not connected:IsDataConnected() and next(connected.db.position.peers) == nil
+        and next(connected:GetSharedPositions()) == nil and not connectedWorld.channels[dataRoom:lower()],
+        "group switching disconnects old data before clearing feature caches")
+    connectedWorld:advance(1)
+    assert(connectedWorld.dataJoinCalls[3] == connected:GetGroupDataChannelName()
+        and connectedWorld.channels.unrelated and not connected.db.chat.autoJoin,
+        "group switching reconnects data without changing chat preferences or unrelated channels")
+    assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 
 -- Matching group secrets derive one room and password; membership is asynchronous.
@@ -805,5 +903,5 @@ do
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: startup, migration, shared identity, protected chat, retries, group lifecycle, options and welcome")
+print("PASS: startup, migration, shared identity, chat/data connections, positions, retries, group lifecycle, options and welcome")
 

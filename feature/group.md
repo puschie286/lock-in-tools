@@ -38,12 +38,15 @@ Shared internal helpers:
 - `SetDataTransport(send)`: provide a backend accepting `(prefix, framedMessage)` and returning true when accepted; nil disconnects it. `IsDataConnected()` reports availability.
 - `GetGroupDataChannelName()` / `GetGroupDataChannelPassword()`: obtain the common data-channel credentials. Never log passwords or group keys.
 
-The backend will own native prefix registration, membership, routing, peer discovery and traffic handling. It must match the prefix and current group route before calling `ReceiveData`. **It remains disconnected pending [live channel/whisper validation](position-sharing.md#validation-and-remaining-work).** The helper does not join channels or send native messages on its own. Accepted sends do not prove peer delivery.
+On login, `Data.lua` registers the native prefix and joins the group's temporary data channel whenever a valid group is configured. This connection is independent of chat autojoin and individual feature switches, so other features can reuse it when position sharing is off. Native events confirm membership; asynchronous join retries are bounded. `/lit data leave` pauses data reconnects for this session, and `/lit data join` explicitly retries. `/lit status` shows connection state.
 
-Switching/leaving the group disconnects the old backend while retaining feature registrations. Reconnecting notifies features to reset send suppression. Individual feature switches stay independent of human chat. The pipeline has no queue, fragmentation, signing or authentication handshake.
+Each send resolves the current local channel number and broadcasts once through `CHANNEL`. Incoming messages must match the prefix and current group route before `ReceiveData` receives WoW's sender. Native errors are handled without breaking feature callbacks. No roster lookup or whisper fallback is used. Accepted sends do not prove peer delivery; the validated scope is friends on the same internal realm and faction, with [cross-realm limits and live evidence](position-sharing.md#connection-and-limits).
+
+Switching/leaving the group disconnects and leaves the old data channel while retaining feature registrations. Reconnecting notifies features to reset send suppression. Human chat and unrelated channels retain their own controls. The pipeline has no queue, fragmentation, signing, encryption or authentication handshake.
 
 ## In-game checks
 
 - Compare fingerprints after entering the same key with different case/whitespace; reload, relog and change characters. Existing `LIT1-` groups must retain their fingerprint and channel.
 - On a fresh install, check that welcome opens once with a visible saved key and shared chat begins joining. Copy the key, reload and reopen `/lit`; it must stay the same. Join a friend's key and verify confirmation, the updated displayed key and the new chat channel. Check layout at different UI scales, Escape/close cleanup, and **More options**.
-- Verify create versus save, copy/masking, switch/leave confirmations, help/status/welcome, and unsaved fields surviving notices. Switching/leaving groups must leave the previous group channel, including restored membership, while preserving unrelated channels.
+- Verify create versus save, copy/masking, switch/leave confirmations, help/status/welcome, and unsaved fields surviving notices. Switching/leaving groups must leave both previous group channels while preserving unrelated channels.
+- With chat autojoin and position sharing off, confirm that group data still connects. Check `/lit data leave`/`join`, reconnects, rejected joins and local channel-number changes without changing human-chat state. See the [position checks](position-sharing.md#in-game-checks) for peer delivery and map behavior.
