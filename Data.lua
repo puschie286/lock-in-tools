@@ -336,9 +336,10 @@ function addon:GetDataStatusText()
     if not self:HasGroup() then return "No group configured." end
     local state = self.dataState
     local name = self:GetGroupDataChannelName()
-    if self:IsDataConnected() then return "Joined " .. name .. "; channel broadcasts within this internal realm." end
-    if state.phase == "joining" then return "Joining " .. name .. "..." end
+    local label = self.GetChannelDisplayName and self:GetChannelDisplayName(name) or "LockInTools Data"
+    if self:IsDataConnected() then return "Joined " .. label .. "; channel broadcasts within this internal realm." end
+    if state.phase == "joining" then return "Joining " .. label .. "..." end
     if state.phase == "error" then return (state.detail or "Group data is unavailable.") .. " Use /lit data join to retry." end
     if state.phase == "paused" then return "Group data left. Use /lit data join to reconnect." end
-    return name .. " is configured; waiting for a group connection."
+    return label .. " is configured; waiting for a group connection."
 end

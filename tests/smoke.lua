@@ -6,6 +6,7 @@ local function loadAddon(savedVariables, loggedIn)
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
         dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, prefixes = {},
+        resolverCalls = {}, callbacks = {}, hookCalls = {},
         optionsOpened = 0, welcomeOpened = 0,
     }
     local function channelByName(name)
@@ -21,13 +22,33 @@ local function loadAddon(savedVariables, loggedIn)
         timers[#timers + 1] = timer
         return timer
     end
-    local editBox = {}
-    function editBox:SetChatType(chatType) self.chatType = chatType end
-    function editBox:SetChannelTarget(target) self.channelTarget = target end
-    function editBox:UpdateHeader() end
-    local chatFrame = { channelList = {} }
+    local environment
+    local function capture(...) return { n = select("#", ...), ... } end
+    local function newEditBox()
+        local header = {}
+        function header:SetText(text) self.text = text end
+        function header:SetFormattedText(format, ...)
+            self.formattedCalls = (self.formattedCalls or 0) + 1
+            self:SetText(string.format(format, ...))
+        end
+        function header:GetWidth() return #(self.text or "") end
+        local box = { header = header }
+        function box:SetChatType(chatType) self.chatType = chatType end
+        function box:SetChannelTarget(target) self.channelTarget = target end
+        function box:GetHeader() return self.header end
+        function box:UpdateHeader()
+            if self.chatType ~= "CHANNEL" then return end
+            local id, name = environment.GetChannelName(self.channelTarget)
+            self.header:SetFormattedText(environment.CHAT_CHANNEL_SEND, id, name)
+            self.measuredHeaderWidth = self.header:GetWidth()
+        end
+        return box
+    end
+    local editBox = newEditBox()
+    local chatFrame = { channelList = {}, editBox = editBox }
     function chatFrame:AddMessage(message) messages[#messages + 1] = message end
     function chatFrame:GetID() return 1 end
+    function chatFrame:GetEditBox() return self.editBox end
     function chatFrame:AddChannel(name)
         world.addCalls[#world.addCalls + 1] = name
         self.channelList[#self.channelList + 1] = name
@@ -36,7 +57,7 @@ local function loadAddon(savedVariables, loggedIn)
         world.openedChat[#world.openedChat + 1] = { text = text, frame = frame }
         return editBox
     end
-    local environment = setmetatable({
+    environment = setmetatable({
         LockInToolsDB = savedVariables,
         SlashCmdList = {},
         C_AddOns = {
@@ -61,7 +82,36 @@ local function loadAddon(savedVariables, loggedIn)
             end,
         },
         DEFAULT_CHAT_FRAME = chatFrame,
-        ChatFrameUtil = { ChooseBoxForSend = function() return editBox end, OpenChat = openChat },
+        CHAT_CHANNEL_SEND = "%s. %s: ",
+        ChatFrameUtil = {
+            ChooseBoxForSend = function() return editBox end,
+            OpenChat = openChat,
+            ForEachChatFrame = function(callback) callback(chatFrame) end,
+            ResolvePrefixedChannelName = function(...)
+                local arguments = capture(...)
+                world.resolverCalls[#world.resolverCalls + 1] = arguments
+                return arguments[1], "native-result", nil, "native-tail"
+            end,
+        },
+        EventRegistry = {
+            RegisterCallback = function(_, event, callback, owner)
+                local callbacks = world.callbacks[event] or {}
+                world.callbacks[event] = callbacks
+                callbacks[#callbacks + 1] = { callback = callback, owner = owner }
+            end,
+        },
+        hooksecurefunc = function(object, methodName, callback)
+            assert(type(object) == "table" and type(methodName) == "string" and type(callback) == "function",
+                "chat display uses named object method hooks")
+            local original = assert(object[methodName], "hooked methods must exist")
+            world.hookCalls[object] = (world.hookCalls[object] or 0) + 1
+            object[methodName] = function(...)
+                local result = capture(original(...))
+                callback(...)
+                return unpack(result, 1, result.n)
+            end
+        end,
+        issecretvalue = function(value) return world.secretValue ~= nil and value == world.secretValue end,
         GetChannelName = function(identifier)
             local channel = channelByName(identifier)
             if channel then return channel.id, channel.name end
@@ -132,6 +182,7 @@ local function loadAddon(savedVariables, loggedIn)
             return frame
         end,
     }, { __index = _G })
+    environment._G = environment
     local addon = {}
     for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Commands.lua" }) do
         local chunk, problem
@@ -189,6 +240,16 @@ local function loadAddon(savedVariables, loggedIn)
         fire("ADDON_LOADED", "LockInTools")
         fire("PLAYER_LOGIN")
     end
+    function world:showEditBox(box)
+        for _, registration in ipairs(self.callbacks["ChatFrame.OnEditBoxShow"] or {}) do
+            registration.callback(registration.owner, box)
+        end
+    end
+    function world:renderChannelMessage(id, name, text)
+        local label = environment.ChatFrameUtil.ResolvePrefixedChannelName(id .. ". " .. name)
+        return "|Hchannel:CHANNEL:" .. id .. "|h[" .. label .. "]|h " .. text
+    end
+    world.newEditBox = newEditBox
     world.fire, world.editBox = fire, editBox
     return addon, environment, messages, fire, world
 end
@@ -393,6 +454,113 @@ restoredWorld:initialize()
 restoredWorld:advance(20)
 assert(#restoredWorld.joinCalls == 0 and #restoredWorld.addCalls == 1)
 assert(restoredAddon:GetChatStatusText():find("Joined", 1, true))
+
+-- Readable labels change presentation while native credentials and routing remain stable.
+do
+    local display, displayEnvironment, _, _, displayWorld = loadAddon(settings(), false)
+    local nativeResolver = displayEnvironment.ChatFrameUtil.ResolvePrefixedChannelName
+    displayWorld:initialize()
+    local chatName, dataName = display:GetGroupChannelName(), display:GetGroupDataChannelName()
+    local resolve = displayEnvironment.ChatFrameUtil.ResolvePrefixedChannelName
+    assert(resolve ~= nativeResolver, "install readable labels during initialization")
+    assert(display:GetChannelDisplayName(chatName:lower()) == "LockInTools")
+    assert(display:GetChannelDisplayName(dataName:lower()) == "LockInTools Data")
+    assert(resolve("5. " .. chatName) == "5. LockInTools")
+    assert(resolve("12.  " .. dataName:lower()) == "12.  LockInTools Data",
+        "preserve native channel numbers and spacing")
+    assert(display:GetChannelDisplayName("Unrelated") == "Unrelated")
+    assert(display:GetChannelDisplayName(chatName .. "suffix") == chatName .. "suffix",
+        "only complete owned channel names receive labels")
+    local function capture(...) return { n = select("#", ...), ... } end
+    local marker, unrelated = {}, "7. Unrelated"
+    local result = capture(resolve(unrelated, marker, nil, "last-argument"))
+    local forwarded = displayWorld.resolverCalls[#displayWorld.resolverCalls]
+    assert(result.n == 4 and result[1] == unrelated and result[2] == "native-result"
+        and result[3] == nil and result[4] == "native-tail",
+        "unrelated channels retain all native resolver returns")
+    assert(forwarded.n == 4 and forwarded[1] == unrelated and forwarded[2] == marker
+        and forwarded[3] == nil and forwarded[4] == "last-argument",
+        "unrelated channels retain all native resolver arguments")
+    for _, value in ipairs({ false, 17, {} }) do
+        assert(display:GetChannelDisplayName(value) == value)
+        assert(resolve(value) == value, "nonstring values pass through the native resolver")
+    end
+    assert(display:GetChannelDisplayName(nil) == nil and resolve(nil) == nil)
+    displayWorld.secretValue = chatName
+    assert(display:GetChannelDisplayName(chatName) == chatName)
+    displayWorld.secretValue = "5. " .. chatName
+    assert(resolve(displayWorld.secretValue) == displayWorld.secretValue,
+        "secret channel values pass through unchanged")
+    displayWorld.secretValue = nil
+
+    displayWorld:advance(2)
+    assert(displayWorld.joinCalls[1] == chatName
+        and displayWorld.lastJoinPassword == display:GetGroupChannelPassword())
+    assert(display:GetChatStatusText():find("LockInTools", 1, true)
+        and not display:GetChatStatusText():find(chatName, 1, true))
+    displayWorld:completeJoin(chatName, 5)
+    displayWorld:completeJoin(dataName, 9)
+    assert(display:GetChatStatusText():find("Joined LockInTools", 1, true))
+    assert(display:GetDataStatusText():find("Joined LockInTools Data", 1, true)
+        and not display:GetDataStatusText():find(dataName, 1, true))
+    display:OpenChatInput()
+    displayWorld:advance(0)
+    assert(displayWorld.editBox.channelTarget == chatName and displayWorld.editBox.chatType == "CHANNEL",
+        "the composer still targets the real native channel")
+    local header = displayWorld.editBox.header
+    assert(header.text == "5. LockInTools: " and displayWorld.editBox.measuredHeaderWidth == #header.text,
+        "native header layout measures the readable label")
+    assert(displayWorld.hookCalls[header] == 1, "hook an existing composer header once")
+    local body = "Keep this normal message unchanged: " .. chatName
+    assert(displayWorld:renderChannelMessage(5, chatName, body)
+        == "|Hchannel:CHANNEL:5|h[5. LockInTools]|h " .. body,
+        "readable channel links retain their clickable target and normal message text")
+    assert(displayWorld:renderChannelMessage(7, "Unrelated", body)
+        == "|Hchannel:CHANNEL:7|h[7. Unrelated]|h " .. body)
+    displayWorld:restore(chatName, 8)
+    displayWorld.editBox:UpdateHeader()
+    assert(header.text == "8. LockInTools: " and displayWorld.editBox.channelTarget == chatName,
+        "renumbering changes the displayed number without changing native targeting")
+
+    local newBox = displayWorld.newEditBox()
+    newBox:SetChatType("CHANNEL")
+    newBox:SetChannelTarget(dataName)
+    displayWorld:showEditBox(newBox)
+    displayWorld:showEditBox(newBox)
+    newBox:UpdateHeader()
+    assert(newBox.header.text == "9. LockInTools Data: "
+        and newBox.measuredHeaderWidth == #newBox.header.text)
+    assert(displayWorld.hookCalls[newBox.header] == 1, "repeated show events must not duplicate header hooks")
+    newBox.header:SetFormattedText("Whisper to %s", chatName)
+    assert(newBox.header.text == "Whisper to " .. chatName, "other composer formats remain unchanged")
+    displayWorld.secretValue = dataName
+    newBox:UpdateHeader()
+    assert(newBox.header.text == "9. " .. dataName .. ": ", "secret header names remain native")
+    displayWorld.secretValue = nil
+    displayWorld:restore("Unrelated", 7)
+    newBox:SetChannelTarget("Unrelated")
+    newBox:UpdateHeader()
+    assert(newBox.header.text == "7. Unrelated: ", "other composer channel names remain unchanged")
+
+    assert(display:SetGroupSecret(OTHER_SECRET))
+    local nextChat, nextData = display:GetGroupChannelName(), display:GetGroupDataChannelName()
+    assert(nextChat ~= chatName and nextData ~= dataName)
+    assert(resolve("3. " .. nextChat) == "3. LockInTools"
+        and resolve("4. " .. nextData) == "4. LockInTools Data")
+    assert(resolve("8. " .. chatName) == "8. LockInTools"
+        and resolve("9. " .. dataName) == "9. LockInTools Data",
+        "delayed leave notices keep readable labels for the previous group")
+    local reloadedDisplay, reloadedEnvironment, _, _, reloadedDisplayWorld = loadAddon(display.db, false)
+    reloadedDisplayWorld:initialize()
+    assert(reloadedDisplay:GetGroupChannelName() == nextChat
+        and reloadedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("3. " .. nextChat) == "3. LockInTools",
+        "reload preserves credentials and restores readable labels")
+    assert(display:LeaveGroup())
+    assert(resolve("3. " .. nextChat) == "3. LockInTools"
+        and resolve("4. " .. nextData) == "4. LockInTools Data",
+        "delayed notices remain readable after leaving the group")
+    assert(resolve("7. Unrelated") == "7. Unrelated")
+end
 
 -- Feature settings and channel leaves retain shared group identity.
 local manual, manualEnvironment, _, _, manualWorld = loadAddon(settings(nil, false), false)

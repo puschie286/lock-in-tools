@@ -20,6 +20,64 @@ local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
 end
 
+function addon:RememberGroupChannelLabels()
+    self.channelDisplayLabels = self.channelDisplayLabels or {}
+    local chat, data = self:GetGroupChannelName(), self:GetGroupDataChannelName()
+    if chat then self.channelDisplayLabels[chat:lower()] = "LockInTools" end
+    if data then self.channelDisplayLabels[data:lower()] = "LockInTools Data" end
+end
+
+function addon:GetChannelDisplayName(name)
+    if IsSecret(name) or type(name) ~= "string" then return name end
+    return self.channelDisplayLabels and self.channelDisplayLabels[name:lower()] or name
+end
+
+function addon:InitializeChatDisplay()
+    if self.chatDisplayInitialized then return end
+    self.chatDisplayInitialized = true
+    self:RememberGroupChannelLabels()
+
+    -- Change only the final label. Event fields and native channel lookups also
+    -- control routing and membership, so they must retain the actual names.
+    if ChatFrameUtil and type(ChatFrameUtil.ResolvePrefixedChannelName) == "function" then
+        local resolve = ChatFrameUtil.ResolvePrefixedChannelName
+        ChatFrameUtil.ResolvePrefixedChannelName = function(name, ...)
+            if not IsSecret(name) and type(name) == "string" then
+                local prefix, channel = name:match("^(%d+%.%s+)(.+)$")
+                if channel then
+                    local label = self:GetChannelDisplayName(channel)
+                    if label ~= channel then return prefix .. label end
+                end
+            end
+            return resolve(name, ...)
+        end
+    end
+
+    if type(hooksecurefunc) ~= "function" then return end
+    local hookedHeaders = setmetatable({}, { __mode = "k" })
+    local function hookHeader(editBox)
+        local header = editBox and editBox.header
+        if not header or hookedHeaders[header] or type(header.SetFormattedText) ~= "function" then return end
+        hookedHeaders[header] = true
+        hooksecurefunc(header, "SetFormattedText", function(target, format, id, name)
+            if IsSecret(format) or format ~= CHAT_CHANNEL_SEND or IsSecret(id) then return end
+            local label = self:GetChannelDisplayName(name)
+            if not IsSecret(name) and label ~= name then
+                -- Runs before UpdateHeader measures text and lays out the input.
+                target:SetText(string.format(format, id, label))
+            end
+        end)
+    end
+    if ChatFrameUtil and type(ChatFrameUtil.ForEachChatFrame) == "function" then
+        ChatFrameUtil.ForEachChatFrame(function(frame) hookHeader(frame.editBox) end)
+    end
+    if EventRegistry and type(EventRegistry.RegisterCallback) == "function" then
+        EventRegistry:RegisterCallback("ChatFrame.OnEditBoxShow", function(_, editBox)
+            hookHeader(editBox)
+        end, self)
+    end
+end
+
 function addon:CancelChatTimer()
     local state = self.chatState
     state.generation = state.generation + 1
@@ -41,17 +99,18 @@ function addon:GetChatStatusText()
     if not name then
         return "Join a LockInTools group first."
     end
+    local label = self:GetChannelDisplayName(name)
     if state.phase == "joined" then
         local channelID = GetChannelName(name)
-        return string.format("Joined %s (/%s). Use /lit chat to write.", name, channelID)
+        return string.format("Joined %s (/%s). Use /lit chat to write.", label, channelID)
     end
     if state.phase == "joining" then
-        return "Joining " .. name .. "..."
+        return "Joining " .. label .. "..."
     end
     if state.phase == "paused" then
-        return "Left " .. name .. ". Use Join to reconnect."
+        return "Left " .. label .. ". Use Join to reconnect."
     end
-    return state.detail or (name .. " is configured. Use Join to connect.")
+    return state.detail or (label .. " is configured. Use Join to connect.")
 end
 
 function addon:ConfirmChatMembership()
@@ -168,7 +227,7 @@ function addon:JoinChatChannel(manual)
         return true
     end
     if state.attempts >= #RETRY_DELAYS then
-        self:FailChatJoin("Could not join " .. name .. ". Check the channel and use Join to try again.")
+        self:FailChatJoin("Could not join " .. self:GetChannelDisplayName(name) .. ". Check the channel and use Join to try again.")
         return false
     end
 
@@ -242,6 +301,8 @@ function addon:OnGroupChanged(previousChannelName)
     if not self.chatState then
         return
     end
+    -- Retain old labels for asynchronous leave notices after a group switch.
+    self:RememberGroupChannelLabels()
     self:CancelChatTimer()
     -- Leaving/changing the addon group disconnects its transport, even if WoW
     -- restored membership independently. Unrelated custom channels are retained.
@@ -300,6 +361,7 @@ end
 
 function addon:InitializeChat()
     self.chatState = { phase = "idle", attempts = 0, generation = 0 }
+    self:InitializeChatDisplay()
     self.chatFrame = CreateFrame("Frame")
     self.chatFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
     self.chatFrame:RegisterEvent("CHANNEL_UI_UPDATE")

@@ -19,11 +19,14 @@ Native WoW chat for friends using the same [group key](group.md), faction and re
 
 `/lit chat` resolves the current channel number by name. The native interface handles sending on Enter, display, links and restrictions. There is no dedicated Friends tab, automated human-chat payload, offline delivery or synchronized history.
 
+Chat message prefixes, join/leave notices, the composer header and addon status use the readable labels **LockInTools** and **LockInTools Data** for the group's channels. These labels are local display aliases; the derived native channel names and passwords remain unchanged. Native channel management, channel-list output and moderation notices may still show the actual names. Addons replacing native chat formatting may display them differently.
+
 Native password admission depends on WoW's ownership rules. **Joined** confirms membership without authenticating every participant; human messages are neither signed nor encrypted end to end. Server routing, password enforcement and ownership behavior remain unverified in game.
 
 ## In-game checks
 
 - Record build, region, faction and realm/ruleset. Two ungrouped friends should exchange messages across zones, guilds, layers and instances; changing unrelated channel numbers must keep `/lit chat` targeting correctly.
+- Check **LockInTools** and **LockInTools Data** labels in chat prefixes, join/leave notices and addon status, plus **LockInTools** in the `/lit chat` composer header. Click a channel label and send via its `/number`; routing and normal message text must remain correct. Repeat after `/reload` and a group switch, keeping unrelated channel labels unchanged.
 - Reverse join order, transfer ownership, let the owner/everyone leave, then rejoin an empty room. Wrong passwords must fail clearly without retry loops; inspect access before password application.
 - Reload, relog and switch characters without duplicate requests. Addon/native leave must stay paused across zone changes; disabling autojoin must prevent later addon requests.
 - Check restricted/unavailable APIs and combat transitions for errors. Repeat routing and password checks when moving from beta to a release client.

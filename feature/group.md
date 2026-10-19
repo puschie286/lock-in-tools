@@ -29,6 +29,8 @@ Optional signing helpers cover exact payload bytes without encryption. Features 
 
 Human chat keeps its existing channel. Shared feature data has a separate group-derived name beginning **LITDATA** and separate derived credentials. This is the addon's naming convention on a normal custom channel, not a special WoW channel mode. Existing friendly/legacy fingerprints and chat credentials stay unchanged.
 
+The group's channels appear locally as **LockInTools** and **LockInTools Data** in chat prefixes, join/leave notices, the composer header and addon status. These display aliases leave derived native names/passwords and routing unchanged. Native channel management, channel-list output and moderation notices may show actual names; addons replacing native chat formatting may display labels differently.
+
 `Data.lua` provides one pipeline with the addon prefix `LockInToolsData`. Position sharing registers as `position`; future features register their own identifier and use the same backend. Messages use `1|feature|payload`, preserving the payload verbatim, with a 255-byte total packet cap. Sampling, ordering, persistence and retry decisions remain each feature's responsibility.
 
 Shared internal helpers:
@@ -49,4 +51,5 @@ Switching/leaving the group disconnects and leaves the old data channel while re
 - Compare fingerprints after entering the same key with different case/whitespace; reload, relog and change characters. Existing `LIT1-` groups must retain their fingerprint and channel.
 - On a fresh install, check that welcome opens once with a visible saved key and shared chat begins joining. Copy the key, reload and reopen `/lit`; it must stay the same. Join a friend's key and verify confirmation, the updated displayed key and the new chat channel. Check layout at different UI scales, Escape/close cleanup, and **More options**.
 - Verify create versus save, copy/masking, switch/leave confirmations, help/status/welcome, and unsaved fields surviving notices. Switching/leaving groups must leave both previous group channels while preserving unrelated channels.
+- After reload and a group switch, check readable chat/data labels and current `/number` routing without changing normal message text or unrelated channel labels. Follow the [shared-chat checks](shared-chat.md#in-game-checks) for clickable labels and the composer header.
 - With chat autojoin and position sharing off, confirm that group data still connects. Check `/lit data leave`/`join`, reconnects, rejected joins and local channel-number changes without changing human-chat state. See the [position checks](position-sharing.md#in-game-checks) for peer delivery and map behavior.
