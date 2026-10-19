@@ -521,29 +521,103 @@ local function loadOptions(uiAddon, uiEnvironment)
     local createEventFrame = uiEnvironment.CreateFrame
     local methods = {}
     local function makeWidget()
-        return setmetatable({ scripts = {}, enabled = true, shown = true }, { __index = methods })
+        return setmetatable({ scripts = {}, handlers = {}, hooks = {}, enabled = true, shown = true }, { __index = methods })
     end
-    for _, name in ipairs({ "SetSize", "SetPoint", "SetFrameStrata", "SetClampedToScreen",
+    local function updateScript(widget, script)
+        if not widget.handlers[script] and not widget.hooks[script] then
+            widget.scripts[script] = nil
+            return
+        end
+        widget.scripts[script] = function(...)
+            if widget.handlers[script] then widget.handlers[script](...) end
+            for _, callback in ipairs(widget.hooks[script] or {}) do callback(...) end
+        end
+    end
+    for _, name in ipairs({ "SetPoint", "SetAllPoints", "SetFrameStrata", "SetClampedToScreen",
         "SetMovable", "EnableMouse", "RegisterForDrag", "StartMoving", "StopMovingOrSizing",
-        "SetWidth", "SetHeight", "SetJustifyH", "SetAutoFocus", "Raise" }) do
+        "SetJustifyH", "SetAutoFocus", "SetTextInsets", "Raise" }) do
         methods[name] = function() end
     end
+    function methods:SetSize(width, height) self.width, self.height = width, height end
+    function methods:SetWidth(width) self.width = width end
+    function methods:SetHeight(height) self.height = height end
+    function methods:GetWidth() return self.width or 0 end
+    function methods:GetHeight() return self.height or 0 end
+    function methods:SetColorTexture(...)
+        self.textureColor = { ... }
+        if self.parent then self.parent.texturePaints = (self.parent.texturePaints or 0) + 1 end
+    end
+    function methods:SetVertexColor(...) self.vertexColor = { ... } end
+    function methods:SetTexture(texture) self.texture = texture end
+    function methods:SetParent(parent) self.parent = parent end
+    function methods:SetScale(scale) self.scale = scale end
+    function methods:SetFont(path, size, flags) self.font = { path, size, flags }; return true end
+    function methods:GetFont() return unpack(self.font or { "Fonts\\FRIZQT__.TTF", 12, "" }) end
+    function methods:SetFontObject(fontObject) self.fontObject = fontObject end
+    function methods:SetAlpha(alpha) self.alpha = alpha end
     function methods:SetText(text)
         self.text = text
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
     function methods:GetText() return self.text or "" end
     function methods:SetTextColor(red, green, blue) self.color = { red, green, blue } end
-    function methods:SetEnabled(enabled) self.enabled = enabled end
+    function methods:SetEnabled(enabled)
+        local changed = self.enabled ~= enabled
+        self.enabled = enabled
+        local callback = self.scripts[enabled and "OnEnable" or "OnDisable"]
+        if changed and callback and (self.frameType == "Button" or self.frameType == "CheckButton") then
+            callback(self)
+        end
+    end
     function methods:IsEnabled() return self.enabled end
     function methods:SetChecked(checked) self.checked = checked end
     function methods:GetChecked() return self.checked end
-    function methods:ClearFocus() self.focusCleared = true; self.focused = false end
-    function methods:SetFocus() self.focused = true; self.focusCleared = false end
+    function methods:ClearFocus()
+        local wasFocused = self.focused
+        self.focusCleared, self.focused = true, false
+        if wasFocused and self.scripts.OnEditFocusLost then self.scripts.OnEditFocusLost(self) end
+    end
+    function methods:SetFocus()
+        local wasFocused = self.focused
+        self.focused, self.focusCleared = true, false
+        if not wasFocused and self.scripts.OnEditFocusGained then self.scripts.OnEditFocusGained(self) end
+    end
     function methods:HighlightText() self.highlighted = true end
     function methods:SetPassword(password) self.password = password end
-    function methods:SetScript(script, callback) self.scripts[script] = callback end
+    function methods:SetFontString(fontString) self.fontString = fontString end
+    function methods:GetFontString() return self.fontString end
+    function methods:SetCheckedTexture(texture)
+        if type(texture) ~= "table" then
+            local path = texture
+            texture = makeWidget()
+            texture:SetTexture(path)
+        end
+        self.checkedTexture = texture
+    end
+    function methods:GetCheckedTexture() return self.checkedTexture end
+    function methods:SetDisabledCheckedTexture(texture) self.disabledCheckedTexture = texture end
+    local function checkScript(widget, script)
+        assert(widget.frameType ~= "EditBox" or (script ~= "OnEnable" and script ~= "OnDisable"),
+            "native EditBoxes do not support button enable/disable scripts")
+    end
+    function methods:SetScript(script, callback)
+        checkScript(self, script)
+        self.handlers[script] = callback
+        updateScript(self, script)
+    end
+    function methods:GetScript(script) return self.handlers[script] end
+    function methods:HookScript(script, callback)
+        checkScript(self, script)
+        self.hooks[script] = self.hooks[script] or {}
+        table.insert(self.hooks[script], callback)
+        updateScript(self, script)
+    end
     function methods:CreateFontString() return makeWidget() end
+    function methods:CreateTexture()
+        local texture = makeWidget()
+        texture.parent = self
+        return texture
+    end
     function methods:IsShown() return self.shown end
     function methods:Hide()
         local wasShown = self.shown
@@ -564,29 +638,43 @@ local function loadOptions(uiAddon, uiEnvironment)
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
     end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
-        if frameType == "Frame" and not name and not template then
+        if frameType == "Frame" and not name and not template and not parent then
             return createEventFrame(frameType)
         end
         assert(frameType == "Frame" or frameType == "EditBox"
             or frameType == "CheckButton" or frameType == "Button", "use supported native widgets")
         local widget = makeWidget()
-        widget.frameType, widget.parent, widget.template = frameType, parent, template
+        widget.frameType, widget.name, widget.parent, widget.template = frameType, name, parent, template
         if template == "BasicFrameTemplateWithInset" then widget.TitleText = makeWidget() end
         if name then uiEnvironment[name] = widget end
         return widget
     end
-    uiEnvironment.UIParent, uiEnvironment.UISpecialFrames = {}, {}
+    uiEnvironment.UIParent, uiEnvironment.UISpecialFrames = makeWidget(), {}
+    uiEnvironment._G = uiEnvironment
     uiEnvironment.tinsert = table.insert
-    local chunk, problem
-    if setfenv then
-        chunk, problem = loadfile("Options.lua")
-        assert(chunk, problem)
-        setfenv(chunk, uiEnvironment)
-    else
-        chunk, problem = loadfile("Options.lua", "t", uiEnvironment)
-        assert(chunk, problem)
+    uiEnvironment.hooksecurefunc = function(object, methodName, callback)
+        assert(type(object) == "table" and type(methodName) == "string" and type(callback) == "function",
+            "this harness supports named object method hooks")
+        local original = assert(object[methodName], "hooked methods must exist")
+        local function capture(...) return { n = select("#", ...), ... } end
+        object[methodName] = function(...)
+            local result = capture(original(...))
+            callback(...)
+            return unpack(result, 1, result.n)
+        end
     end
-    chunk("LockInTools", uiAddon)
+    for _, file in ipairs({ "Theme.lua", "Options.lua" }) do
+        local chunk, problem
+        if setfenv then
+            chunk, problem = loadfile(file)
+            assert(chunk, problem)
+            setfenv(chunk, uiEnvironment)
+        else
+            chunk, problem = loadfile(file, "t", uiEnvironment)
+            assert(chunk, problem)
+        end
+        chunk("LockInTools", uiAddon)
+    end
 end
 
 local uiAddon, uiEnvironment, uiMessages, _, uiWorld = loadAddon(settings("", false), false)
@@ -731,6 +819,11 @@ do
         "duplicate login does not regenerate the key or request another join")
     assert(contains(initialEnvironment.UISpecialFrames, "LockInToolsWelcome"),
         "Escape can close the welcome screen")
+    local unfocusedPaints = welcome.ownSecret.texturePaints
+    welcome.ownSecret:SetFocus()
+    assert(welcome.ownSecret.highlighted and welcome.ownSecret.texturePaints > unfocusedPaints,
+        "focusing the saved key keeps both copy highlighting and the native focus outline")
+    welcome.ownSecret:ClearFocus()
     welcome.selectKey:Click()
     assert(welcome.ownSecret.focused and welcome.ownSecret.highlighted,
         "select key focuses and highlights the visible key for copying")
@@ -902,6 +995,161 @@ do
         "opening read-only welcome leaves the original saved data untouched")
 end
 
+-- Optional skins must preserve lazy creation and the forms' existing behavior.
+local function skinFixture()
+    local state = { font = "SkinFont-A.ttf", accent = { 0.2, 0.8, 0.4 }, looks = {}, shells = 0 }
+    local skin = {}
+    function skin.Shell(window)
+        state.shells = state.shells + 1
+        window.skinApplied = true
+    end
+    for _, name in ipairs({ "Panel", "Button", "CloseButton", "EditBox", "Checkbox", "StateButtonLabel" }) do
+        skin[name] = function() end
+    end
+    function skin.Font(region)
+        local _, size, flags = region:GetFont()
+        region:SetFont(state.font, size, flags)
+    end
+    function skin.GetAccentColor() return unpack(state.accent) end
+    function skin.OnLooksChanged(callback) state.looks[#state.looks + 1] = callback end
+    return skin, state
+end
+
+local function loadSkinnedOptions(registerSkin)
+    local skinned, skinEnvironment, skinMessages, _, skinWorld = loadAddon(settings(SECRET, false), false)
+    skinEnvironment.EllesmereUI = { RegisterSkin = registerSkin }
+    skinWorld:initialize()
+    loadOptions(skinned, skinEnvironment)
+    return skinned, skinEnvironment, skinMessages, skinWorld
+end
+
+do
+    local registration, registrations = nil, 0
+    local disabled, disabledEnvironment = loadSkinnedOptions(function(name, callback)
+        assert(name == "LockInTools", "the optional skin uses the addon identity")
+        registrations = registrations + 1
+        registration = callback
+    end)
+    assert(registrations == 1 and type(registration) == "function"
+        and not disabled.optionsPanel and not disabled.welcomePanel,
+        "registering an installed but disabled skin does not construct windows")
+    registration(nil)
+    registration("unsupported")
+    disabledEnvironment.UIParent:SetSize(640, 480)
+    disabled:OpenOptions()
+    disabled:OpenWelcome()
+    assert(not disabled.optionsPanel.skinApplied and not disabled.welcomePanel.skinApplied
+        and disabled.optionsPanel.TitleText.font[1] == "Fonts\\FRIZQT__.TTF"
+        and disabled:GetGroupSecret() == SECRET and registrations == 1,
+        "disabled or invalid optional skins retain usable native windows and the saved key")
+    assert(disabled.optionsPanel.scale > 0 and disabled.optionsPanel.scale < 1
+        and disabled.optionsPanel:GetWidth() * disabled.optionsPanel.scale <= disabledEnvironment.UIParent:GetWidth()
+        and disabled.optionsPanel:GetHeight() * disabled.optionsPanel.scale <= disabledEnvironment.UIParent:GetHeight()
+        and disabled.welcomePanel:GetHeight() * disabled.welcomePanel.scale <= disabledEnvironment.UIParent:GetHeight(),
+        "both native windows fit a viewport smaller than their preferred size")
+    disabled.optionsPanel.secret:UserInput(OTHER_SECRET)
+    disabled.optionsPanel.applyGroup:Click()
+    disabled.optionsPanel.CloseButton:Click()
+    assert(not disabled.optionsPanel:IsShown() and disabled.optionsPanel.secret:GetText() == ""
+        and disabled.optionsPanel.secret.password and disabled:GetGroupSecret() == SECRET,
+        "the native title-bar close button clears drafts without confirming a group switch")
+    disabledEnvironment.UIParent:SetSize(1920, 1080)
+    disabled:OpenOptions()
+    assert(disabled.optionsPanel.scale == 1 and disabled.optionsPanel.applyGroup:GetText() == "Use key",
+        "reopening on a larger viewport restores normal scale and resets confirmation")
+end
+
+do
+    local skin, appearance = skinFixture()
+    local early, _, earlyMessages = loadSkinnedOptions(function(_, callback) callback(skin) end)
+    assert(not early.optionsPanel and not early.welcomePanel and appearance.shells == 0,
+        "an enabled skin callback before first use preserves lazy windows")
+    early:OpenWelcome()
+    local welcome = early.welcomePanel
+    assert(welcome.skinApplied and welcome.TitleText.font[1] == appearance.font
+        and welcome.TitleText.font[2] == 16
+        and welcome.ownSecret:GetText() == SECRET,
+        "a window created after the skin callback receives its font while preserving heading size")
+    welcome.friendSecret:UserInput(OTHER_SECRET)
+    welcome.joinGroup:Click()
+    welcome.friendSecret:SetFocus()
+    appearance.font = "SkinFont-B.ttf"
+    appearance.accent = { 0.9, 0.3, 0.6 }
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(welcome.TitleText.font[1] == appearance.font and welcome.friendSecret.focused
+        and welcome.friendSecret:GetText() == OTHER_SECRET and welcome.joinGroup:GetText() == "Confirm switch"
+        and early:GetGroupSecret() == SECRET,
+        "live appearance updates preserve focus, key drafts and pending confirmation")
+    early:OpenOptions()
+    local options = early.optionsPanel
+    assert(options.skinApplied and options.TitleText.font[1] == appearance.font
+        and options.positionSharing:GetCheckedTexture().vertexColor[1] == appearance.accent[1]
+        and appearance.shells == 2,
+        "a later-created settings window uses the current font and accent")
+    appearance.accent = { 0.4, 0.6, 1 }
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(options.positionSharing:GetCheckedTexture().vertexColor[1] == appearance.accent[1]
+        and options.positionSharing:GetCheckedTexture().vertexColor[3] == appearance.accent[3],
+        "an existing checkbox follows later accent changes")
+    welcome.CloseButton:Click()
+    assert(not welcome:IsShown() and welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == "",
+        "the styled title-bar close button keeps hidden-key cleanup")
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == "",
+        "restyling a hidden window never restores cleared keys")
+    early:OpenWelcome()
+    assert(welcome.ownSecret:GetText() == SECRET and welcome.joinGroup:GetText() == "Join friend"
+        and appearance.shells == 2 and #appearance.looks == 1,
+        "reopening reuses styled windows and clears pending confirmation without repeating skin registration")
+    assert(not contains(earlyMessages, SECRET) and not contains(earlyMessages, OTHER_SECRET),
+        "skin refresh never prints key fields")
+end
+
+do
+    local registration
+    local late, _, _, lateWorld = loadSkinnedOptions(function(_, callback) registration = callback end)
+    late:OpenOptions()
+    local options = late.optionsPanel
+    options.secret:UserInput(OTHER_SECRET)
+    options.applyGroup:Click()
+    options.autoJoin:SetChecked(true)
+    local skin, appearance = skinFixture()
+    registration(skin)
+    assert(options.skinApplied and options.TitleText.font[1] == appearance.font
+        and options.secret:GetText() == OTHER_SECRET and options.applyGroup:GetText() == "Confirm switch"
+        and options.autoJoin:GetChecked() and not late.db.chat.autoJoin,
+        "a late skin callback styles existing windows without applying their unsaved drafts")
+    options.applyGroup:Click()
+    assert(late:GetGroupSecret() == OTHER_SECRET and options.secret:GetText() == ""
+        and options.secret.password and #lateWorld.joinCalls == 0,
+        "confirmation and hidden-key rules still work after skinning an open form")
+end
+
+do
+    local broken = loadSkinnedOptions(function() error("optional registration failure") end)
+    broken:OpenOptions()
+    assert(broken.optionsPanel:IsShown() and broken:GetGroupSecret() == SECRET,
+        "optional registration failure cannot block native settings")
+    local throwing = {}
+    for _, name in ipairs({ "Shell", "Panel", "Button", "CloseButton", "EditBox", "Checkbox",
+        "StateButtonLabel", "Font", "GetAccentColor", "OnLooksChanged" }) do
+        throwing[name] = function() error("optional appearance failure") end
+    end
+    local resilient, _, resilientMessages = loadSkinnedOptions(function(_, callback) callback(throwing) end)
+    resilient:OpenWelcome()
+    resilient.welcomePanel.friendSecret:UserInput(OTHER_SECRET)
+    resilient.welcomePanel.joinGroup:Click()
+    resilient.welcomePanel.joinGroup:Click()
+    resilient.welcomePanel.CloseButton:Click()
+    assert(resilient:GetGroupSecret() == OTHER_SECRET and not resilient.welcomePanel:IsShown()
+        and resilient.welcomePanel.ownSecret:GetText() == "" and resilient.welcomePanel.friendSecret:GetText() == "",
+        "throwing skin methods cannot block group confirmation or hidden-key cleanup")
+    assert(resilient.welcomePanel.CloseButton:GetFontString().alpha ~= 0,
+        "failed close-button skinning keeps the native close symbol visible")
+    assert(not contains(resilientMessages, "optional appearance failure") and not contains(resilientMessages, OTHER_SECRET),
+        "optional skin errors do not expose internal errors or key contents")
+end
+
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: startup, migration, shared identity, chat/data connections, positions, retries, group lifecycle, options and welcome")
+print("PASS: startup, migration, shared identity, chat/data connections, positions, retries, group lifecycle, themed options and welcome")
 
