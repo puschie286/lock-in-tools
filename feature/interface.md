@@ -12,6 +12,8 @@ There are two windows: **Content**, currently containing only the [player overvi
 
 The header buttons **Settings** and **Content** switch between the windows at the same screen position; only one is visible at a time. Moving either window also sets the position for the other. Pages use the available height below the header. All key sharing and editing is in Settings → Group. Closing Settings or leaving Group clears displayed key fields, drafts and pending confirmations; group changes require confirmation. Leaving Shared positions finishes any trail-length edit.
 
+The shared window position is saved account-wide and restored after reloads, logins and character changes. Windows start centered when no valid saved position is available. Newer-schema profiles allow temporary movement without saving it.
+
 When enabled on an unconfigured profile, the initial login screen opens Content and saves a new group key. `/lit welcome on|off` retains control of this login behavior. Existing or invalid saved keys are preserved, and newer-schema data remains read-only.
 
 ## Optional EllesmereUI skin
@@ -23,5 +25,6 @@ A compatible EllesmereUI installation can style LockInTools with its accent and 
 Unsupported skin APIs leave the native style available. Custom minimap shapes other than square use round placement. Newer-schema settings remain read-only. Live rendering, fonts and client compatibility remain unvalidated.
 
 - Check both windows, their shared position after moving either, header navigation, Settings page tabs, retained page selection, direct slash opens, immediate preference saving and draft cleanup through navigation and reopening windows.
+- Move either window, then `/reload`, relog and switch characters to check that both restore the shared position. On a newer-schema profile, check temporary movement without changing saved data.
 - Check readable windows and icons at smaller UI scales, with EllesmereUI absent, disabled and enabled.
 - Check minimap clicks and dragging, then reload or switch characters to confirm its saved position.

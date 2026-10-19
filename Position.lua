@@ -350,11 +350,11 @@ function addon:ReceivePosition(sender, payload)
     return true
 end
 
-function addon:GetPositionStatusText()
+function addon:GetPositionStatusText(concise)
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
     if not self.db.position.sharing then return "Off." end
     if not self:HasGroup() then return "Join a LockInTools group first." end
     if not self:IsDataConnected() then return "On. Waiting for a group connection." end
     if self.positionState.lastSendSucceeded == false then return "On. Group connection unavailable." end
-    return "On. Movement checks every 2 seconds; idle heartbeat about every 16 seconds."
+    return concise and "On." or "On. Movement checks every 2 seconds; idle heartbeat about every 16 seconds."
 end

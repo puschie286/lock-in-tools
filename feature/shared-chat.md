@@ -4,9 +4,9 @@ Native WoW chat for friends using the same [group key](group.md), faction and re
 
 ## Use
 
-Use **Group** in `/lit options` to share a key or join a friend's group. Shared chat joins automatically by default; change **Automatically join shared chat on login** under **Shared chat**, or join manually with `/lit join`. Once **Joined**, use `/lit chat` to type in normal WoW chat.
+Use **Group** in `/lit options` to share a key or join a friend's group. Shared chat joins automatically by default; change **Join automatically on login** under **Shared chat**, or use **Join chat** or `/lit join`. Once **Joined**, use `/lit chat` to type in normal WoW chat.
 
-`/lit leave` pauses reconnection for the session and keeps the group. Disabling autojoin retains existing membership. Changing or leaving the group removes its old channels and saved subscriptions.
+**Leave chat** or `/lit leave` pauses reconnection for the session and keeps the group. Enabling autojoin also connects immediately; disabling it retains existing membership. Hover controls and status for details. Changing or leaving the group removes its old channels and saved subscriptions.
 
 ## Limits
 
@@ -17,5 +17,5 @@ Password protection depends on WoW's channel ownership rules. **Joined** confirm
 ## In-game checks
 
 - Record client and realm context; exchange messages across zones and instances, checking labels and `/lit chat` routing.
-- Check autojoin, manual leave and group changes across reloads and logins, including old-channel cleanup.
+- Check autojoin through both its checkbox and label, manual leave and group changes across reloads and logins, including old-channel cleanup. Check help tooltips close when leaving the page or window.
 - Test wrong passwords and ownership changes for clear failures and correct access control.

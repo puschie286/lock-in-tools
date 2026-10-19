@@ -1362,9 +1362,17 @@ local function loadOptions(uiAddon, uiEnvironment)
         methods[name] = function() end
     end
     function methods:SetPoint(...) self.point = { ... } end
-    function methods:GetPoint() if self.point then return unpack(self.point) end end
+    function methods:GetPoint()
+        local point = self.point
+        if not point then return end
+        if type(point[2]) == "number" then
+            return point[1], self.parent, point[1], point[2], point[3] or 0
+        end
+        return point[1], point[2] or self.parent, point[3] or point[1], point[4] or 0, point[5] or 0
+    end
     function methods:ClearAllPoints() self.point = nil end
-    function methods:StartMoving() self.moving = true end
+    function methods:SetUserPlaced(placed) self.userPlaced = placed end
+    function methods:StartMoving() self.moving, self.userPlaced = true, true end
     function methods:StopMovingOrSizing() self.moving = false end
     function methods:SetSize(width, height) self.width, self.height = width, height end
     function methods:SetWidth(width) self.width = width end
@@ -1379,6 +1387,31 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetTexture(texture) self.texture = texture end
     function methods:SetParent(parent) self.parent = parent end
     function methods:SetScale(scale) self.scale = scale end
+    function methods:GetFrameLevel() return self.frameLevel or 0 end
+    function methods:SetFrameLevel(level) self.frameLevel = level end
+    function methods:EnableMouseWheel(enabled) self.mouseWheel = enabled end
+    function methods:SetOrientation(orientation) self.orientation = orientation end
+    function methods:SetMinMaxValues(minimum, maximum)
+        self.minimum, self.maximum = minimum, maximum
+    end
+    function methods:GetMinMaxValues() return self.minimum, self.maximum end
+    function methods:SetValue(value)
+        value = math.max(self.minimum or value, math.min(self.maximum or value, value))
+        local changed = self.value ~= value
+        self.value = value
+        if changed and self.scripts.OnValueChanged then self.scripts.OnValueChanged(self, value) end
+    end
+    function methods:GetValue() return self.value or 0 end
+    function methods:SetValueStep(step) self.valueStep = step end
+    function methods:SetThumbTexture(texture)
+        if type(texture) ~= "table" then
+            local path = texture
+            texture = makeWidget()
+            texture:SetTexture(path)
+        end
+        self.thumbTexture = texture
+    end
+    function methods:GetThumbTexture() return self.thumbTexture end
     function methods:SetFont(path, size, flags) self.font = { path, size, flags }; return true end
     function methods:GetFont() return unpack(self.font or { "Fonts\\FRIZQT__.TTF", 12, "" }) end
     function methods:SetFontObject(fontObject) self.fontObject = fontObject end
@@ -1411,7 +1444,6 @@ local function loadOptions(uiAddon, uiEnvironment)
         if not wasFocused and self.scripts.OnEditFocusGained then self.scripts.OnEditFocusGained(self) end
     end
     function methods:HighlightText() self.highlighted = true end
-    function methods:SetPassword(password) self.password = password end
     function methods:SetNumeric(numeric) self.numeric = numeric end
     function methods:SetFontString(fontString) self.fontString = fontString end
     function methods:GetFontString() return self.fontString end
@@ -1484,7 +1516,7 @@ local function loadOptions(uiAddon, uiEnvironment)
             return createEventFrame(frameType)
         end
         assert(frameType == "Frame" or frameType == "EditBox"
-            or frameType == "CheckButton" or frameType == "Button", "use supported native widgets")
+            or frameType == "CheckButton" or frameType == "Button" or frameType == "Slider", "use supported native widgets")
         local widget = makeWidget()
         widget.frameType, widget.name, widget.parent, widget.template = frameType, name, parent, template
         if template == "BasicFrameTemplateWithInset" then widget.TitleText = makeWidget() end
@@ -1522,6 +1554,148 @@ local function loadOptions(uiAddon, uiEnvironment)
     end
 end
 
+-- Group help supplements readable key fields without exposing keys or interrupting confirmation.
+do
+    local groupAddon, api, _, _, groupWorld = loadAddon(settings(SECRET, false), false)
+    groupWorld:initialize()
+    loadOptions(groupAddon, api)
+    groupAddon:OpenOptions()
+    local options, tooltip = groupAddon.optionsPanel, api.GameTooltip
+    local function hover(widget)
+        widget.scripts.OnEnter(widget)
+        assert(tooltip.shown and tooltip.owner == widget, "group controls show their own help on hover")
+        local text = tooltip.text .. "\n" .. table.concat(tooltip.lines, "\n")
+        assert(not text:find(SECRET, 1, true) and not text:find(OTHER_SECRET, 1, true),
+            "group tooltips never include a saved or entered key")
+        return text
+    end
+    local info = hover(options.groupInfo)
+    assert(info:find("characters", 1, true) and info:find("every LockInTools feature", 1, true)
+        and info:find("same realm and faction", 1, true)
+        and info:find("Group ID: " .. groupAddon:GetGroupFingerprint(), 1, true),
+        "Group info explains scope and sharing limits with a public identifier instead of the key")
+    options.groupInfo.scripts.OnLeave(options.groupInfo)
+    assert(not tooltip.shown, "leaving a help control dismisses its tooltip")
+    options.secret:UserInput(" \t ")
+    assert(not options.applyGroup:IsEnabled(), "whitespace drafts cannot be applied")
+    options.secret:UserInput(OTHER_SECRET)
+    assert(options.applyGroup:IsEnabled() and options.secret:GetText() == OTHER_SECRET
+        and not options.toggleSecret, "entered keys stay readable without a reveal control")
+    for _, widget in ipairs({ options.ownSecret, options.selectKey, options.secret,
+        options.applyGroup, options.createGroup, options.leaveGroup }) do
+        hover(widget)
+        widget.scripts.OnHide(widget)
+        assert(not tooltip.shown, "hiding a group control dismisses its tooltip")
+    end
+    options.applyGroup:Click()
+    local confirmation = options.feedback:GetText()
+    options.selectKey:Click()
+    hover(options.applyGroup)
+    assert(options.applyGroup:GetText() == "Confirm switch" and options.feedback:GetText() == confirmation
+        and options.secret:GetText() == OTHER_SECRET and groupAddon:GetGroupSecret() == SECRET,
+        "copying the saved key and reading help preserve the draft and pending switch warning")
+    options.tabs.chat:Click()
+    assert(not tooltip.shown and options.secret:GetText() == "" and options.ownSecret:GetText() == ""
+        and options.applyGroup:GetText() == "Use key", "leaving Group clears keys, confirmation and owned help")
+    options.tabs.group:Click()
+    hover(options.groupInfo)
+    options.content:Click()
+    assert(not tooltip.shown, "switching to Content dismisses Group help")
+    groupAddon:OpenOptions("group")
+    hover(options.selectKey)
+    options.CloseButton:Click()
+    assert(not tooltip.shown and options.ownSecret:GetText() == "", "closing Settings clears keys and help")
+    groupAddon:OpenOptions("group")
+    tooltip:SetOwner(options.tabs.chat, "ANCHOR_RIGHT")
+    tooltip:Show()
+    options.groupInfo.scripts.OnLeave(options.groupInfo)
+    options:Hide()
+    assert(tooltip.shown, "group cleanup preserves a tooltip owned by another control")
+    tooltip:Hide()
+    groupAddon:OpenOptions("group")
+    assert(groupAddon:LeaveGroup())
+    assert(not hover(options.groupInfo):find("Group ID:", 1, true),
+        "Group info reflects leaving the group without retaining its identifier")
+    options:Hide()
+end
+
+-- Chat and position labels are usable click targets; help preserves preferences and drafts.
+do
+    local preferences, api, _, _, preferenceWorld = loadAddon(settings(SECRET, false), false)
+    preferenceWorld:initialize()
+    loadOptions(preferences, api)
+    preferences:OpenOptions("chat")
+    local options, tooltip = preferences.optionsPanel, api.GameTooltip
+    local function hover(widget)
+        widget.scripts.OnEnter(widget)
+        assert(tooltip.shown and tooltip.owner == widget, "option help belongs to the hovered control")
+        return table.concat(tooltip.lines, "\n")
+    end
+    assert(hover(options.autoJoin.labelButton):find("disabling it keeps an existing chat connection", 1, true))
+    options.autoJoin.labelButton:Click()
+    assert(options.autoJoin:GetChecked() and preferences.db.chat.autoJoin and #preferenceWorld.joinCalls == 1,
+        "clicking the autojoin label applies once and connects immediately")
+    local room = preferences:GetGroupChannelName()
+    preferenceWorld:completeJoin(room, 9)
+    assert(options.status:GetText():find("Joined", 1, true)
+        and not options.status:GetText():find("/lit chat", 1, true)
+        and hover(options.chatStatusHelp):find("/lit chat", 1, true),
+        "chat keeps concise status on the page and complete details in its tooltip")
+    options.autoJoin.labelButton:Click()
+    assert(not options.autoJoin:GetChecked() and not preferences.db.chat.autoJoin
+        and preferences.chatState.phase == "joined" and #preferenceWorld.leaveCalls == 0,
+        "disabling autojoin through its label retains current membership")
+    assert(hover(options.leave):find("pause reconnection for this session", 1, true))
+    options.tabs.position:Click()
+    assert(not tooltip.shown, "leaving Shared chat dismisses its help")
+    preferenceWorld:completeJoin(preferences:GetGroupDataChannelName(), 7)
+    options.positionSharing.labelButton:Click()
+    assert(options.positionSharing:GetChecked() and preferences.db.position.sharing
+        and preferences.db.position.keepLastKnown and preferences.db.position.showTrails
+        and not preferences.db.chat.autoJoin, "sharing's label changes only its own preference")
+    assert(options.positionStatus:GetText() == "Sharing: On."
+        and hover(options.positionStatusHelp):find("every 2 seconds", 1, true)
+        and tooltip.lines[1]:find("world map's LockInTools filter", 1, true),
+        "healthy position status is concise while timing and map-filter help remain available")
+    options.positionRetention.labelButton:Click()
+    options.positionTrails.labelButton:Click()
+    assert(not options.positionRetention:GetChecked() and not preferences.db.position.keepLastKnown
+        and not options.positionTrails:GetChecked() and not preferences.db.position.showTrails
+        and preferences.db.position.sharing and preferences.db.position.trailLength == 10,
+        "retention and trails labels apply independent settings")
+    options.positionTrailLength:UserInput("19")
+    assert(preferences.db.position.trailLength == 19 and options.positionTrailLength:IsEnabled(),
+        "trail length remains editable while trails are off")
+    options.positionTrailLength:SetFocus()
+    options.positionTrailLength:UserInput("31")
+    local feedback = options.feedback:GetText()
+    assert(hover(options.positionTrailLength):find("whole number from 1 to 30", 1, true)
+        and options.positionTrailLength:GetText() == "31" and options.feedback:GetText() == feedback,
+        "reading help preserves an invalid trail draft and validation feedback")
+    options.tabs.chat:Click()
+    assert(not tooltip.shown and options.positionTrailLength:GetText() == "19"
+        and preferences.db.position.trailLength == 19, "leaving Shared positions clears help and recovers its draft")
+    hover(options.join)
+    options.content:Click()
+    assert(not tooltip.shown, "switching windows dismisses Shared chat help")
+    preferences:OpenOptions("position")
+    preferences.savedDataReadOnly = true
+    preferences:RefreshOptions()
+    for _, checkbox in ipairs({ options.autoJoin, options.positionSharing,
+        options.positionRetention, options.positionTrails }) do
+        local checked = checkbox:GetChecked()
+        assert(not checkbox:IsEnabled() and not checkbox.labelButton:IsEnabled(),
+            "read-only settings disable the checkbox and its label together")
+        checkbox.labelButton:Click()
+        assert(checkbox:GetChecked() == checked, "disabled label clicks cannot change read-only preferences")
+    end
+    hover(options.positionSharing.labelButton)
+    assert(options.feedback:GetText():find("Update LockInTools", 1, true),
+        "help stays accessible without replacing the read-only notice")
+    options.CloseButton:Click()
+    assert(not tooltip.shown, "closing Settings dismisses Shared positions help")
+end
+
 local uiAddon, uiEnvironment, uiMessages, _, uiWorld = loadAddon(settings("", false), false)
 uiWorld:initialize()
 loadOptions(uiAddon, uiEnvironment)
@@ -1529,7 +1703,7 @@ assert(uiAddon.optionsPanel == nil, "build options only when requested")
 uiEnvironment.SlashCmdList.LOCKINTOOLS("options")
 local panel = uiAddon.optionsPanel
 assert(panel and panel:IsShown(), "/lit options opens the actual options panel")
-assert(panel.secret:GetText() == "" and panel.secret.password and panel.autoJoin:GetChecked() == false)
+assert(panel.secret:GetText() == "" and not panel.toggleSecret and panel.autoJoin:GetChecked() == false)
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true,
     "position sharing starts off with last-known retention enabled")
 assert(panel.positionTrails:GetChecked() == true and panel.positionTrailLength:GetText() == "10"
@@ -1539,22 +1713,19 @@ assert(not panel.join:IsEnabled() and not panel.leave:IsEnabled(), "no group mea
 assert(uiEnvironment.UISpecialFrames[1] == "LockInToolsOptions", "Escape can close the native panel")
 panel.createGroup:Click()
 local generatedDraft = panel.secret:GetText()
-assert(generatedDraft:match("^[a-z]+%-%d%d%d%d$") and not panel.secret.password
-    and panel.secret.focused and panel.secret.highlighted, "Create fills a readable key ready to copy")
+assert(generatedDraft:match("^[a-z]+%-%d%d%d%d$")
+    and panel.secret.focused and panel.secret.highlighted, "Generate key fills a readable draft ready to copy")
 assert(not uiAddon:HasGroup() and uiAddon.db.group.secret == "" and #uiWorld.joinCalls == 0,
     "generating a key does not join or replace a group before Use key")
-assert(panel.applyGroup:GetText() == "Use key" and panel.toggleSecret:GetText() == "Hide key")
+assert(panel.applyGroup:GetText() == "Use key" and panel.applyGroup:IsEnabled())
 panel.secret:SetText("  " .. SECRET:lower() .. "  ")
 panel.applyGroup:Click()
 assert(uiAddon:GetGroupSecret() == SECRET and uiAddon.db.chat.autoJoin == false,
     "import saves shared identity independently from feature settings")
-assert(panel.secret:GetText() == "" and panel.secret.password and panel.secret.focusCleared)
+assert(panel.secret:GetText() == "" and panel.secret.focusCleared)
 assert(#uiWorld.joinCalls == 0 and panel.join:IsEnabled() and panel.leave:IsEnabled())
-panel.toggleSecret:Click()
-assert(panel.secret:GetText() == SECRET and not panel.secret.password
-    and panel.secret.focused and panel.secret.highlighted, "reveal only after explicit click for copying")
-panel.toggleSecret:Click()
-assert(panel.secret.password, "hide masks the revealed secret")
+assert(panel.secret:GetText() == "" and not panel.applyGroup:IsEnabled()
+    and panel.ownSecret:GetText() == SECRET, "the saved key stays in its copy field instead of refilling an empty draft")
 panel.tabs.position:Click()
 panel.positionSharing:Click()
 assert(uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown
@@ -1654,7 +1825,7 @@ assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:G
     and uiAddon.db.position.showTrails and uiAddon.db.position.trailLength == 30
     and not uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown,
     "asynchronous status updates retain applied position preferences")
-assert(panel.positionStatus:GetText() == "Status: " .. uiAddon:GetPositionStatusText(),
+assert(panel.positionStatus:GetText() == "Sharing: " .. uiAddon:GetPositionStatusText(true),
     "position status reflects the current sharing state")
 assert(panel.status:GetText():find("Joined", 1, true), "status reflects confirmed membership")
 panel.secret:SetText("invalid--key")
@@ -1675,14 +1846,16 @@ panel.secret:SetText(OTHER_SECRET)
 panel.applyGroup:Click()
 assert(uiAddon:GetGroupSecret() == SECRET and panel.applyGroup:GetText() == "Confirm switch")
 panel.applyGroup:Click()
-assert(uiAddon:GetGroupSecret() == OTHER_SECRET and panel.secret.password and panel.secret:GetText() == "",
+assert(uiAddon:GetGroupSecret() == OTHER_SECRET and panel.secret:GetText() == "",
     "switch confirms before changing every feature's group")
-panel.toggleSecret:Click()
-assert(panel.secret:GetText() == OTHER_SECRET and not panel.secret.password)
+assert(panel.ownSecret:GetText() == OTHER_SECRET)
+panel.secret:UserInput(SECRET)
+panel.secret:SetFocus()
 panel:Hide()
-assert(panel.secret.password and panel.secret:GetText() == "", "closing clears and masks secrets")
+assert(panel.secret:GetText() == "" and panel.ownSecret:GetText() == "" and not panel.secret.focused,
+    "closing clears readable keys and draft focus")
 uiAddon:OpenOptions()
-assert(uiAddon.optionsPanel == panel and panel.secret:GetText() == "" and panel.secret.password)
+assert(uiAddon.optionsPanel == panel and panel.secret:GetText() == "")
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true
     and panel.positionTrails:GetChecked() == true and panel.positionTrailLength:GetText() == "30"
     and not panel.autoJoin:GetChecked(), "closing and reopening retains immediately applied preferences")
@@ -1703,7 +1876,7 @@ assert(replacementDraft:match("^[a-z]+%-%d%d%d%d$") and uiAddon:GetGroupSecret()
 panel.applyGroup:Click()
 assert(uiAddon:GetGroupSecret() == OTHER_SECRET and panel.applyGroup:GetText() == "Confirm switch")
 panel.applyGroup:Click()
-assert(uiAddon:GetGroupSecret() == replacementDraft and panel.secret:GetText() == "" and panel.secret.password,
+assert(uiAddon:GetGroupSecret() == replacementDraft and panel.secret:GetText() == "",
     "generated key uses the same confirmation and clears after applying")
 panel.leaveGroup:Click()
 assert(uiAddon:HasGroup() and panel.leaveGroup:GetText() == "Confirm leave")
@@ -1858,7 +2031,6 @@ do
     assert(navigation.optionsPanel == options and options.secret:GetText() == OTHER_SECRET
         and options.applyGroup:GetText() == "Confirm switch" and options.secret.focused,
         "reopening Settings and current or invalid page selections preserve pending group edits")
-    options.toggleSecret:Click()
     options.selectKey:Click()
     options:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 42, -70)
     options.content:Click()
@@ -1875,10 +2047,10 @@ do
     assert(contentPages == 1 and not content.secret and not content.ownSecret and not content.friendSecret
         and not content.createGroup and not content.joinGroup and not content.selectKey,
         "Content contains only Overview and no group-key form")
-    assert(options.secret:GetText() == "" and options.secret.password and not options.secret.focused
+    assert(options.secret:GetText() == "" and not options.secret.focused
         and options.ownSecret:GetText() == "" and not options.ownSecret.focused
         and options.applyGroup:GetText() == "Use key" and navigation:GetGroupSecret() == SECRET,
-        "opening Content clears hidden Settings key fields, reveal state, focus and switch confirmation")
+        "opening Content clears hidden Settings key fields, focus and switch confirmation")
     navigation:RefreshOptions()
     assert(options.ownSecret:GetText() == "", "background status refresh cannot restore a hidden copy field")
     content.options:Click()
@@ -1896,7 +2068,7 @@ do
     options.tabs.chat:Click()
     assert(options.selectedTab == "chat" and options.pages.chat:IsVisible()
         and not options.pages.group:IsVisible() and not options.pages.position:IsVisible()
-        and options.secret:GetText() == "" and options.secret.password and not options.secret.focused
+        and options.secret:GetText() == "" and not options.secret.focused
         and options.ownSecret:GetText() == "" and options.applyGroup:GetText() == "Use key"
         and options.feedback:GetText() == "",
         "leaving Group clears copying, drafts, focus and confirmation")
@@ -1968,12 +2140,133 @@ do
     assert(positioned(content, 260, -110), "reopening Content preserves the shared position")
     assert(api.namedFrameCreations.LockInToolsContent == 1 and api.namedFrameCreations.LockInToolsOptions == 1
         and not api.namedFrameCreations.LockInToolsWelcome and not navigation.welcomePanel
-        and #api.UISpecialFrames == 2 and contains(api.UISpecialFrames, "LockInToolsContent")
-        and contains(api.UISpecialFrames, "LockInToolsOptions"),
-        "all navigation paths reuse exactly two Escape-closeable windows without an old welcome window")
+        and #api.UISpecialFrames == 3 and contains(api.UISpecialFrames, "LockInToolsContent")
+        and contains(api.UISpecialFrames, "LockInToolsOptions")
+        and contains(api.UISpecialFrames, "LockInToolsOverviewActions"),
+        "all navigation paths reuse two windows and one Escape-closeable action menu without an old welcome window")
 end
 
--- Overview is the Content page, pages every player and invokes native party actions.
+-- Both windows persist one account-wide position without native per-character placement.
+do
+    local persisted = settings(SECRET, false)
+    local positioning, api, _, _, positionWorld = loadAddon(persisted, false)
+    positionWorld:initialize()
+    loadOptions(positioning, api)
+    positioning:OpenContent()
+    local content = positioning.contentPanel
+    local function placed(window, owner, point, relativePoint, x, y)
+        local actualPoint, relativeTo, actualRelativePoint, actualX, actualY = window:GetPoint()
+        return actualPoint == point and relativeTo == owner and actualRelativePoint == relativePoint
+            and actualX == x and actualY == y
+    end
+    assert(not persisted.windowPosition and content.userPlaced == false
+        and placed(content, api.UIParent, "CENTER", "CENTER", 0, 0),
+        "opening the first window centers it without saving a default position")
+    content.scripts.OnDragStart(content)
+    content:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 140, -90)
+    content.scripts.OnDragStop(content)
+    local saved = persisted.windowPosition
+    assert(saved and saved.point == "TOPLEFT" and saved.relativePoint == "TOPLEFT"
+        and saved.x == 140 and saved.y == -90 and not saved.relativeTo
+        and not content.moving and content.userPlaced == false,
+        "drag stop saves only an anchor and offsets and disables native per-character placement")
+    saved.futureField = "keep"
+    content.options:Click()
+    local options = positioning.optionsPanel
+    assert(placed(options, api.UIParent, "TOPLEFT", "TOPLEFT", 140, -90)
+        and persisted.windowPosition == saved and saved.futureField == "keep",
+        "window switching shares the saved position while preserving unknown position fields")
+    options.scripts.OnDragStart(options)
+    options:SetPoint("BOTTOMRIGHT", api.UIParent, "BOTTOMRIGHT", -160, 75)
+    options.CloseButton:Click()
+    assert(saved.point == "BOTTOMRIGHT" and saved.relativePoint == "BOTTOMRIGHT"
+        and saved.x == -160 and saved.y == 75 and not options.moving and options.userPlaced == false,
+        "closing Settings during a drag saves its latest shared position")
+    positioning:OpenContent()
+    assert(placed(content, api.UIParent, "BOTTOMRIGHT", "BOTTOMRIGHT", -160, 75),
+        "Content follows the position saved when Settings closed")
+    content.scripts.OnDragStart(content)
+    content:SetPoint("TOPRIGHT", api.UIParent, "TOPRIGHT", -85, -130)
+    positionWorld.fire("PLAYER_LOGOUT")
+    assert(saved.point == "TOPRIGHT" and saved.relativePoint == "TOPRIGHT"
+        and saved.x == -85 and saved.y == -130 and saved.futureField == "keep"
+        and not content.moving and content.userPlaced == false and persisted.schemaVersion == 3,
+        "logout saves a visible mid-drag position without changing the saved-data schema")
+    options:SetPoint("CENTER", api.UIParent, "CENTER", 999, 999)
+    positioning:SaveWindowPosition(options)
+    content:SetPoint("TOPLEFT", options, "TOPLEFT", 10, 10)
+    positioning:SaveWindowPosition(content)
+    assert(saved.point == "TOPRIGHT" and saved.x == -85 and saved.y == -130,
+        "inactive windows and anchors relative to another frame cannot overwrite the shared position")
+
+    for _, firstWindow in ipairs({ "content", "settings" }) do
+        local restored, restoredApi, _, _, restoredWorld = loadAddon(persisted, false)
+        if firstWindow == "settings" then
+            restoredApi.UnitFullName = function(unit) assert(unit == "player"); return "Alt", "Test Realm" end
+            restoredApi.UnitGUID = function(unit) assert(unit == "player"); return "Player-Test-Alt" end
+        end
+        restoredWorld:initialize()
+        loadOptions(restored, restoredApi)
+        if firstWindow == "content" then restored:OpenContent() else restored:OpenOptions() end
+        local first = firstWindow == "content" and restored.contentPanel or restored.optionsPanel
+        assert(placed(first, restoredApi.UIParent, "TOPRIGHT", "TOPRIGHT", -85, -130)
+            and persisted.windowPosition == saved and saved.futureField == "keep",
+            "reload and a different character restore the account-wide position with either window opening first")
+        if firstWindow == "content" then first.options:Click() else first.content:Click() end
+        local second = firstWindow == "content" and restored.optionsPanel or restored.contentPanel
+        assert(placed(second, restoredApi.UIParent, "TOPRIGHT", "TOPRIGHT", -85, -130),
+            "switching windows after reload retains the restored position")
+    end
+
+    for _, invalid in ipairs({ false, "bad", {},
+        { point = "INVALID", relativePoint = "CENTER", x = 0, y = 0 },
+        { point = "CENTER", relativePoint = "INVALID", x = 0, y = 0 },
+        { point = "CENTER", relativePoint = "CENTER", x = "40", y = 0 },
+        { point = "CENTER", relativePoint = "CENTER", x = 100001, y = 0 },
+        { point = "CENTER", relativePoint = "CENTER", x = 0 / 0, y = 0 },
+        { point = "CENTER", relativePoint = "CENTER", x = 0, y = math.huge },
+        { point = "CENTER", relativePoint = "CENTER", x = -math.huge, y = 0 } }) do
+        local damaged = settings(SECRET, false)
+        damaged.windowPosition = invalid
+        local original = {}
+        if type(invalid) == "table" then
+            for key, value in pairs(invalid) do original[key] = value end
+        end
+        local fallback, fallbackApi, _, _, fallbackWorld = loadAddon(damaged, false)
+        fallbackWorld:initialize()
+        loadOptions(fallback, fallbackApi)
+        fallback:OpenContent()
+        assert(placed(fallback.contentPanel, fallbackApi.UIParent, "CENTER", "CENTER", 0, 0)
+            and damaged.windowPosition == invalid,
+            "malformed saved window positions center the first window without replacing saved data")
+        for key, value in pairs(original) do
+            local actual = invalid[key]
+            assert(actual == value or (actual ~= actual and value ~= value),
+                "reading a malformed position does not rewrite any existing field")
+        end
+    end
+
+    local future = settings(SECRET, false)
+    future.schemaVersion = 4
+    future.windowPosition = { point = "TOPLEFT", relativePoint = "TOPLEFT", x = 80, y = -60, futureField = "keep" }
+    local original = future.windowPosition
+    local readOnly, readOnlyApi, _, _, readOnlyWorld = loadAddon(future, false)
+    readOnlyWorld:initialize()
+    loadOptions(readOnly, readOnlyApi)
+    readOnly:OpenContent()
+    local readOnlyContent = readOnly.contentPanel
+    readOnlyContent.scripts.OnDragStart(readOnlyContent)
+    readOnlyContent:SetPoint("CENTER", readOnlyApi.UIParent, "CENTER", 30, 40)
+    readOnlyContent.scripts.OnDragStop(readOnlyContent)
+    readOnlyContent.CloseButton:Click()
+    readOnlyWorld.fire("PLAYER_LOGOUT")
+    assert(readOnlyApi.LockInToolsDB == future and future.schemaVersion == 4
+        and future.windowPosition == original and original.point == "TOPLEFT" and original.relativePoint == "TOPLEFT"
+        and original.x == 80 and original.y == -60 and original.futureField == "keep",
+        "drag, hide and logout preserve newer-schema account-wide window data unchanged")
+end
+
+-- Overview scrolls and sorts the Content roster, with guarded native actions in a dropdown.
 do
     local overview, api, _, _, overviewWorld = loadAddon(settings(SECRET, false), false)
     local invites, requests, grouped, mayInvite = {}, {}, false, true
@@ -1984,7 +2277,10 @@ do
         InviteUnit = function(name) invites[#invites + 1] = name end,
         RequestInviteFromUnit = function(name) requests[#requests + 1] = name end,
     }
-    api.C_Map.GetMapInfo = function(map) assert(map == 37); return { name = "Elwynn Forest" } end
+    api.C_Map.GetMapInfo = function(map)
+        assert(map == 37 or map == 38)
+        return { name = map == 37 and "Elwynn Forest" or "Westfall" }
+    end
     overviewWorld:initialize()
     overviewWorld:completeJoin(overview:GetGroupDataChannelName(), 7)
     local now = api.GetServerTime()
@@ -1993,8 +2289,12 @@ do
             .. (name == "Bravo" and 0 or 20 + index) .. "|" .. (name == "Bravo" and 1 or 0)
             .. "|1|0|" .. (name == "Alpha" and 1 or 0)))
     end
-    local positions = { ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,
-        stamp = now, positionStamp = now - 120, positionAvailable = true, online = true } }
+    local positions = {
+        ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,
+            stamp = now, positionStamp = now - 120, positionAvailable = true, online = true },
+        ["charlie-testrealm"] = { name = "Charlie-TestRealm", map = 38,
+            stamp = now, positionStamp = now - 180, positionAvailable = false, online = true },
+    }
     overview.GetSharedPositions = function() return positions end
     local snapshotCalls, originalSnapshot = 0, overview.RequestRosterSnapshot
     overview.RequestRosterSnapshot = function(self)
@@ -2024,51 +2324,138 @@ do
     overview:OpenOptions("overview")
     assert(page.active and page.scripts.OnUpdate and snapshotCalls == 1,
         "reopening Content or selecting its current Overview page does not repeat activation or snapshots")
-    assert(page.summary:GetText():find("11 active", 1, true)
-        and page.pagination:GetText() == "Page 1 / 2" and not page.previous:IsEnabled() and page.next:IsEnabled()
-        and page.rows[1].name:GetText():find("(you)", 1, true),
-        "overview includes the local character and paginates more than ten known players")
+    assert(not page.summary and not page.previous and not page.next and not page.pagination and not page.pageNumber
+        and #page.rows == 8 and page.offset == 0 and not page.sortKey
+        and page.rows[1].name:GetText():find("(you)", 1, true)
+        and page.rows[8].playerID == "golf-testrealm" and not page.empty:IsShown(),
+        "overview has eight reusable rows without the summary line or paging controls")
+    local minimum, maximum = page.scrollbar:GetMinMaxValues()
+    assert(page.scrollbar:IsShown() and minimum == 0 and maximum == 3 and page.scrollbar:GetValue() == 0,
+        "the native scrollbar exposes all eleven players through a bounded row offset")
     assert(page.rows[2].name:GetText() == "Alpha-TestRealm" and page.rows[2].level:GetText() == "21"
-        and page.rows[2].position:GetText():find("Elwynn Forest", 1, true)
-        and page.rows[2].position:GetText():find("25.0, 75.0 · 2m ago", 1, true)
-        and page.rows[3].level:GetText() == "—" and page.rows[4].position:GetText() == "Not sharing",
-        "overview shows level, explicit unknown metadata and the actual coordinate age")
-    assert(not page.rows[1].invite:IsEnabled() and not page.rows[1].request:IsEnabled()
-        and page.rows[2].invite:IsEnabled() and not page.rows[2].request:IsEnabled()
-        and not page.rows[3].invite:IsEnabled() and page.rows[3].request:IsEnabled(),
-        "row buttons reflect native invite permissions and peer party metadata")
-    page.rows[1].invite.scripts.OnEnter(page.rows[1].invite)
+        and page.rows[2].position:GetText() == "Elwynn Forest\n2m ago"
+        and page.rows[3].level:GetText() == "—" and page.rows[5].position:GetText() == "Not sharing"
+        and page.rows[4].position:GetText() == "Last: Westfall\n3m ago",
+        "positions show only the region and location age, including retained regions without coordinates")
+    for _, row in ipairs(page.rows) do
+        assert(row.actions:IsEnabled() and not row.invite and not row.request,
+            "each row has one dropdown trigger instead of individual action buttons")
+    end
+    local function openMenu(index)
+        local row = page.rows[index]
+        row.actions:Click()
+        assert(page.actionMenu:IsShown() and page.actionMenu.playerID == row.playerID
+            and page.actionMenu.anchor == row,
+            "the actions dropdown is anchored to its selected player")
+        return page.actionMenu
+    end
+    local menu = openMenu(1)
+    assert(not menu.invite:IsEnabled() and not menu.request:IsEnabled(),
+        "the local player's menu explains unavailable actions")
+    menu.invite.scripts.OnEnter(menu.invite)
     assert(api.GameTooltip.shown and api.GameTooltip.text == "This is your character.",
         "disabled actions explain their reason on hover")
-    page.rows[1].invite.scripts.OnLeave(page.rows[1].invite)
+    menu.invite.scripts.OnLeave(menu.invite)
     assert(not api.GameTooltip.shown)
-    page.rows[2].invite:Click()
-    page.rows[3].request:Click()
+    menu:Click()
+    assert(not menu:IsShown(), "clicking outside the dropdown dismisses it")
+    menu = openMenu(2)
+    assert(menu.invite:IsEnabled() and not menu.request:IsEnabled(),
+        "an ungrouped peer offers an invite but explains the unavailable join request")
+    menu.invite:Click()
+    menu = openMenu(3)
+    assert(not menu.invite:IsEnabled() and menu.request:IsEnabled(),
+        "a grouped peer offers a join request instead of an invite")
+    menu.request:Click()
     assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and #requests == 1 and requests[1] == "Bravo-TestRealm"
         and content.feedback:GetText():find("invitation notices", 1, true),
         "overview clicks invoke the real guarded native actions with complete names")
+    -- Open while allowed, then change native eligibility before clicking.
+    mayInvite = true
+    menu = openMenu(2)
     mayInvite = false
-    page.rows[2].invite:Click()
-    assert(#invites == 1 and not page.rows[2].invite:IsEnabled()
+    menu.invite:Click()
+    assert(#invites == 1
         and content.feedback:GetText() == "You cannot invite players right now.",
-        "an enabled stale row cannot bypass the action-time permission check")
+        "an enabled stale dropdown item cannot bypass the action-time permission check")
+    menu = openMenu(2)
+    assert(not menu.invite:IsEnabled() and menu.invite.reason == "You cannot invite players right now.",
+        "reopening a menu refreshes disabled action state and its explanation")
     mayInvite = true
     overview:RefreshOverview()
-    page.next:Click()
-    assert(#page.rows == 6 and page.rows[1].playerID == "foxtrot-testrealm"
-        and page.pagination:GetText() == "Page 2 / 2" and page.rows[5].playerID == "juliet-testrealm"
-        and not page.rows[6]:IsShown()
-        and not page.next:IsEnabled() and page.previous:IsEnabled(),
-        "full-height Overview pages six players at a time and hides unused pooled rows")
-    page.previous:Click()
-    overviewWorld:advance(60)
+    assert(menu:IsShown() and menu.playerID == "alpha-testrealm" and menu.invite:IsEnabled(),
+        "a refresh preserves the selected player and updates an open menu's eligibility")
+    page:SetOffset(1)
+    assert(not menu:IsShown() and page.offset == 1 and page.rows[1].playerID == "alpha-testrealm"
+        and page.scrollbar:GetValue() == 1,
+        "moving the scroll offset dismisses the menu and keeps the native scrollbar synchronized")
+    page.scripts.OnMouseWheel(page, -1)
+    assert(page.offset > 1, "mouse wheel down moves through the roster")
+    page:SetOffset(999)
+    assert(page.offset == 3 and page.rows[1].playerID == "charlie-testrealm"
+        and page.rows[8].playerID == "juliet-testrealm",
+        "scrolling to the end reveals the last player without an extra page")
+    page.scrollbar:SetValue(0)
+    assert(page.offset == 0 and page.rows[1].playerID == "self-testrealm",
+        "dragging the scrollbar updates visible row targets")
+    page.scripts.OnMouseWheel(page, 1)
+    assert(page.offset == 0, "mouse wheel up clamps at the first player")
+
+    openMenu(2)
+    page.headers.name:Click()
+    assert(not menu:IsShown() and page.sortKey == "name" and not page.sortDescending
+        and page.offset == 0 and page.rows[1].playerID == "alpha-testrealm",
+        "clicking a column sorts ascending and dismisses the selected player's menu")
+    page:SetOffset(3)
+    assert(page.rows[8].playerID == "self-testrealm", "explicit name sorting includes self in normal name order")
+    page.headers.name:Click()
+    assert(page.sortDescending and page.offset == 0 and page.rows[1].playerID == "self-testrealm"
+        and page.rows[2].playerID == "juliet-testrealm", "clicking the same column reverses sorting and resets scrolling")
+    page.headers.level:Click()
+    assert(not page.sortDescending and page.rows[1].playerID == "self-testrealm"
+        and page.rows[2].playerID == "alpha-testrealm", "levels sort numerically ascending")
+    page:SetOffset(3)
+    assert(page.rows[8].playerID == "bravo-testrealm", "unknown levels follow known levels when sorting ascending")
+    page.headers.level:Click()
+    assert(page.sortDescending and page.rows[1].playerID == "juliet-testrealm", "levels sort numerically descending")
+    page:SetOffset(3)
+    assert(page.rows[8].playerID == "bravo-testrealm", "unknown levels remain last when sorting descending")
+    page.headers.region:Click()
+    assert(not page.sortDescending and page.rows[1].playerID == "alpha-testrealm"
+        and page.rows[2].playerID == "charlie-testrealm" and page.rows[3].playerID == "bravo-testrealm",
+        "regions sort by name with missing regions after known values and stable player-ID ties")
+    page.headers.region:Click()
+    assert(page.sortDescending and page.rows[1].playerID == "charlie-testrealm"
+        and page.rows[2].playerID == "alpha-testrealm" and page.rows[3].playerID == "bravo-testrealm",
+        "reverse region sorting keeps missing regions last and preserves deterministic ties")
+    -- Vary contact ages without changing transport eligibility or position freshness.
+    overview.rosterState.peers["alpha-testrealm"].seenAt = now - 20
+    overview.rosterState.peers["bravo-testrealm"].seenAt = now - 10
+    overview.rosterState.peers["charlie-testrealm"].seenAt = nil
+    page.headers.seen:Click()
+    assert(page.sortDescending and page.rows[1].playerID == "delta-testrealm"
+        and page.rows[2].playerID == "echo-testrealm", "last seen starts with the most recent contacts and stable ties")
+    page:SetOffset(3)
+    assert(page.rows[8].playerID == "charlie-testrealm", "unknown contact ages sort after known recent contacts")
+    page.headers.seen:Click()
+    assert(not page.sortDescending and page.rows[1].playerID == "alpha-testrealm"
+        and page.rows[2].playerID == "bravo-testrealm", "last seen can be reversed to oldest contacts first")
+    page:SetOffset(3)
+    assert(page.rows[8].playerID == "charlie-testrealm", "unknown contact ages stay last in either sort direction")
+    page.headers.name:Click()
+    -- Ascending names put Alpha first and provide a stable anchor for live age updates.
+    menu = openMenu(1)
+    overviewWorld:advance(90)
     assert(page.scripts.OnUpdate, "only the active overview page installs an age refresh")
     page.scripts.OnUpdate(page, 1)
-    assert(page.rows[2].position:GetText():find("3m ago", 1, true)
-        and page.rows[2].seen:GetText():find("1m ago", 1, true) and snapshotCalls == 1,
+    assert(page.rows[1].position:GetText():find("3m ago", 1, true)
+        and page.rows[1].seen:GetText():find("1m ago", 1, true) and snapshotCalls == 1
+        and menu:IsShown() and menu.playerID == "alpha-testrealm" and not menu.invite:IsEnabled()
+        and menu.invite.reason == "No recent contact with this player.",
         "visible age updates do not trigger repeated roster snapshots")
     content.CloseButton:Click()
-    assert(not page.active and not page.scripts.OnUpdate, "closing Content stops live overview work")
+    assert(not page.active and not page.scripts.OnUpdate and not menu:IsShown(),
+        "closing Content stops live overview work and dismisses its action menu")
     command("options")
     assert(options.selectedTab == "group"
         and options.pages.group:IsVisible() and not page.active and not page.scripts.OnUpdate
@@ -2088,14 +2475,17 @@ do
     command("overview")
     assert(snapshotCalls == 3 and content.selectedTab == "overview" and content:IsVisible()
         and not options:IsVisible())
-    page.next:Click()
+    page:SetOffset(999)
+    openMenu(1)
     positions, overview.rosterState.peers = {}, {}
     overview:RefreshOverview()
-    assert(page.pagination:GetText() == "Page 1 / 1" and page.rows[1].playerID == "self-testrealm"
-        and not page.rows[2]:IsShown() and not page.next:IsEnabled(),
-        "live roster removal clamps pagination and removes old row targets")
+    assert(page.offset == 0 and page.rows[1].playerID == "self-testrealm"
+        and not page.rows[2]:IsShown() and not page.rows[2].playerID and not page.scrollbar:IsShown()
+        and not menu:IsShown() and not page.empty:IsShown(),
+        "live roster removal clamps scrolling, removes old row targets and closes obsolete menus")
     assert(overview:LeaveGroup())
-    assert(page.summary:GetText():find("Choose a group key", 1, true) and not page.rows[1]:IsShown(),
+    assert(page.empty:IsShown() and page.empty:GetText():find("Choose a group key", 1, true)
+        and not page.rows[1]:IsShown() and not page.rows[1].playerID,
         "leaving the global group clears the overview while it remains open")
 end
 
@@ -2125,7 +2515,7 @@ do
     content.options:Click()
     local options = initial.optionsPanel
     assert(options:IsShown() and not content:IsShown() and options.selectedTab == "group"
-        and options.ownSecret:GetText() == initialKey and not options.ownSecret.password,
+        and options.ownSecret:GetText() == initialKey,
         "Settings > Group displays the saved key for sharing")
     local unfocusedPaints = options.ownSecret.texturePaints
     options.ownSecret:SetFocus()
@@ -2158,8 +2548,11 @@ do
 
     options.secret:UserInput("   ")
     options.applyGroup:Click()
-    assert(initial:GetGroupSecret() == initialKey and options.feedback:GetText() ~= ""
-        and options.feedback.color[1] == 1, "blank friend input reports an error without changing groups")
+    assert(initial:GetGroupSecret() == initialKey and not options.applyGroup:IsEnabled(),
+        "blank friend input disables applying without changing groups")
+    options.secret.scripts.OnEnterPressed(options.secret)
+    assert(options.feedback:GetText() ~= "" and options.feedback.color[1] == 1,
+        "submitting blank friend input with Enter reports an error")
     options.secret:UserInput("invalid--key")
     options.applyGroup:Click()
     options.applyGroup:Click()
@@ -2260,7 +2653,7 @@ do
     assert(attempts == 1, "status refresh does not retry failed key generation")
     failed.contentPanel.options:Click()
     local failedOptions = failed.optionsPanel
-    assert(failedOptions.secret:IsEnabled() and failedOptions.applyGroup:IsEnabled()
+    assert(failedOptions.secret:IsEnabled() and not failedOptions.applyGroup:IsEnabled()
         and failedOptions.ownSecret:GetText() == "", "Group import remains available after generation failure")
     failedOptions.createGroup:Click()
     assert(not failed:HasGroup() and failedOptions.secret:GetText() == "" and failedOptions.feedback:GetText() ~= "",
@@ -2378,7 +2771,7 @@ do
     disabled.optionsPanel.applyGroup:Click()
     disabled.optionsPanel.CloseButton:Click()
     assert(not disabled.optionsPanel:IsShown() and disabled.optionsPanel.secret:GetText() == ""
-        and disabled.optionsPanel.secret.password and disabled:GetGroupSecret() == SECRET,
+        and disabled:GetGroupSecret() == SECRET,
         "the native title-bar close button clears drafts without confirming a group switch")
     disabledEnvironment.UIParent:SetSize(1920, 1080)
     disabled:OpenOptions()
@@ -2472,8 +2865,8 @@ do
         "a late skin callback preserves group confirmation and applied feature preferences")
     options.applyGroup:Click()
     assert(late:GetGroupSecret() == OTHER_SECRET and options.secret:GetText() == ""
-        and options.secret.password and #lateWorld.joinCalls >= 1,
-        "confirmation and hidden-key rules still work after skinning an open form")
+        and #lateWorld.joinCalls >= 1,
+        "confirmation and key cleanup still work after skinning an open form")
 end
 
 do

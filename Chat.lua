@@ -93,7 +93,7 @@ function addon:SetChatPhase(phase, detail)
     self:RefreshOptions()
 end
 
-function addon:GetChatStatusText()
+function addon:GetChatStatusText(concise)
     local state = self.chatState
     local name = self:GetGroupChannelName()
     if not name then
@@ -102,15 +102,16 @@ function addon:GetChatStatusText()
     local label = self:GetChannelDisplayName(name)
     if state.phase == "joined" then
         local channelID = GetChannelName(name)
-        return string.format("Joined %s (/%s). Use /lit chat to write.", label, channelID)
+        local text = string.format("Joined %s (/%s).", label, channelID)
+        return concise and text or (text .. " Use /lit chat to write.")
     end
     if state.phase == "joining" then
         return "Joining " .. label .. "..."
     end
     if state.phase == "paused" then
-        return "Left " .. label .. ". Use Join to reconnect."
+        return "Left " .. label .. (concise and "." or ". Use Join to reconnect.")
     end
-    return state.detail or (label .. " is configured. Use Join to connect.")
+    return state.detail or (concise and "Not connected." or (label .. " is configured. Use Join to connect."))
 end
 
 function addon:ConfirmChatMembership()
