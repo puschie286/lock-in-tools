@@ -630,13 +630,14 @@ do
         and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
     local presence = assert(connectedWorld.statusSends[1], "shared status broadcasts while position sharing is off")
     assert(presence.prefix == connected:GetDataPrefix() and presence.target == "7"
-        and presence.message:match("^1|Q|status|[^|]+|2|F|[^|]+|%d+|%d+|")
-        and presence.message:find("|level=12", 1, true) and presence.message:find("|xp=0", 1, true)
-        and presence.message:find("|xpMax=1000", 1, true) and presence.message:find("|xpState=known", 1, true)
-        and presence.message:find("|inParty=false", 1, true) and presence.message:find("|canInvite=false", 1, true)
-        and presence.message:find("|partyFull=false", 1, true) and presence.message:find("|sharing=false", 1, true)
+        and presence.message:match("^1|Q|status|[^|]+|3|F|[^|]+|%d+|%d+|")
+        and presence.message:find("|1=12", 1, true) and presence.message:find("|2=0", 1, true)
+        and presence.message:find("|3=1000", 1, true) and presence.message:find("|4=known", 1, true)
+        and presence.message:find("|5=false", 1, true) and presence.message:find("|6=false", 1, true)
+        and presence.message:find("|7=false", 1, true) and presence.message:find("|8=false", 1, true)
+        and not presence.message:match("|[%a_][%w_]*=")
         and #connectedWorld.rosterSends == 0,
-        "production startup shares level, XP and party metadata once through status without a separate roster packet")
+        "production startup shares numeric v3 level, XP and party metadata once without named fields or roster packets")
     connectedEvent("CHAT_MSG_ADDON", presence.prefix, presence.message, "CHANNEL", "RosterFriend", nil, 0, 7, dataRoom)
     local rosterFriend
     for _, player in ipairs(connected:GetOverviewPlayers()) do
@@ -2301,14 +2302,14 @@ do
     local now = api.GetServerTime()
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
         overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
-            "1|status|2|F|peer-" .. name:lower() .. "|" .. now .. "|1|level="
-            .. (name == "Bravo" and 0 or 20 + index) .. "|xpState=unavailable|inParty="
-            .. (name == "Bravo" and "true" or "false") .. "|canInvite=true|partyFull=false|sharing="
+            "1|status|3|F|peer-" .. name:lower() .. "|" .. now .. "|1|1="
+            .. (name == "Bravo" and 0 or 20 + index) .. "|4=unavailable|5="
+            .. (name == "Bravo" and "true" or "false") .. "|6=true|7=false|8="
             .. (name == "Alpha" and "true" or "false"),
             "CHANNEL", name .. "-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     end
     overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
-        "1|status|2|D|peer-alpha|" .. now .. "|2|1|future=value|xp=420|xpMax=1000|xpState=known",
+        "1|status|3|D|peer-alpha|" .. now .. "|2|1|65000=value|2=420|3=1000|4=known",
         "CHANNEL", "Alpha-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     local positions = {
         ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,

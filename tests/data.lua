@@ -1118,19 +1118,71 @@ local function statusFixture(values, accepted)
 end
 
 local function full(session, stamp, revision, body)
-    return "2|F|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. body
+    return "3|F|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. body
 end
 
 local function delta(session, stamp, revision, base, body)
-    return "2|D|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. base .. "|" .. body
+    return "3|D|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. base .. "|" .. body
 end
 
 local function heartbeat(session, stamp, revision)
-    return "2|H|" .. session .. "|" .. stamp .. "|" .. revision
+    return "3|H|" .. session .. "|" .. stamp .. "|" .. revision
 end
 
 local function receive(current, sender, payload)
     return current:ReceiveData(sender, "1|status|" .. payload)
+end
+
+-- These IDs are permanent protocol assignments. Collectors and consumers retain
+-- readable names while the wire uses ascending numeric IDs and saves 43 bytes.
+do
+    local values = {
+        level = 24, xp = 420, xpMax = 1000, xpState = "known",
+        inParty = true, canInvite = false, partyFull = false, sharing = true,
+    }
+    local current, clock, samples = statusFixture(values)
+    local body = "1=24|2=420|3=1000|4=known|5=true|6=false|7=false|8=true"
+    local named = "level=24|xp=420|xpMax=1000|xpState=known|inParty=true|canInvite=false|partyFull=false|sharing=true"
+    assert(clock.sent[1].message:match("|3|F|[^|]+|2000000000|1|(.+)$") == body)
+    assert(#named - #body == 43)
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, body)))
+    for name, value in pairs(values) do assert(samples[1].fields[name] == tostring(value), name) end
+    assert(samples[1].fields[1] == nil and samples[1].fields["1"] == nil,
+        "Numeric field IDs are private to the codec")
+
+    -- Unknown Lua names never acquire IDs automatically or fall back to named
+    -- wire fields. An invalid provider cannot publish its partially valid data.
+    assert(current:RegisterDataStatusProvider("unregistered", function()
+        return { future = "new", sharing = "partial" }
+    end, function() end))
+    clock:advance(5)
+    assert(#clock.sent == 1)
+end
+
+-- Unknown IDs stay in the wire baseline for comparisons and delta revisions,
+-- but never leak to named consumers. Their addition/removal must not cause a
+-- needless resync or make a matching same-revision full snapshot inconsistent.
+do
+    local current, clock, samples, _, contacts = statusFixture({ level = 24 })
+    local function sample(revision, expected)
+        local received = samples[#samples]
+        assert(received.sequence == revision and equal(received.fields, expected))
+        assert(contacts[#contacts].metadata.synchronized and not current.dataState.status.resyncNeeded)
+    end
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|9=future|65535=edge")))
+    sample(1, { level = "25" })
+    assert(receive(current, "Friend", delta("peer", 2000000001, 2, 1, "9=changed|10=")))
+    sample(2, { level = "25" })
+    assert(receive(current, "Friend", full("peer", 2000000002, 2, "1=25|9=changed|10=|65535=edge")))
+    sample(2, { level = "25" })
+    assert(receive(current, "Friend", delta("peer", 2000000003, 3, 2, "2=10")))
+    sample(3, { level = "25", xp = "10" })
+    assert(receive(current, "Friend", delta("peer", 2000000004, 4, 3, "9|10|65535")))
+    sample(4, { level = "25", xp = "10" })
+    assert(receive(current, "Friend", full("peer", 2000000005, 4, "1=25|2=10")))
+    sample(4, { level = "25", xp = "10" })
+    clock:advance(5)
+    assert(#clock.sent == 1, "Unknown-only changes must not schedule recovery requests")
 end
 
 -- One shared five-second scheduler broadcasts only changes. Idle presence is a
@@ -1138,40 +1190,40 @@ end
 do
     local values = { xpState = "known", xpMax = 100, xp = 10, level = 24 }
     local current, clock, samples, connections = statusFixture(values)
-    assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|2|F|[^|]+|2000000000|1|"))
-    assert(clock.sent[1].message:find("level=24|xp=10|xpMax=100|xpState=known", 1, true))
+    assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|3|F|[^|]+|2000000000|1|"))
+    assert(clock.sent[1].message:find("1=24|2=10|3=100|4=known", 1, true))
     local send = current.dataState.send
     current:SetDataTransport(send)
     current:OnDataLogin()
     clock:advance(25)
     assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 1)
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].at == 30 and clock.sent[2].message:match("^1|status|2|H|[^|]+|2000000030|1$"))
+    assert(#clock.sent == 2 and clock.sent[2].at == 30 and clock.sent[2].message:match("^1|status|3|H|[^|]+|2000000030|1$"))
     values.xp = 20
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("|2|D|[^|]+|2000000035|2|1|xp=20$"),
+    assert(#clock.sent == 3 and clock.sent[3].message:match("|3|D|[^|]+|2000000035|2|1|2=20$"),
         "A changed field omits identical level and XP capacity")
     values.xp = 21
     clock:advance(1)
     assert(not current:DataStatusTick() and #clock.sent == 3)
     values.xp = 29
     clock:advance(4)
-    assert(#clock.sent == 4 and clock.sent[4].at == 40 and clock.sent[4].message:match("|3|2|xp=29$"))
+    assert(#clock.sent == 4 and clock.sent[4].at == 40 and clock.sent[4].message:match("|3|2|2=29$"))
     values.xp = 30
     assert(current:ReceiveData("Friend", "1|Q|status|joined|" .. full("friend-1", 2000000040, 1,
-        "level=25|xp=5|xpMax=200|xpState=known")))
+        "1=25|2=5|3=200|4=known")))
     assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.xp == "5"
         and samples[1].metadata.kind == "full")
-    assert(#clock.sent == 5 and clock.sent[5].message:match("^1|R|status|joined|friend%-testrealm|2|F|"))
-    assert(clock.sent[5].message:find("xp=30", 1, true))
+    assert(#clock.sent == 5 and clock.sent[5].message:match("^1|R|status|joined|friend%-testrealm|3|F|"))
+    assert(clock.sent[5].message:find("2=30", 1, true))
     clock:advance(5)
-    assert(#clock.sent == 6 and clock.sent[6].message:match("^1|status|2|F|")
-        and clock.sent[6].message:find("xp=30", 1, true),
+    assert(#clock.sent == 6 and clock.sent[6].message:match("^1|status|3|F|")
+        and clock.sent[6].message:find("2=30", 1, true),
         "An unpublished requested snapshot forces a coherent full broadcast without clearing dirty state")
     clock:advance(25)
     assert(#clock.sent == 6)
     clock:advance(5)
-    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|2|H|"))
+    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|3|H|"))
 end
 
 -- A temporary value shared in a requested reply must be corrected even if it
@@ -1180,12 +1232,12 @@ do
     local values = { xp = 1 }
     local current, clock = statusFixture(values)
     values.xp = 2
-    assert(current:ReceiveData("Friend", "1|Q|status|temporary|2|S"))
-    assert(clock.sent[2].message:find("xp=2", 1, true))
+    assert(current:ReceiveData("Friend", "1|Q|status|temporary|3|S"))
+    assert(clock.sent[2].message:find("2=2", 1, true))
     values.xp = 1
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|2|F|")
-        and clock.sent[3].message:match("|3|xp=1$"))
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|3|F|")
+        and clock.sent[3].message:match("|3|2=1$"))
 end
 
 -- Full and delta messages dispatch complete independent merged tables. Missing
@@ -1193,7 +1245,7 @@ end
 do
     local current, clock, samples, _, contacts = statusFixture({ level = 24 })
     local second = {}
-    assert(current:RegisterDataStatusProvider("future", function() return { future = true, text = "a|b=c%" } end,
+    assert(current:RegisterDataStatusProvider("future", function() return { sharing = true, xpState = "a|b=c%" } end,
         function(_, fields, _, _, metadata)
             second[#second + 1] = { level = fields.level, metadata = metadata }
             fields.level = "mutated"; metadata.kind = "mutated"
@@ -1206,22 +1258,22 @@ do
     assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, true))
     assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, nil, true))
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|2|D|")
-        and clock.sent[2].message:find("future=true|text=a%7Cb%3Dc%25", 1, true)
-        and not clock.sent[2].message:find("level=", 1, true))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|D|")
+        and clock.sent[2].message:find("4=a%7Cb%3Dc%25|8=true", 1, true)
+        and not clock.sent[2].message:find("1=", 1, true))
     assert(clock:activeTimers() == 1 and current.dataState.features.status and current.dataState.requests.status
         and not current.dataState.features.player and not current.dataState.features.future)
-    local initial = full("friend-1", 2000000005, 10, "level=25|extra=future%7Cvalue|empty=|gone=old")
+    local initial = full("friend-1", 2000000005, 10, "1=25|4=future%7Cvalue|3=|6=old")
     assert(receive(current, "Friend", initial))
-    assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.extra == "future|value"
-        and samples[1].fields.empty == "" and second[1].level == "25"
+    assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.xpState == "future|value"
+        and samples[1].fields.xpMax == "" and second[1].level == "25"
         and samples[1].metadata.kind == "full" and contacts[1].metadata.synchronized)
     assert(not receive(current, "FRIEND-Test Realm", initial))
-    assert(not receive(current, "Friend", full("friend-1", 2000000004, 9, "level=26")))
+    assert(not receive(current, "Friend", full("friend-1", 2000000004, 9, "1=26")))
     assert(not receive(current, "Self-TestRealm", initial))
-    assert(receive(current, "Friend", delta("friend-1", 2000000006, 11, 10, "xp=20|gone")))
+    assert(receive(current, "Friend", delta("friend-1", 2000000006, 11, 10, "2=20|6")))
     assert(#samples == 2 and samples[2].fields.level == "25" and samples[2].fields.xp == "20"
-        and samples[2].fields.extra == "future|value" and samples[2].fields.gone == nil
+        and samples[2].fields.xpState == "future|value" and samples[2].fields.canInvite == nil
         and samples[2].metadata.kind == "delta" and samples[2].metadata.coherent)
     assert(receive(current, "Friend", heartbeat("friend-1", 2000000036, 11)))
     assert(#samples == 2 and #contacts == 3 and contacts[3].metadata.kind == "heartbeat",
@@ -1232,13 +1284,13 @@ do
         function() attempts = attempts + 1; return false end))
     assert(current:RegisterDataStatusProvider("broken", function() return nil end,
         function() error("Receiver failed") end, nil, function() error("Contact failed") end))
-    assert(current:RegisterDataStatusProvider("healthy", function() return { good = 1 } end,
+    assert(current:RegisterDataStatusProvider("healthy", function() return { canInvite = 1 } end,
         function() healthy = healthy + 1 end))
-    assert(receive(current, "Other", full("other-1", 2000000005, 1, "level=99")))
-    assert(receive(current, "Other", delta("other-1", 2000000006, 2, 1, "level=26")))
+    assert(receive(current, "Other", full("other-1", 2000000005, 1, "1=99")))
+    assert(receive(current, "Other", delta("other-1", 2000000006, 2, 1, "1=26")))
     assert(attempts == 2 and healthy == 2, "Failed and declining callbacks cannot stop other consumers")
     clock:advance(5)
-    assert(clock.sent[#clock.sent].message:find("good=1", 1, true))
+    assert(clock.sent[#clock.sent].message:find("6=1", 1, true))
 end
 
 -- Detect lost or out-of-order patches and changes of sender session. Resync
@@ -1246,36 +1298,36 @@ end
 do
     local values = { xp = 1 }
     local current, clock, samples, _, contacts = statusFixture(values)
-    assert(receive(current, "Friend", full("friend-1", 2000000000, 1, "level=24|xp=10")))
-    assert(not receive(current, "Friend", delta("friend-1", 2000000005, 3, 2, "xp=30")))
+    assert(receive(current, "Friend", full("friend-1", 2000000000, 1, "1=24|2=10")))
+    assert(not receive(current, "Friend", delta("friend-1", 2000000005, 3, 2, "2=30")))
     assert(#samples == 1 and #contacts == 2 and not contacts[2].metadata.synchronized)
     values.xp = 2
     clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("^1|Q|status|[^|]+|2|S$"),
+    assert(clock.sent[#clock.sent].message:match("^1|Q|status|[^|]+|3|S$"),
         "Continuous local changes cannot starve a remote baseline resync")
-    local requestID = clock.sent[#clock.sent].message:match("^1|Q|status|([^|]+)|2|S$")
+    local requestID = clock.sent[#clock.sent].message:match("^1|Q|status|([^|]+)|3|S$")
     assert(current:ReceiveData("Friend", "1|R|status|" .. requestID .. "|self-testrealm|"
-        .. full("friend-1", 2000000005, 3, "level=24|xp=30")))
+        .. full("friend-1", 2000000005, 3, "1=24|2=30")))
     assert(#samples == 2 and samples[2].fields.xp == "30" and samples[2].metadata.synchronized)
     clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("^1|status|2|D|")
-        and clock.sent[#clock.sent].message:match("xp=2$"))
-    assert(not receive(current, "Friend", delta("friend-1", 2000000001, 2, 1, "xp=20")))
+    assert(clock.sent[#clock.sent].message:match("^1|status|3|D|")
+        and clock.sent[#clock.sent].message:match("2=2$"))
+    assert(not receive(current, "Friend", delta("friend-1", 2000000001, 2, 1, "2=20")))
     assert(receive(current, "Friend", heartbeat("friend-1", 2000000030, 4)))
     assert(not contacts[#contacts].metadata.synchronized and #samples == 2)
     clock:advance(20)
     local before = #clock.sent
     clock:advance(5)
-    assert(#clock.sent == before + 1 and clock.sent[#clock.sent].message:match("|2|S$"))
-    assert(receive(current, "Friend", full("friend-1", 2000000035, 4, "level=24|xp=40")))
+    assert(#clock.sent == before + 1 and clock.sent[#clock.sent].message:match("|3|S$"))
+    assert(receive(current, "Friend", full("friend-1", 2000000035, 4, "1=24|2=40")))
     assert(receive(current, "Friend", heartbeat("friend-2", 2000000035, 1)),
         "A new session may have a heartbeat in the same server second")
     assert(not contacts[#contacts].metadata.hasBaseline and not contacts[#contacts].metadata.synchronized)
-    assert(not receive(current, "Friend", full("friend-1", 2000000040, 5, "level=99")),
+    assert(not receive(current, "Friend", full("friend-1", 2000000040, 5, "1=99")),
         "A retired sender session cannot overwrite the replacement")
-    assert(receive(current, "Friend", full("friend-2", 2000000035, 1, "level=25|xp=0")))
+    assert(receive(current, "Friend", full("friend-2", 2000000035, 1, "1=25|2=0")))
     assert(samples[#samples].fields.xp == "0" and samples[#samples].metadata.synchronized)
-    assert(not receive(current, "Unknown", delta("unknown-1", 2000000040, 2, 1, "xp=99")))
+    assert(not receive(current, "Unknown", delta("unknown-1", 2000000040, 2, 1, "2=99")))
     assert(not contacts[#contacts].metadata.hasBaseline)
 end
 
@@ -1289,12 +1341,12 @@ do
             delivered[#delivered + 1] = "alpha:" .. revision .. ":" .. fields.level
             if not nested then
                 nested = true
-                assert(receive(current, sender, full("peer", 2000000001, 2, "level=26")))
+                assert(receive(current, sender, full("peer", 2000000001, 2, "1=26")))
             end
         end))
     assert(current:RegisterDataStatusProvider("beta", function() return {} end,
         function(_, fields, _, revision) delivered[#delivered + 1] = "beta:" .. revision .. ":" .. fields.level end))
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "level=25")))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25")))
     assert(table.concat(delivered, ",") == "alpha:1:25,beta:1:25,alpha:2:26,beta:2:26"
         and #samples == 2 and samples[1].fields.level == "25" and samples[2].fields.level == "26")
     local contactNested = false
@@ -1302,7 +1354,7 @@ do
         function(sender, _, metadata)
             if metadata.kind == "heartbeat" and not contactNested then
                 contactNested = true
-                assert(receive(current, sender, full("peer", 2000000030, 3, "level=27")))
+                assert(receive(current, sender, full("peer", 2000000030, 3, "1=27")))
             end
         end))
     assert(receive(current, "Friend", heartbeat("peer", 2000000030, 3)))
@@ -1314,11 +1366,11 @@ end
 do
     local current, clock = statusFixture({ level = 24 })
     clock:advance(10)
-    assert(current:ReceiveData("Friend", "1|Q|status|first|2|S"))
+    assert(current:ReceiveData("Friend", "1|Q|status|first|3|S"))
     clock:advance(10)
-    assert(current:ReceiveData("Friend", "1|Q|status|second|2|S"))
+    assert(current:ReceiveData("Friend", "1|Q|status|second|3|S"))
     clock:advance(10)
-    assert(clock.sent[#clock.sent].message:match("^1|status|2|H|"))
+    assert(clock.sent[#clock.sent].message:match("^1|status|3|H|"))
     current.savedDataReadOnly = true
     local sent = #clock.sent
     clock:advance(60)
@@ -1329,66 +1381,82 @@ end
 -- delta is ignored without invalidating a newer coherent full baseline.
 do
     local current, clock, samples, _, contacts = statusFixture({ xp = 1 })
-    assert(receive(current, "Friend", full("friend-1", 2000000000, 4, "xp=40")))
-    assert(not receive(current, "Friend", delta("friend-1", 2000000000, 3, 2, "xp=30")))
+    assert(receive(current, "Friend", full("friend-1", 2000000000, 4, "2=40")))
+    assert(not receive(current, "Friend", delta("friend-1", 2000000000, 3, 2, "2=30")))
     assert(#samples == 1 and #contacts == 1 and not current.dataState.status.resyncNeeded)
     clock:advance(5)
     assert(#clock.sent == 1)
-    assert(receive(current, "Friend", delta("friend-1", 2000000005, 5, 4, "xp=50")))
+    assert(receive(current, "Friend", delta("friend-1", 2000000005, 5, 4, "2=50")))
     assert(samples[2].fields.xp == "50")
 end
 
 -- Decode every field before dispatch. Invalid frames cannot partially merge or
--- consume a revision, and obsolete v1 status snapshots are rejected.
+-- consume a revision. Old status versions and named wire fields are rejected.
 do
     local current, _, samples = statusFixture({ level = 24 })
     for _, payload in ipairs({
-        "1|2000000000|1|level=25", "3|F|peer|2000000000|1|level=25",
-        "2|F|peer|10000000000|1|level=25", "2|F|peer|0200000000|1|level=25",
-        "2|F|peer|2000000000|0|level=25", "2|F|peer|2000000000|1000000000|level=25",
-        "2|F|peer|2000000000|01|level=25", "2|F||2000000000|1|level=25",
-        "2|F|peer|2000000000|1|level=25|level=26", "2|F|peer|2000000000|1|level=25|",
-        "2|F|peer|2000000000|1||level=25", "2|F|peer|2000000000|1|1bad=x",
-        "2|F|peer|2000000000|1|level", "2|F|peer|2000000000|1|level=25=26",
-        "2|F|peer|2000000000|1|level=%", "2|F|peer|2000000000|1|level=%GG",
-        "2|F|peer|2000000000|1|level=%0A", "2|F|peer|2000000000|1|level=bad\nvalue",
-        "2|F|peer|2000000000|1|level=%7F", "2|H|peer|2000000000|1|extra=bad",
-        "2|D|peer|2000000000|2|2|level=25", "2|D|peer|2000000000|2|0|level=25",
-        "2|D|peer|2000000000|2|1|", "2|D|peer|2000000000|2|1|level|level=25",
+        "1|2000000000|1|level=25", "2|F|peer|2000000000|1|level=25",
+        "2|F|peer|2000000000|1|1=25", "4|F|peer|2000000000|1|1=25",
+        "2|D|peer|2000000000|2|1|1=25", "2|H|peer|2000000000|1", "2|S",
+        "3|F|peer|10000000000|1|1=25", "3|F|peer|0200000000|1|1=25",
+        "3|F|peer|2000000000|0|1=25", "3|F|peer|2000000000|1000000000|1=25",
+        "3|F|peer|2000000000|01|1=25", "3|F||2000000000|1|1=25",
+        "3|F|peer|2000000000|1|1=25|1=26", "3|F|peer|2000000000|1|1=25|",
+        "3|F|peer|2000000000|1||1=25", "3|F|peer|2000000000|1|1bad=x",
+        "3|F|peer|2000000000|1|level=25", "3|F|peer|2000000000|1|1",
+        "3|F|peer|2000000000|1|1=25=26", "3|F|peer|2000000000|1|=25",
+        "3|F|peer|2000000000|1|0=x", "3|F|peer|2000000000|1|01=x",
+        "3|F|peer|2000000000|1|00=x", "3|F|peer|2000000000|1|-1=x",
+        "3|F|peer|2000000000|1|+1=x", "3|F|peer|2000000000|1|1.0=x",
+        "3|F|peer|2000000000|1|1e0=x", "3|F|peer|2000000000|1|65536=x",
+        "3|F|peer|2000000000|1|99999999999999999999=x",
+        "3|F|peer|2000000000|1|9=first|9=second",
+        "3|F|peer|2000000000|1|1=%", "3|F|peer|2000000000|1|1=%GG",
+        "3|F|peer|2000000000|1|1=%0A", "3|F|peer|2000000000|1|1=bad\nvalue",
+        "3|F|peer|2000000000|1|1=%7F", "3|H|peer|2000000000|1|extra=bad",
+        "3|D|peer|2000000000|2|2|1=25", "3|D|peer|2000000000|2|0|1=25",
+        "3|D|peer|2000000000|2|1|", "3|D|peer|2000000000|2|1|1|1=25",
+        "3|D|peer|2000000000|2|1|9|9=25", "3|D|peer|2000000000|2|1|9|9",
+        "3|D|peer|2000000000|2|1|0", "3|D|peer|2000000000|2|1|01",
+        "3|D|peer|2000000000|2|1|65536",
     }) do
         assert(not receive(current, "Friend", payload), payload)
         assert(not current:ReceiveData("Friend", "1|Q|status|malformed|" .. payload), payload)
     end
     assert(#samples == 0)
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "level=25")))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25")))
     assert(#samples == 1)
-    assert(not receive(current, "Friend", delta("peer", 2000000005, 2, 1, "xp=20|bad=%GG")))
-    assert(receive(current, "Friend", delta("peer", 2000000005, 2, 1, "xp=20")))
+    for _, body in ipairs({ "2=20|9=%GG", "2=20|0=x", "2=20|65536=x", "2=20|9|9=bad" }) do
+        assert(not receive(current, "Friend", delta("malformed-session", 9999999999, 999999999, 1, body)))
+        assert(#samples == 1 and not current.dataState.status.resyncNeeded,
+            "Malformed later IDs cannot partially dispatch or poison sender ordering")
+    end
+    assert(receive(current, "Friend", delta("peer", 2000000005, 2, 1, "2=20")))
     assert(samples[2].fields.level == "25" and samples[2].fields.xp == "20")
 end
 
 -- The full envelope, including the request ID and normalized recipient name,
 -- must fit 255 bytes. Overlarge frames fail atomically and recover next tick.
 do
-    local values = { v = "x" }
+    local values = { xpState = "x" }
     local current, clock = statusFixture(values)
     local sender, requestID = string.rep("a", 118) .. "-TestRealm", string.rep("r", 32)
     assert(#sender == 128)
-    assert(current:ReceiveData(sender, "1|Q|status|" .. requestID .. "|2|S"))
+    assert(current:ReceiveData(sender, "1|Q|status|" .. requestID .. "|3|S"))
     local response = clock.sent[#clock.sent].message
-    values.v = string.rep("x", 256 - #response)
-    assert(current:ReceiveData(sender, "1|Q|status|" .. string.rep("s", 32) .. "|2|S"))
+    values.xpState = string.rep("x", 256 - #response)
+    assert(current:ReceiveData(sender, "1|Q|status|" .. string.rep("s", 32) .. "|3|S"))
     assert(#clock.sent[#clock.sent].message == 255)
     local sent = #clock.sent
-    values.v = values.v .. "x"
-    assert(not current:ReceiveData(sender, "1|Q|status|" .. string.rep("t", 32) .. "|2|S"))
+    values.xpState = values.xpState .. "x"
+    assert(not current:ReceiveData(sender, "1|Q|status|" .. string.rep("t", 32) .. "|3|S"))
     assert(#clock.sent == sent)
-    values.v = string.rep("x", 250)
+    values.xpState = string.rep("x", 250)
     clock:advance(5)
     assert(#clock.sent == sent)
-    values.v = "recovered"
+    values.xpState = "recovered"
     clock:advance(5)
-    assert(#clock.sent == sent + 1 and clock.sent[#clock.sent].message:find("v=recovered", 1, true))
+    assert(#clock.sent == sent + 1 and clock.sent[#clock.sent].message:find("4=recovered", 1, true))
 end
 
 -- A provider with no initial sample stays quiet. Once it had a sample, becoming
@@ -1399,18 +1467,18 @@ do
     clock.environment.issecretvalue = function(value) return rawequal(value, marker) end
     assert(current:RegisterDataStatusProvider("unsafe", function() return values end, function() end))
     clock:login(); clock:connect()
-    for _, invalid in ipairs({ marker, { v = marker }, { [marker] = "secret" }, { v = 0 / 0 },
-        { v = math.huge }, { v = "bad\nvalue" }, { ["bad|key"] = 1 }, { v = {} } }) do
+    for _, invalid in ipairs({ marker, { xpState = marker }, { [marker] = "secret" }, { xpState = 0 / 0 },
+        { xpState = math.huge }, { xpState = "bad\nvalue" }, { ["bad|key"] = 1 }, { xpState = {} } }) do
         values = invalid
         clock:advance(5)
         assert(#clock.sent == 0)
     end
-    values = { v = false }
+    values = { xpState = false }
     clock:advance(5)
-    assert(#clock.sent == 1 and clock.sent[1].message:find("v=false", 1, true))
+    assert(#clock.sent == 1 and clock.sent[1].message:find("4=false", 1, true))
     values = nil
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("|2|1|v$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|2|1|4$"))
 end
 
 -- Send failures retain the latest unpublished state, and a failed resync is
@@ -1423,14 +1491,14 @@ do
     assert(#clock.sent == 1)
     values.xp = 2
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:find("xp=2", 1, true))
+    assert(#clock.sent == 2 and clock.sent[2].message:find("2=2", 1, true))
     current:SetDataTransport(nil)
     assert(clock:activeTimers() == 0 and not connections[#connections])
     clock:connect()
     assert(#clock.sent == 3 and clock.sent[3].message:match("^1|Q|status|") and connections[#connections])
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "xp=7")))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=7")))
     current:SetDataTransport(nil); clock:connect()
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "xp=8")))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=8")))
     local reject = false
     current:SetDataTransport(function(_, message)
         clock.sent[#clock.sent + 1] = { at = clock.now, message = message }
@@ -1439,17 +1507,17 @@ do
     reject = true
     assert(receive(current, "Friend", heartbeat("peer", 2000000005, 2)))
     clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("|2|S$"))
+    assert(clock.sent[#clock.sent].message:match("|3|S$"))
     local function resyncs()
         local total = 0
-        for _, packet in ipairs(clock.sent) do if packet.message:match("|2|S$") then total = total + 1 end end
+        for _, packet in ipairs(clock.sent) do if packet.message:match("|3|S$") then total = total + 1 end end
         return total
     end
     local requests = resyncs()
     clock:advance(25)
     assert(resyncs() == requests)
     clock:advance(5)
-    assert(resyncs() == requests + 1 and clock.sent[#clock.sent].message:match("|2|S$"))
+    assert(resyncs() == requests + 1 and clock.sent[#clock.sent].message:match("|3|S$"))
     clock:fire("PLAYER_LOGOUT")
     local sent = #clock.sent
     clock:advance(60)
@@ -1519,13 +1587,13 @@ do
         local changes, heartbeats = 0, 0
         for _, packet in ipairs(client.world.nativeSends) do
             assert(#packet.message <= 255 and not packet.message:match("^1|[QR]?|?roster|"))
-            if packet.message:match("^1|status|2|[FD]|") then changes = changes + 1 end
-            if packet.message:match("^1|status|2|H|") then heartbeats = heartbeats + 1 end
+            if packet.message:match("^1|status|3|[FD]|") then changes = changes + 1 end
+            if packet.message:match("^1|status|3|H|") then heartbeats = heartbeats + 1 end
         end
         return changes, heartbeats
     end
     assert(counts(alice) == 0)
-    assert(alice.addon:RegisterDataStatusProvider("activity", function() return { activity = "questing" } end, function() end))
+    assert(alice.addon:RegisterDataStatusProvider("activity", function() return {} end, function() end))
     alice.world.xp = 420
     alice.world:fire("PLAYER_XP_UPDATE", "player")
     assert(player(alice, "Alice").xp == 420 and player(bob, "Alice").xp == 100)

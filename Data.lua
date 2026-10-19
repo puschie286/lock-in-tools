@@ -154,6 +154,37 @@ local function StatusField(name)
         and name:match("^[a-z][a-zA-Z0-9_]*$")
 end
 
+-- Permanent wire registry. Add fields with new IDs; never renumber or reuse an
+-- ID. Keep retired entries with false in place of their former Lua field name.
+local STATUS_FIELD_REGISTRY = {
+    { 1, "level" },
+    { 2, "xp" },
+    { 3, "xpMax" },
+    { 4, "xpState" },
+    { 5, "inParty" },
+    { 6, "canInvite" },
+    { 7, "partyFull" },
+    { 8, "sharing" },
+}
+local STATUS_FIELD_NAMES, STATUS_FIELD_IDS, STATUS_FIELD_ORDER = {}, {}, {}
+for _, field in ipairs(STATUS_FIELD_REGISTRY) do
+    local id, name = field[1], field[2]
+    assert(type(id) == "number" and id >= 1 and id <= 65535 and id % 1 == 0
+        and STATUS_FIELD_NAMES[id] == nil, "Invalid or duplicate status field ID.")
+    assert(name == false or (StatusField(name) and STATUS_FIELD_IDS[name] == nil),
+        "Invalid or duplicate status field name.")
+    STATUS_FIELD_NAMES[id] = name
+    if name then STATUS_FIELD_IDS[name] = id end
+    STATUS_FIELD_ORDER[#STATUS_FIELD_ORDER + 1] = id
+end
+table.sort(STATUS_FIELD_ORDER)
+
+local function StatusFieldID(value)
+    if not value or #value > 5 or not value:match("^[1-9][0-9]*$") then return nil end
+    local id = tonumber(value)
+    return id <= 65535 and id or nil
+end
+
 local function StatusString(value)
     if IsSecret(value) then return nil end
     if type(value) == "number" then
@@ -192,10 +223,12 @@ end
 
 local function DecodeStatus(payload)
     if IsSecret(payload) or type(payload) ~= "string" or payload:find("[%z\001-\031\127]") then return nil end
-    local kind, session, stampText, revisionText, body = payload:match("^2|([FDH])|([^|]+)|(%d+)|(%d+)(.*)$")
+    local kind, session, stampText, revisionText, body = payload:match("^3|([FDH])|([^|]+)|(%d+)|(%d+)(.*)$")
     local stamp = StatusInteger(stampText, MAX_STATUS_STAMP, 0)
     local revision = StatusInteger(revisionText, MAX_REQUEST_SEQUENCE, 1)
     if not kind or not ValidRequestID(session) or not stamp or not revision then return nil end
+    -- Keep unknown IDs in the baseline so future fields obey the same revision
+    -- checks and delta recovery. Only provider callbacks translate known names.
     local message = { kind = kind, session = session, stamp = stamp, revision = revision, fields = {} }
     if kind == "H" then return body == "" and message or nil end
     if kind == "D" then
@@ -210,12 +243,13 @@ local function DecodeStatus(payload)
     if body ~= "" then
         if body:sub(-1) == "|" then return nil end
         for part in (body .. "|"):gmatch("(.-)|") do
-            local name, encoded = part:match("^([^=]+)=(.*)$")
-            if not name and kind == "D" then name = part end
-            if not StatusField(name) or message.fields[name] ~= nil then return nil end
+            local idText, encoded = part:match("^([^=]+)=(.*)$")
+            if not idText and kind == "D" then idText = part end
+            local id = StatusFieldID(idText)
+            if not id or message.fields[id] ~= nil then return nil end
             local value = encoded ~= nil and UnescapeStatus(encoded)
             if encoded ~= nil and value == nil then return nil end
-            message.fields[name] = encoded == nil and false or value
+            message.fields[id] = encoded == nil and false or value
         end
     end
     return message
@@ -234,6 +268,15 @@ local function CopyStatus(fields)
     return copy
 end
 
+local function NamedStatus(fields)
+    local named = {}
+    for id, value in pairs(fields) do
+        local name = STATUS_FIELD_NAMES[id]
+        if name then named[name] = value end
+    end
+    return named
+end
+
 -- Providers share one complete snapshot. A broken provider cannot stop healthy
 -- providers, and omitted fields remain unavailable rather than retaining old data.
 local function CollectStatus(self)
@@ -244,7 +287,7 @@ local function CollectStatus(self)
             local collected, valid = {}, true
             for key, value in pairs(values) do
                 local encoded = StatusString(value)
-                if not StatusField(key) or encoded == nil then valid = false; break end
+                if not StatusField(key) or not STATUS_FIELD_IDS[key] or encoded == nil then valid = false; break end
                 collected[key] = encoded
             end
             if valid then
@@ -279,11 +322,15 @@ local function EncodeStatus(self, kind, fields, revision, base)
         or stamp > MAX_STATUS_STAMP or stamp % 1 ~= 0 then return nil end
     stamp = math.max(stamp, status.lastStamp or 0)
     status.lastStamp = stamp
-    local header = "2|" .. kind .. "|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision
+    local header = "3|" .. kind .. "|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision
     if kind == "H" then return header end
     local encoded = {}
-    for _, name in ipairs(StatusNames(fields)) do
-        encoded[#encoded + 1] = fields[name] == false and name or name .. "=" .. EscapeStatus(fields[name])
+    for _, id in ipairs(STATUS_FIELD_ORDER) do
+        local name = STATUS_FIELD_NAMES[id]
+        local value = name and fields[name]
+        if value ~= nil and name then
+            encoded[#encoded + 1] = value == false and tostring(id) or id .. "=" .. EscapeStatus(value)
+        end
     end
     return header .. "|" .. (base and base .. "|" or "") .. table.concat(encoded, "|")
 end
@@ -351,7 +398,7 @@ local function ProcessStatus(self, sender, payload, requested)
         -- Each callback owns its copies. Central revision ordering keeps one
         -- coherent baseline even if a consumer throws or rejects the sample.
         local provider = status.providers[name]
-        pcall(provider.receive, sender, CopyStatus(peer.fields), message.stamp, message.revision, CopyStatus(metadata))
+        pcall(provider.receive, sender, NamedStatus(peer.fields), message.stamp, message.revision, CopyStatus(metadata))
         if status.generation ~= generation then return false end
     end
     return true
@@ -438,7 +485,7 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     if first then
         self:RegisterDataRequest("status", function(sender, payload, budget)
             local generation = status.generation
-            if payload ~= "2|S" then
+            if payload ~= "3|S" then
                 local message = DecodeStatus(payload)
                 if not message or message.kind ~= "F" then return nil end
                 ReceiveStatus(self, sender, payload, true)
@@ -480,7 +527,7 @@ function addon:DataStatusTick()
         if status.requestNeeded then
             payload, request, broadcast = EncodeStatus(self, "F", fields, revision), true, true
         elseif status.resyncNeeded and (not status.lastResyncAttemptAt or now - status.lastResyncAttemptAt >= STATUS_HEARTBEAT_INTERVAL) then
-            payload, request = "2|S", true
+            payload, request = "3|S", true
         elseif status.forceFull or revision ~= status.broadcastRevision then
             local changed = {}
             for name, value in pairs(fields) do
@@ -495,7 +542,7 @@ function addon:DataStatusTick()
         end
         if payload then
             status.lastAttemptAt = now
-            if payload == "2|S" then
+            if payload == "3|S" then
                 status.resyncNeeded, status.lastResyncAttemptAt = false, now
             end
             if request then sent = self:RequestData("status", payload)
@@ -506,8 +553,8 @@ function addon:DataStatusTick()
                     -- Synchronous callbacks can collect newer local state.
                     status.forceFull = status.revision ~= revision
                 end
-                if payload ~= "2|S" then status.lastTrafficAt = now end
-            elseif generation == status.generation and payload == "2|S" then
+                if payload ~= "3|S" then status.lastTrafficAt = now end
+            elseif generation == status.generation and payload == "3|S" then
                 status.resyncNeeded = true
             end
         end
