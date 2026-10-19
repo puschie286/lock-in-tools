@@ -1,7 +1,9 @@
 # Activity monitoring
 
-Planned; not implemented. Will use the [shared group data pipeline](group.md#shared-data-pipeline) with an independent sharing control and its own feature identifier.
+**Planned; not implemented.** Activity monitoring will share group members' activity through the [shared group data pipeline](group.md#shared-data-pipeline), with an independent sharing control.
 
-Define activity events and update frequency, then verify client support. Reuse the common data channel rather than creating another feature-specific channel. Delivery is limited to the [validated internal-realm scope](position-sharing.md#connection-and-limits); cross-internal-realm delivery and whisper fallback remain unsupported, independently of human chat.
+Which activities to show and how often to update them remain undecided. Delivery will inherit the pipeline's [internal-realm limits](position-sharing.md#connection-and-limits); cross-internal-realm delivery and whisper fallback are unsupported.
 
-Use WoW's supplied sender and define the feature's payload and ordering rules. The shared pipeline does not implement activity monitoring or establish live delivery.
+## In-game checks
+
+No activity monitoring is available to validate yet. Client support and live delivery must be checked when implemented.

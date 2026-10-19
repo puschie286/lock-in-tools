@@ -4,7 +4,8 @@
 - `Core.lua`: startup/settings; `Crypto.lua`/`Group.lua`: group keys/credentials; `Chat.lua`: native chat; `Options.lua`/`Commands.lua`: welcome, settings and commands.
 - Features share one account-wide group key in `LockInToolsDB`. Preserve migrations, legacy keys and newer-schema read-only behavior. Never log group keys.
 - `LockInTools.toc` defines metadata and load order. Register new addon files there; keep tests out. Use `/reload` for existing Lua edits; restart WoW after manifest additions.
-- Keep `README.md` focused on development setup. Keep one concise file per feature in `feature/`, including limits and in-game checks; label planned features clearly.
+- Keep `README.md` focused on development setup.
+- Keep one concise overview per feature in `feature/`: purpose, main user-facing behavior, important limits and brief in-game checks. Not every tiny detail needs to be recorded; omit implementation minutiae, exhaustive checklists and change history. Label planned features clearly.
 
 ## Verification
 
