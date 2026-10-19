@@ -14,16 +14,43 @@ local function Mixin(target, ...)
     return target
 end
 
+local function Vector(x, y)
+    return { x = x, y = y, GetXY = function(self) return self.x, self.y end }
+end
+
 local function LoadMap()
     local addon = { positions = {} }
     function addon:GetSharedPositions() return self.positions end
-    local world = { frames = {}, added = 0, created = 0, released = 0, rectangles = {} }
+    local world = {
+        frames = {}, added = 0, created = 0, released = 0, rectangles = {},
+        bounds = {}, secretValues = {}, worldConversions = 0, mapConversions = 0,
+    }
     local environment = setmetatable({
         CreateFromMixins = Mix,
         Mixin = Mixin,
+        CreateVector2D = Vector,
+        issecretvalue = function(value) return world.secretValues[value] == true end,
         C_Map = { GetMapRectOnMap = function(source, target)
             local rectangle = world.rectangles[source .. ":" .. target]
             if rectangle then return unpack(rectangle) end
+        end,
+        GetWorldPosFromMapPos = function(source, position)
+            world.worldConversions = world.worldConversions + 1
+            local bounds = world.bounds[source]
+            if bounds then
+                local x, y = position:GetXY()
+                return bounds.continent, Vector(bounds[1] + x * (bounds[2] - bounds[1]),
+                    bounds[3] + y * (bounds[4] - bounds[3]))
+            end
+        end,
+        GetMapPosFromWorldPos = function(continent, position, target)
+            world.mapConversions = world.mapConversions + 1
+            local bounds = world.bounds[target]
+            if bounds and bounds.continent == continent then
+                local x, y = position:GetXY()
+                return target, Vector((x - bounds[1]) / (bounds[2] - bounds[1]),
+                    (y - bounds[3]) / (bounds[4] - bounds[3]))
+            end
         end },
         CreateFrame = function(frameType)
             assert(frameType == "Frame")
@@ -38,6 +65,7 @@ local function LoadMap()
             return frame
         end,
     }, { __index = _G })
+    world.environment, world.mapAPI = environment, environment.C_Map
     local chunk = assert(loadfile("PositionMap.lua"))
     setfenv(chunk, environment)
     chunk("LockInTools", addon)
@@ -221,4 +249,126 @@ presence:RefreshPositionPins()
 assert(#presenceWorld.map.pins == 0 and presenceWorld.released == 4)
 assert(presencePin.playerName == nil and presencePin.online == nil and presencePin.Label.text == "")
 
-print("PASS: native map attachment, presence labels/colors, parent-map projection and pooled pin lifecycle")
+local projection, projectionWorld = LoadMap()
+-- Synthetic geometry for Thunder Bluff, Mulgore, Kalimdor and a different continent.
+projectionWorld.bounds[1456] = { 1000, 1400, 4000, 4600, continent = 1 }
+projectionWorld.bounds[1412] = { 500, 2500, 2000, 6000, continent = 1 }
+projectionWorld.bounds[1414] = { -5000, 5000, -4000, 8000, continent = 1 }
+projectionWorld.bounds[13] = { -5000, 5000, -4000, 8000, continent = 2 }
+projectionWorld:loadNativeMap(true)
+projectionWorld.map.id = 1456
+local shared = { name = "Alice-Realm", map = 1456, x = 0.25, y = 0.5 }
+projection.positions.alice = shared
+projection:InitializePositionMap()
+Near(projectionWorld.map.pins[1].x, 0.25)
+Near(projectionWorld.map.pins[1].y, 0.5)
+assert(projectionWorld.worldConversions == 0, "own-map positions need no conversion")
+
+projectionWorld.map:changeMap(1412)
+assert(#projectionWorld.map.pins == 1, "city coordinates appear on the overlapping region without a direct rectangle")
+Near(projectionWorld.map.pins[1].x, 0.3)
+Near(projectionWorld.map.pins[1].y, 0.575)
+assert(projectionWorld.worldConversions == 1 and projectionWorld.mapConversions == 1)
+
+projectionWorld.rectangles["1456:1414"] = { 0.6, 0.64, 2 / 3, 43 / 60 }
+projectionWorld.map:changeMap(1414)
+Near(projectionWorld.map.pins[1].x, 0.61)
+Near(projectionWorld.map.pins[1].y, 83 / 120)
+assert(projectionWorld.worldConversions == 1, "native rectangle projection stays preferred")
+projectionWorld.map:changeMap(1456)
+Near(projectionWorld.map.pins[1].x, 0.25)
+Near(projectionWorld.map.pins[1].y, 0.5)
+Near(shared.x, 0.25)
+Near(shared.y, 0.5)
+assert(shared.map == 1456 and projectionWorld.worldConversions == 1, "map switches preserve shared source coordinates")
+
+projectionWorld.rectangles["1456:1412"] = { 0, 0, 0, 0 }
+projectionWorld.map:changeMap(1412)
+Near(projectionWorld.map.pins[1].x, 0.3)
+Near(projectionWorld.map.pins[1].y, 0.575)
+assert(projectionWorld.worldConversions == 2, "a degenerate native rectangle falls back to world coordinates")
+shared.map, shared.x, shared.y = 1412, 0.3, 0.575
+projectionWorld.map:changeMap(1456)
+Near(projectionWorld.map.pins[1].x, 0.25)
+Near(projectionWorld.map.pins[1].y, 0.5)
+shared.x, shared.y = 0.9, 0.9
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "region positions outside the city remain hidden")
+shared.map, shared.x, shared.y = 1456, 0.25, 0.5
+projectionWorld.map:changeMap(13)
+assert(#projectionWorld.map.pins == 0, "world conversion does not project onto another continent")
+
+local api = projectionWorld.mapAPI
+local toWorld, toMap, rectangle = api.GetWorldPosFromMapPos, api.GetMapPosFromWorldPos, api.GetMapRectOnMap
+api.GetMapRectOnMap = nil
+projectionWorld.map:changeMap(1412)
+Near(projectionWorld.map.pins[1].x, 0.3)
+Near(projectionWorld.map.pins[1].y, 0.575)
+assert(#projectionWorld.map.pins == 1, "world conversion works when the rectangle API is absent")
+
+api.GetMapPosFromWorldPos = function() return 1456, Vector(0.3, 0.575) end
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "a converted position must belong to the displayed map")
+api.GetMapPosFromWorldPos = function() return nil end
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "missing converted positions remain hidden")
+local secret = {}
+projectionWorld.secretValues[secret] = true
+for _, point in ipairs({ Vector(-0.1, 0.5), Vector(0.5, 1.1), Vector(0 / 0, 0.5),
+    Vector(secret, 0.5), Vector(0.5, secret), Vector(nil, 0.5) }) do
+    api.GetMapPosFromWorldPos = function() return 1412, point end
+    projection:RefreshPositionPins()
+    assert(#projectionWorld.map.pins == 0, "invalid or secret converted coordinates remain hidden")
+end
+api.GetMapPosFromWorldPos = function() return secret, Vector(0.3, 0.575) end
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "secret converted map IDs remain hidden")
+api.GetMapPosFromWorldPos = toMap
+for _, result in ipairs({ {}, { 1 }, { secret, Vector(1100, 4300) }, { 1, secret } }) do
+    api.GetWorldPosFromMapPos = function() return unpack(result) end
+    projection:RefreshPositionPins()
+    assert(#projectionWorld.map.pins == 0, "missing or secret world conversion results remain hidden")
+end
+api.GetWorldPosFromMapPos = toWorld
+
+for _, missing in ipairs({ "GetWorldPosFromMapPos", "GetMapPosFromWorldPos" }) do
+    local original = api[missing]
+    api[missing] = nil
+    projection:RefreshPositionPins()
+    assert(#projectionWorld.map.pins == 0, "optional conversion APIs may be unavailable")
+    api[missing] = original
+end
+projectionWorld.environment.CreateVector2D = nil
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "a missing vector constructor disables conversion safely")
+projectionWorld.environment.CreateVector2D = Vector
+api.GetMapRectOnMap = rectangle
+
+for _, invalidID in ipairs({ 0, -1, 1.5, math.huge, secret, false }) do
+    local beforeConversions = projectionWorld.worldConversions
+    shared.map = invalidID
+    projection:RefreshPositionPins()
+    assert(#projectionWorld.map.pins == 0, "invalid source map IDs remain hidden")
+    shared.map = 1456
+    projectionWorld.map:changeMap(invalidID)
+    assert(#projectionWorld.map.pins == 0, "invalid target map IDs remain hidden")
+    assert(projectionWorld.worldConversions == beforeConversions, "validate IDs before calling native conversion APIs")
+    projectionWorld.map.id = 1412
+end
+shared.map = nil
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "a missing source map remains hidden")
+projectionWorld.map:changeMap(nil)
+assert(#projectionWorld.map.pins == 0, "missing source and target maps cannot match as an own-map position")
+shared.map = 1456
+projection:RefreshPositionPins()
+assert(#projectionWorld.map.pins == 0, "a missing displayed map remains hidden")
+
+projectionWorld.bounds[1456].continent = 0
+projectionWorld.bounds[1412].continent = 0
+projectionWorld.map:changeMap(1412)
+assert(#projectionWorld.map.pins == 1, "world continent ID zero is valid")
+Near(projectionWorld.map.pins[1].x, 0.3)
+Near(projectionWorld.map.pins[1].y, 0.575)
+
+print("PASS: native map attachment, presence labels/colors, parent/overlapping-map projection and pooled pin lifecycle")

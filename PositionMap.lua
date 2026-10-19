@@ -9,21 +9,43 @@ end
 
 local function Number(value)
     return not IsSecret(value) and type(value) == "number" and value == value
+        and value > -math.huge and value < math.huge
 end
 
 local function Coordinate(value)
     return Number(value) and value >= 0 and value <= 1
 end
 
-local function PositionOnMap(peer, mapID)
-    if not Coordinate(peer.x) or not Coordinate(peer.y) then return nil end
-    if peer.map == mapID then return peer.x, peer.y end
-    if not C_Map or not C_Map.GetMapRectOnMap then return nil end
-    local minX, maxX, minY, maxY = C_Map.GetMapRectOnMap(peer.map, mapID)
-    if not Number(minX) or not Number(maxX) or not Number(minY) or not Number(maxY) then return nil end
-    local x = minX + peer.x * (maxX - minX)
-    local y = minY + peer.y * (maxY - minY)
+local function MapID(value)
+    return Number(value) and value >= 1 and value <= 1000000 and value == math.floor(value)
+end
+
+local function WorldPositionOnMap(peer, mapID)
+    if not C_Map or not C_Map.GetWorldPosFromMapPos or not C_Map.GetMapPosFromWorldPos
+        or not CreateVector2D then return nil end
+    local continentID, worldPosition = C_Map.GetWorldPosFromMapPos(peer.map, CreateVector2D(peer.x, peer.y))
+    if not Number(continentID) or IsSecret(worldPosition) or not worldPosition then return nil end
+    local projectedMap, position = C_Map.GetMapPosFromWorldPos(continentID, worldPosition, mapID)
+    if IsSecret(projectedMap) or projectedMap ~= mapID or IsSecret(position) or not position then return nil end
+    local x, y = position:GetXY()
     if Coordinate(x) and Coordinate(y) then return x, y end
+end
+
+local function PositionOnMap(peer, mapID)
+    if not MapID(peer.map) or not MapID(mapID) or not Coordinate(peer.x) or not Coordinate(peer.y) then return nil end
+    if peer.map == mapID then return peer.x, peer.y end
+    if C_Map and C_Map.GetMapRectOnMap then
+        local minX, maxX, minY, maxY = C_Map.GetMapRectOnMap(peer.map, mapID)
+        if Number(minX) and Number(maxX) and Number(minY) and Number(maxY)
+            and maxX > minX and maxY > minY then
+            local x = minX + peer.x * (maxX - minX)
+            local y = minY + peer.y * (maxY - minY)
+            if Coordinate(x) and Coordinate(y) then return x, y end
+            return nil
+        end
+    end
+    -- Overlapping city/zone maps need not have a direct parent-map rectangle.
+    return WorldPositionOnMap(peer, mapID)
 end
 
 function Pin:OnLoad()

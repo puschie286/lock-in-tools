@@ -424,12 +424,13 @@ do
         and next(connected:GetSharedPositions()) == nil, "position switch leaves the shared pipeline connected")
     connectedCommand("data leave")
     connectedWorld.fire("PLAYER_ENTERING_WORLD")
-    connectedWorld:advance(30)
+    connectedWorld:advance(0.9)
     assert(not connected:IsDataConnected() and #connectedWorld.dataJoinCalls == 1
         and connectedWorld.dataLeaveCalls[1] == dataRoom and connectedWorld.channels[chatRoom:lower()],
-        "leaving data pauses retries and preserves native human chat")
-    connectedCommand("data join")
-    assert(#connectedWorld.dataJoinCalls == 2 and not connected:IsDataConnected())
+        "leaving data briefly disconnects without disrupting native human chat")
+    connectedWorld:advance(0.1)
+    assert(#connectedWorld.dataJoinCalls == 2 and not connected:IsDataConnected(),
+        "shared data reconnects automatically while positions remain disabled")
     connectedWorld:completeJoin(dataRoom, 14)
     assert(connected:IsDataConnected())
     assert(connected:SetPositionSharing(true))
@@ -471,38 +472,68 @@ do
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 
--- Enabling or re-saving positions resumes data without changing human-chat preferences.
+-- Every shared feature recovers independently of human chat and position preferences.
 do
-    local resumed, resumedEnvironment, _, _, resumedWorld = loadAddon(settings(nil, false), false)
+    local resumed, resumedEnvironment, _, resumedEvent, resumedWorld = loadAddon(settings(nil, false), false)
     resumedWorld:initialize()
     local dataRoom = resumed:GetGroupDataChannelName()
+    local received, connections = {}, {}
+    assert(resumed:RegisterDataFeature("future", function(sender, payload)
+        received[#received + 1] = { sender = sender, payload = payload }
+        return true
+    end, function(connected) connections[#connections + 1] = connected end))
     resumedWorld:completeJoin(dataRoom, 7)
     local resumedCommand = resumedEnvironment.SlashCmdList.LOCKINTOOLS
     resumedCommand("data leave")
-    assert(resumed.dataState.paused and not resumed.db.position.sharing)
-    assert(resumed:SetPositionSharing(true))
-    assert(#resumedWorld.dataJoinCalls == 2 and not resumed.dataState.paused
-        and not resumed.db.chat.autoJoin and #resumedWorld.joinCalls == 0,
-        "enabling positions resumes a deliberately left data channel without joining human chat")
+    local timer = assert(resumed.dataState.timer)
+    for _ = 1, 12 do
+        resumedEvent("PLAYER_ENTERING_WORLD")
+        resumedEvent("CHANNEL_UI_UPDATE")
+        resumedWorld:notice("YOU_LEFT", dataRoom)
+    end
+    assert(not resumed:IsDataConnected() and not resumed.db.position.sharing
+        and not resumed.db.chat.autoJoin and #resumedWorld.joinCalls == 0
+        and resumed.dataState.timer == timer and not timer:IsCancelled(),
+        "repeated leave and world events preserve one scheduled shared-data reconnect")
+    resumedWorld:advance(1)
+    assert(#resumedWorld.dataJoinCalls == 2)
     resumedWorld:completeJoin(dataRoom, 14)
-    resumedWorld:advance(2)
-    assert(resumed:IsDataConnected() and #resumedWorld.dataSends == 1
-        and resumedWorld.dataSends[1].target == "14"
+    assert(resumed:IsDataConnected() and not resumed.db.position.sharing
+        and #resumedWorld.dataSends == 0 and #resumedWorld.joinCalls == 0
+        and connections[#connections] == true,
+        "manual data leave reconnects every feature without enabling positions or human chat")
+    timer = assert(resumed.dataState.timer)
+    for _ = 1, 12 do
+        resumedEvent("PLAYER_ENTERING_WORLD")
+        resumedEvent("CHANNEL_UI_UPDATE")
+    end
+    assert(resumed.dataState.timer == timer and not timer:IsCancelled()
+        and #resumedWorld.dataJoinCalls == 2,
+        "healthy channel events preserve one watchdog without scheduling duplicate joins")
+    assert(resumed:SendData("future", "current-state"))
+    local sent = assert(resumedWorld.dataSends[1])
+    assert(sent.target == "14" and sent.message == "1|future|current-state"
         and resumedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("14. " .. dataRoom)
-            == "14. LockInTools Data", "automatic reconnection sends positions through the aliased native channel")
-    resumedCommand("data leave")
-    resumedWorld.fire("PLAYER_ENTERING_WORLD")
-    resumedWorld:advance(30)
-    assert(resumed.db.position.sharing and #resumedWorld.dataJoinCalls == 2
-        and not resumed:IsDataConnected() and #resumedWorld.dataSends == 1,
-        "a later deliberate data leave stays paused through position ticks and world events")
-    assert(resumed:SetPositionSharing(true))
-    assert(#resumedWorld.dataJoinCalls == 3 and not resumed.dataState.paused,
-        "re-saving already-enabled position sharing resumes data without a separate join command")
+            == "14. LockInTools Data", "future features send through the current aliased native route")
+    resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "NumberPeer", nil, 0, 14, dataRoom)
+    resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "NamePeer", nil, 0, nil, dataRoom:lower())
+    resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "AliasPeer", nil, 0, nil, "LockInTools Data")
+    resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "OldPeer", nil, 0, 7, dataRoom)
+    assert(#received == 2 and received[1].sender == "NumberPeer" and received[2].sender == "NamePeer"
+        and received[1].payload == "current-state",
+        "feature-only delivery accepts the current number or native name and rejects aliases and old numbers")
+    resumedWorld.channels[dataRoom:lower()] = nil
+    resumedWorld:notice("YOU_LEFT", dataRoom, 14)
+    resumedWorld:advance(1)
+    assert(#resumedWorld.dataJoinCalls == 3 and not resumed:IsDataConnected(),
+        "native data leave reconnects without any position sampling or settings save")
     resumedWorld:completeJoin(dataRoom, 18)
-    resumedWorld:advance(2)
-    assert(resumed:IsDataConnected() and resumedWorld.dataSends[2].target == "18",
-        "re-saving enabled sharing restores current-position broadcasts on the new native number")
+    assert(resumed:SendData("future", "new-state") and resumedWorld.dataSends[2].target == "18",
+        "automatic reconnection refreshes the channel number for future features")
+    resumedWorld.channels[dataRoom:lower()] = nil
+    resumedWorld:advance(15)
+    assert(not resumed:IsDataConnected() and #resumedWorld.dataJoinCalls == 4,
+        "the shared watchdog reconnects a silent membership loss while all feature ticks are idle")
 end
 
 -- Saving position preferences preserves joins and recovery checks already in progress.
@@ -522,7 +553,7 @@ do
     assert(pending:SetPositionSharing(true))
     assert(#pendingWorld.dataJoinCalls == 2 and state.attempts == 2
         and state.timer == timer and state.generation == generation and not timer:IsCancelled(),
-        "re-saving enabled sharing preserves the current retry delay and attempt budget")
+        "re-saving enabled sharing preserves the current shared retry delay")
     pendingWorld:completeJoin(pending:GetGroupDataChannelName(), 7)
     local send = state.send
     assert(pending:SetPositionSharing(true))
@@ -549,30 +580,65 @@ do
         "saving enabled sharing preserves an existing alternate transport and uses it for positions")
 end
 
--- Explicit sharing saves may retry failures, while background position ticks remain bounded.
+-- Failed shared joins retry indefinitely at a capped pace without feature involvement.
 do
-    local failed, _, _, _, failedWorld = loadAddon(settings(nil, false), false)
+    local failed, _, _, failedEvent, failedWorld = loadAddon(settings(nil, false), false)
     failedWorld:initialize()
     local dataRoom = failed:GetGroupDataChannelName()
     failedWorld:notice("WRONG_PASSWORD", dataRoom)
-    assert(failed.dataState.failed and not failed.dataState.timer)
+    local timer = assert(failed.dataState.timer)
     assert(failed:SetPositionSharing(true))
-    assert(#failedWorld.dataJoinCalls == 2 and not failed.dataState.failed,
-        "enabling sharing explicitly retries a failed data connection")
-    failedWorld:advance(60)
-    assert(#failedWorld.dataJoinCalls == 5 and failed.dataState.failed and not failed.dataState.timer,
-        "an unanswered sharing reconnect exhausts the existing four-attempt budget")
-    failedWorld:advance(60)
-    assert(#failedWorld.dataJoinCalls == 5 and #failedWorld.dataSends == 0,
-        "position ticks do not restart exhausted data joins")
-    assert(failed:SetPositionSharing(true))
-    assert(#failedWorld.dataJoinCalls == 6 and not failed.dataState.failed
-        and failed.dataState.attempts == 1,
-        "re-saving enabled sharing starts one fresh bounded retry sequence")
+    for _ = 1, 12 do
+        failedEvent("PLAYER_ENTERING_WORLD")
+        failedEvent("CHANNEL_UI_UPDATE")
+        failedWorld:notice("WRONG_PASSWORD", dataRoom)
+    end
+    assert(#failedWorld.dataJoinCalls == 1 and failed.dataState.timer == timer and not timer:IsCancelled(),
+        "settings saves and event storms do not bypass or restart the shared error delay")
+    failedWorld:advance(29)
+    assert(#failedWorld.dataJoinCalls == 1 and #failedWorld.dataSends == 0,
+        "terminal join failures wait thirty seconds before reconnecting")
+    failedWorld:advance(1)
+    assert(#failedWorld.dataJoinCalls == 2,
+        "terminal join failures retry automatically without an explicit data join")
     failedWorld:notice("BANNED", dataRoom)
-    failedWorld:advance(60)
-    assert(#failedWorld.dataJoinCalls == 6 and failed.dataState.failed and not failed.dataState.timer,
-        "a terminal rejection also stops automatic retries while positions remain enabled")
+    failedWorld:advance(30)
+    assert(#failedWorld.dataJoinCalls == 3,
+        "repeated terminal errors continue using the capped shared retry delay")
+    assert(failed:SetPositionSharing(false))
+    failedWorld:advance(150)
+    assert(#failedWorld.dataJoinCalls >= 8 and #failedWorld.dataJoinCalls <= 12
+        and #failedWorld.dataSends == 0 and not failed.db.position.sharing,
+        "unanswered data joins continue at a bounded rate after the old attempt limit with positions off")
+    failedWorld:completeJoin(dataRoom, 7)
+    assert(failed:IsDataConnected(), "eventual membership succeeds after repeated shared-data failures")
+end
+
+-- Recoverable native API failures recover on their own; leaving the group or logging out stops retries.
+do
+    local unavailable, api, _, _, apiWorld = loadAddon(settings(nil, false), false)
+    local join = api.JoinTemporaryChannel
+    api.JoinTemporaryChannel = nil
+    apiWorld:initialize()
+    assert(not unavailable:IsDataConnected() and #apiWorld.dataJoinCalls == 0 and unavailable.dataState.timer)
+    api.JoinTemporaryChannel = join
+    apiWorld:advance(29)
+    assert(#apiWorld.dataJoinCalls == 0)
+    apiWorld:advance(1)
+    assert(#apiWorld.dataJoinCalls == 1,
+        "native API recovery retries automatically even with position sharing disabled")
+    assert(unavailable:LeaveGroup())
+    apiWorld:advance(90)
+    assert(#apiWorld.dataJoinCalls == 1 and not unavailable:IsDataConnected(),
+        "group leave cancels pending shared-data retries")
+
+    local stopped, _, _, stoppedEvent, stoppedWorld = loadAddon(settings(nil, false), false)
+    stoppedWorld:initialize()
+    stoppedEvent("PLAYER_LOGOUT")
+    stoppedEvent("PLAYER_ENTERING_WORLD")
+    stoppedWorld:advance(90)
+    assert(#stoppedWorld.dataJoinCalls == 1 and not stopped:IsDataConnected(),
+        "logout cancels pending retries and world events cannot restart them")
 end
 
 -- Position preferences never bypass login, group setup or newer-schema protection.
@@ -969,6 +1035,10 @@ do
     assert(not clock.channels[newChat:lower()] and not clock.channels[newData:lower()]
         and #primary.channelList == 0 and #secondary.channelList == 0 and not switching:IsDataConnected(),
         "late native joins are still left when no group remains configured")
+    local dataAttempts = #clock.dataJoinCalls
+    clock:advance(90)
+    assert(#clock.dataJoinCalls == dataAttempts and not switching:IsDataConnected(),
+        "leaving a switched group cancels all shared retries despite late old join notices")
 end
 
 -- Manual transport leaves remove their own entries and preserve the other route.

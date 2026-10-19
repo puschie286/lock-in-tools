@@ -84,6 +84,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         end
         environment.LeaveChannelByName = function(name)
             world.leaves[#world.leaves + 1] = name
+            if world.leaveThrows then error("Native leave unavailable") end
             world.channels[name:lower()] = nil
         end
         environment.C_ChatInfo = {
@@ -159,6 +160,13 @@ local function newAddon(saved, readOnly, withPositions, native)
             if accepted == "throw" then error("Transport unavailable") end
             return accepted ~= false
         end)
+    end
+    function world:activeTimers()
+        local count = 0
+        for _, timer in ipairs(self.timers) do
+            if not timer.cancelled then count = count + 1 end
+        end
+        return count
     end
     function world:advance(seconds)
         local target, callbacks = self.now + seconds, 0
@@ -353,7 +361,7 @@ do
     clock:fire("PLAYER_ENTERING_WORLD")
     clock:notice("YOU_JOINED")
     clock:notice("YOU_LEFT")
-    clock:advance(10)
+    clock:advance(120)
     assert(alternate:IsDataConnected() and #clock.joins == 0 and #clock.prefixCalls == 0,
         "Native lifecycle events must not start or replace an explicit transport")
     assert(alternate:SendData("echo", "alternate") and #clock.sent == 1 and #clock.nativeSends == 0)
@@ -367,7 +375,7 @@ do
     assert(#clock.joins == 1)
     clock:connect()
     clock:member(7)
-    clock:advance(2)
+    clock:advance(120)
     assert(replacement:IsDataConnected() and #clock.joins == 1,
         "An already scheduled native retry cannot reclaim a replacement transport")
     assert(replacement:SendData("echo", "replacement") and #clock.sent == 1 and #clock.nativeSends == 0)
@@ -430,12 +438,12 @@ do
     assert(first.restrictionChecks == 0 and second.restrictionChecks == 0)
 end
 
--- Join retries are asynchronous, bounded and unaffected by UI-event storms.
+-- Missing joins retry indefinitely with capped delays and a single timer despite UI-event storms.
 do
     local joining, clock = newAddon(nil, false, false, {})
     clock:login()
     for _ = 1, 20 do clock:fire("CHANNEL_UI_UPDATE") end
-    assert(#clock.joins == 1)
+    assert(#clock.joins == 1 and clock:activeTimers() == 1)
     clock:advance(2)
     assert(#clock.joins == 2 and clock.joins[2].at == 2)
     clock:advance(4)
@@ -443,9 +451,19 @@ do
     clock:advance(8)
     assert(#clock.joins == 4 and clock.joins[4].at == 14)
     clock:advance(8)
-    assert(joining.dataState.phase == "error" and not joining:IsDataConnected())
+    assert(#clock.joins == 5 and clock.joins[5].at == 22 and not joining:IsDataConnected())
+    for _ = 1, 20 do clock:fire("CHANNEL_UI_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
+    clock:advance(29)
+    assert(#clock.joins == 5 and clock:activeTimers() == 1,
+        "UI events must neither accelerate nor postpone the capped retry")
+    clock:advance(91)
+    assert(#clock.joins == 9 and clock.joins[6].at == 52 and clock.joins[9].at == 142
+        and clock:activeTimers() == 1, "A configured data connection retries without a finite attempt limit")
+    clock:member(7)
+    assert(joining:IsDataConnected() and clock:activeTimers() == 1,
+        "Confirmed membership replaces the pending join timer with one membership watchdog")
     clock:advance(60)
-    assert(#clock.joins == 4)
+    assert(#clock.joins == 9 and clock:activeTimers() == 1, "Healthy membership does not issue join requests")
 end
 
 -- A group switch cancels the old pending check; logout also cancels pending recovery.
@@ -461,25 +479,137 @@ do
     assert(#clock.joins == 2)
 end
 
--- Deliberate leaves pause while a stale native membership record still exists.
+-- Native leave notices recover automatically and coalesce duplicate events before retrying.
 for _, event in ipairs({ "YOU_LEFT", "CHANNEL_LEFT" }) do
-    local paused, clock = newAddon(nil, false, false, {})
+    local recovering, clock = newAddon(nil, false, false, {})
     clock:login()
     clock:member(7)
-    local name = paused:GetGroupDataChannelName()
+    local name = recovering:GetGroupDataChannelName()
     if event == "CHANNEL_LEFT" then clock:fire(event, 7, name) else clock:notice(event) end
-    assert(not paused:IsDataConnected() and paused.dataState.phase == "paused")
+    assert(not recovering:IsDataConnected() and recovering.dataState.phase == "joining")
     clock:fire("CHANNEL_UI_UPDATE")
-    clock:advance(30)
-    assert(#clock.joins == 1 and not paused:IsDataConnected(), "Native membership restoration cannot undo an intentional leave")
+    assert(not recovering:IsDataConnected(), "A leave notice invalidates a still-cached native membership record")
     clock.channels[name:lower()] = nil
-    paused:JoinDataChannel(true)
-    assert(#clock.joins == 2)
+    clock:advance(0.5)
+    for _ = 1, 20 do
+        if event == "CHANNEL_LEFT" then clock:fire(event, 7, name) else clock:notice(event) end
+        clock:fire("CHANNEL_UI_UPDATE")
+    end
+    clock:advance(0.5)
+    assert(#clock.joins == 2 and clock.joins[2].at == 1 and clock:activeTimers() == 1,
+        "Repeated leave notices must not postpone the automatic reconnect or multiply requests")
     clock:member(11)
-    assert(paused:IsDataConnected())
+    assert(recovering:IsDataConnected())
 end
 
--- Missing membership disconnects immediately and recovers through the bounded join path.
+-- The legacy leave command also reconnects while the group remains configured.
+do
+    local reconnecting, clock = newAddon(nil, false, false, {})
+    clock:login()
+    clock:member(7)
+    assert(reconnecting:LeaveDataChannel() and not reconnecting:IsDataConnected() and #clock.leaves == 1)
+    clock:advance(1)
+    assert(#clock.joins == 2 and clock.joins[2].at == 1)
+    clock:member(11)
+    assert(reconnecting:IsDataConnected())
+end
+
+-- Even when a stale native membership survives several checks, leave recovery never reuses it.
+do
+    local recovering, clock = newAddon(nil, false, false, {})
+    clock:login()
+    clock:member(7)
+    clock:notice("YOU_LEFT")
+    clock:advance(4)
+    assert(not recovering:IsDataConnected() and #clock.joins == 1 and clock:activeTimers() == 1)
+    clock.channels[recovering:GetGroupDataChannelName():lower()] = nil
+    clock:advance(1)
+    assert(#clock.joins == 2 and clock.joins[2].at == 5)
+    clock:member(11)
+    assert(recovering:IsDataConnected())
+end
+
+-- A delayed duplicate leave cannot strand a newly restored membership in the cache guard.
+do
+    local recovering, clock = newAddon(nil, false, false, {})
+    clock:login()
+    clock:member(7)
+    local name = recovering:GetGroupDataChannelName()
+    clock.channels[name:lower()] = nil
+    clock:notice("YOU_LEFT")
+    clock:advance(1)
+    clock:member(11)
+    assert(recovering:IsDataConnected() and #clock.joins == 2)
+    clock:fire("CHANNEL_LEFT", 7, name)
+    clock:advance(4)
+    assert(not recovering:IsDataConnected() and #clock.joins == 2)
+    clock:advance(1)
+    assert(#clock.leaves == 1 and #clock.joins == 3 and clock.joins[3].at == 6,
+        "A surviving cached membership is explicitly evicted so automatic recovery cannot wait forever")
+    clock:member(13)
+    assert(recovering:IsDataConnected())
+end
+
+-- A transient failure to leave is reconciled before any new join or false membership confirmation.
+do
+    local recovering, clock = newAddon(nil, false, false, {})
+    clock:login()
+    clock:member(7)
+    clock.leaveThrows = true
+    assert(recovering:LeaveDataChannel())
+    clock:advance(4)
+    assert(not recovering:IsDataConnected() and #clock.leaves == 1 and #clock.joins == 1)
+    clock.leaveThrows = false
+    clock:advance(1)
+    assert(#clock.leaves == 2 and #clock.joins == 2 and clock.joins[2].at == 5)
+    clock:member(11)
+    assert(recovering:IsDataConnected())
+end
+
+-- Persistent native leave failures keep one slow recovery timer instead of false success or request storms.
+do
+    local recovering, clock = newAddon(nil, false, false, {})
+    clock:login()
+    clock:member(7)
+    clock.leaveThrows = true
+    assert(recovering:LeaveDataChannel())
+    clock:advance(120)
+    assert(not recovering:IsDataConnected() and #clock.joins == 1 and #clock.leaves >= 2
+        and #clock.leaves <= 5 and clock:activeTimers() == 1,
+        "A failing leave API must back off without abandoning recovery or trusting departed membership")
+end
+
+-- A watchdog discovers silent membership loss without any enabled feature, sends or native events.
+do
+    local profile = { schemaVersion = 3, group = { secret = "otter-4827" }, chat = { autoJoin = false } }
+    local recovering, clock = newAddon(profile, false, true, {})
+    clock:login()
+    clock:member(7)
+    assert(recovering.db.position.sharing == false and recovering.db.chat.autoJoin == false)
+    clock.channels[recovering:GetGroupDataChannelName():lower()] = nil
+    clock:advance(14)
+    assert(#clock.joins == 1 and recovering:IsDataConnected())
+    clock:advance(1)
+    assert(not recovering:IsDataConnected(), "A quiet channel must be checked even when every feature is off")
+    assert(#clock.joins == 2 and clock.joins[2].at == 15)
+    clock:member(13)
+    assert(recovering:IsDataConnected())
+end
+
+-- Unrelated UI refreshes cannot push the healthy membership watchdog into the future.
+do
+    local recovering, clock = newAddon(nil, false, false, {})
+    clock:login()
+    clock:member(7)
+    clock:advance(14)
+    for _ = 1, 20 do clock:fire("CHANNEL_UI_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
+    clock.channels[recovering:GetGroupDataChannelName():lower()] = nil
+    clock:advance(1)
+    assert(not recovering:IsDataConnected() and #clock.joins == 2 and clock.joins[2].at == 15,
+        "A busy UI must not postpone the silent-disconnect check")
+end
+
+-- Missing membership disconnects immediately and recovers through the automatic join path.
 do
     local recovering, clock = newAddon(nil, false, false, {})
     recovering:RegisterDataFeature("echo", function() end)
@@ -520,36 +650,92 @@ do
     clock:advance(1)
     assert(#clock.joins == 1 and clock.joins[1].name == switching:GetGroupDataChannelName())
     clock:member(12)
+    clock:notice("YOU_LEFT", oldName)
+    clock:notice("THROTTLED", oldName)
+    clock:fire("CHANNEL_PASSWORD_REQUEST", oldName)
+    clock:notice("YOU_JOINED", oldName)
+    assert(switching:IsDataConnected() and #clock.joins == 1 and not clock.channels[oldName:lower()],
+        "Late notices from the old channel cannot interrupt the new group or restore abandoned membership")
     clock:incoming("1|echo|old route", "Oldfriend", { id = 4, name = oldName })
     assert(switching:IsDataConnected() and deliveries == 0)
     clock:incoming("1|echo|new route", "Newfriend", { id = 12 })
     assert(deliveries == 1, "Only the new group's confirmed route dispatches after switching")
     clock:fire("PLAYER_LOGOUT")
     calls = #clock.joins
+    clock:fire("CHANNEL_LEFT", 12, switching:GetGroupDataChannelName())
+    clock:notice("YOU_LEFT")
+    clock:notice("YOU_JOINED")
+    clock:notice("THROTTLED")
+    clock:fire("CHANNEL_PASSWORD_REQUEST", switching:GetGroupDataChannelName())
+    assert(switching.dataState.timer == nil and clock:activeTimers() == 0,
+        "Native notices delivered after logout cannot restart connection timers")
     clock:advance(60)
     clock:fire("CHANNEL_UI_UPDATE")
     clock:incoming("1|echo|after logout", "Newfriend", { id = 12 })
-    assert(#clock.joins == calls and not switching:IsDataConnected(), "Logout cancels recovery and closes feature delivery")
+    assert(#clock.joins == calls and not switching:IsDataConnected() and switching.dataState.timer == nil
+        and clock:activeTimers() == 0, "Logout cancels recovery and closes feature delivery")
     assert(deliveries == 1)
 end
 
--- Terminal notices and native API failures stop requests until a deliberate retry.
-for _, reason in ipairs({ "WRONG_PASSWORD", "BANNED", "YOU_KICKED", "CHANNEL_PASSWORD_REQUEST" }) do
-    local stopped, clock = newAddon(nil, false, false, {})
+-- Native rejection notices back off, retain automatic recovery and accept a late successful join.
+for _, reason in ipairs({ "WRONG_PASSWORD", "BANNED", "YOU_KICKED", "CHANNEL_PASSWORD_REQUEST",
+    "INVALID_NAME", "CHANNEL_FULL", "TOO_MANY_CHANNELS", "THROTTLED", "RESTRICTED" }) do
+    local recovering, clock = newAddon(nil, false, false, {})
     clock:login()
-    if reason == "CHANNEL_PASSWORD_REQUEST" then clock:fire(reason, stopped:GetGroupDataChannelName()) else clock:notice(reason) end
-    clock:advance(40)
-    assert(stopped.dataState.phase == "error" and #clock.joins == 1)
-    stopped:JoinDataChannel(true)
-    assert(#clock.joins == 2)
+    local function fail()
+        if reason == "CHANNEL_PASSWORD_REQUEST" then clock:fire(reason, recovering:GetGroupDataChannelName())
+        else clock:notice(reason) end
+    end
+    fail()
+    assert(recovering.dataState.phase == "error" and not recovering:IsDataConnected()
+        and recovering:GetDataStatusText():find("utomatic", 1, true), "A failed channel reports automatic recovery")
+    clock:advance(10)
+    for _ = 1, 20 do fail(); clock:fire("CHANNEL_UI_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
+    clock:advance(19)
+    assert(#clock.joins == 1 and clock:activeTimers() == 1, "Rejections must not create immediate request storms")
+    clock:advance(1)
+    assert(#clock.joins == 2 and clock.joins[2].at == 30,
+        "Repeated notices must not postpone the next retry")
+    fail()
+    clock:advance(30)
+    assert(#clock.joins == 3 and clock.joins[3].at == 60)
+    fail()
+    clock:member(7)
+    clock:notice("YOU_JOINED")
+    assert(recovering:IsDataConnected(), "A confirmed late membership recovers from a rejected join")
+    clock:advance(30)
+    assert(#clock.joins == 3 and clock:activeTimers() == 1)
 end
+-- Prefix registration and thrown join requests retry, then recover when the native API becomes available.
 for _, failure in ipairs({ "prefixResult", "prefixThrows", "joinThrows" }) do
     local failed, clock = newAddon(nil, false, false, {})
     clock[failure] = failure == "prefixResult" and 2 or true
     clock:login()
-    clock:advance(40)
+    clock:advance(29)
     assert(not failed:IsDataConnected() and failed.dataState.phase == "error")
     assert(#clock.joins == (failure == "joinThrows" and 1 or 0))
+    clock:advance(31)
+    assert(#clock.joins == (failure == "joinThrows" and 3 or 0) and clock:activeTimers() == 1)
+    assert(#clock.prefixCalls == (failure == "joinThrows" and 1 or 3))
+    clock[failure] = nil
+    clock:advance(30)
+    assert(#clock.joins == (failure == "joinThrows" and 4 or 1))
+    clock:member(7)
+    assert(failed:IsDataConnected())
+end
+
+-- Removing the configured group cancels both retry and healthy membership timers.
+for _, connected in ipairs({ false, true }) do
+    local leaving, clock = newAddon(nil, false, false, {})
+    clock:login()
+    if connected then clock:member(7) end
+    leaving:LeaveGroup()
+    local requests = #clock.joins
+    clock:advance(120)
+    clock:fire("CHANNEL_UI_UPDATE")
+    clock:fire("PLAYER_ENTERING_WORLD")
+    assert(not leaving:IsDataConnected() and #clock.joins == requests and clock:activeTimers() == 0,
+        "A removed group never reconnects")
 end
 do
     local duplicate, clock = newAddon(nil, false, false, {})
@@ -561,7 +747,8 @@ do
     local readOnly, readClock = newAddon(preserved, true, false, {})
     readClock:login()
     readClock:advance(40)
-    assert(#readClock.joins == 0 and #readClock.prefixCalls == 0 and not readOnly:IsDataConnected())
+    assert(#readClock.joins == 0 and #readClock.prefixCalls == 0 and not readOnly:IsDataConnected()
+        and readClock:activeTimers() == 0)
     assert(equal(preserved, { schemaVersion = 99, group = { secret = "otter-4827" } }))
 end
 

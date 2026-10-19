@@ -2,6 +2,7 @@ local _, addon = ...
 local PREFIX, MAX_MESSAGE_BYTES = "LockInToolsData", 255
 local RETRY_DELAYS = { 2, 4, 8, 8, 30 }
 local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
+local LEAVE_CACHE_CHECK_LIMIT = 5
 local FAILURE_NOTICES = {
     WRONG_PASSWORD = "The data-channel password was rejected.",
     BANNED = "You are banned from the data channel.",
@@ -123,6 +124,7 @@ function addon:OnDataGroupChanged()
     state.nativeSend = nil
     state.phase, state.detail = "idle", nil
     state.attempts, state.pending, state.failed, state.awaitingLeave = 0, false, false, false
+    state.leaveChecks = 0
     state.wanted = self:HasGroup() and not self.savedDataReadOnly
     if previous then self:LeaveGroupChannel(previous) end
     -- Group.lua must finish clearing old feature data before a new connection can dispatch.
@@ -212,10 +214,20 @@ function addon:JoinDataChannel(manual)
     if state.awaitingLeave then
         -- Native leave notices can arrive before cached membership disappears.
         if ChannelID(state.channelName) then
-            if not state.timer then self:ScheduleDataCheck(1) end
-            return false
+            state.leaveChecks = (state.leaveChecks or 0) + 1
+            if state.leaveChecks < LEAVE_CACHE_CHECK_LIMIT then
+                if not state.timer then self:ScheduleDataCheck(1) end
+                return false
+            end
+            -- A delayed notice or failed leave must not stall recovery forever.
+            state.leaveChecks = 0
+            self:LeaveGroupChannel(state.channelName)
+            if ChannelID(state.channelName) then
+                self:ScheduleDataCheck(FAILURE_RETRY_DELAY)
+                return false
+            end
         end
-        state.awaitingLeave = false
+        state.awaitingLeave, state.leaveChecks = false, 0
     end
     state.failed = false
     if not C_ChatInfo or type(C_ChatInfo.RegisterAddonMessagePrefix) ~= "function"
@@ -251,6 +263,7 @@ function addon:LeaveDataChannel()
     self:CancelDataTimer()
     state.wanted = self:HasGroup()
     state.pending, state.failed, state.awaitingLeave, state.attempts = false, false, true, 0
+    state.leaveChecks = 0
     state.phase, state.detail = "joining", nil
     Disconnect(self)
     local name = self:GetGroupDataChannelName()
@@ -291,6 +304,7 @@ function addon:OnDataEvent(event, ...)
         elseif reason == "YOU_LEFT" then
             if state.awaitingLeave then return end
             state.awaitingLeave, state.pending = true, false
+            state.leaveChecks = 0
             Disconnect(self)
             if not state.failed then
                 state.phase, state.detail, state.attempts = "joining", nil, 0
