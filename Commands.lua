@@ -3,6 +3,7 @@ local _, addon = ...
 function addon:ShowHelp()
     self:Print("/lit or /lit welcome - Show your key and connect with friends.")
     self:Print("/lit options - Open group and feature options.")
+    self:Print("/lit overview - Show group players and party actions.")
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
@@ -37,6 +38,8 @@ function addon:HandleCommand(message)
         self:OpenWelcome()
     elseif command == "options" and argument == "" then
         self:OpenOptions()
+    elseif command == "overview" and argument == "" then
+        self:OpenOverview()
     elseif command == "help" and argument == "" then
         self:ShowHelp()
     elseif command == "chat" and argument == "" then

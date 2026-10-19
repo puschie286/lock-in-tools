@@ -1,11 +1,15 @@
 -- This harness is never loaded by the addon.
 -- Server membership changes are asynchronous, as they are in the client.
+local function isRosterMessage(message)
+    return message:match("^1|roster|") or message:match("^1|[QR]|roster|")
+end
+
 local function loadAddon(savedVariables, loggedIn)
     local messages, frames, timers = {}, {}, {}
     local world = {
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
-        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, prefixes = {},
+        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, prefixes = {},
         resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
         optionsOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
@@ -152,6 +156,7 @@ local function loadAddon(savedVariables, loggedIn)
         GetServerTime = function() return 2000000000 + math.floor(world.now) end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         UnitFullName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
+        UnitLevel = function(unit) assert(unit == "player"); return 12 end,
         C_Map = {
             GetBestMapForUnit = function() return 37 end,
             GetPlayerMapPosition = function()
@@ -241,7 +246,9 @@ local function loadAddon(savedVariables, loggedIn)
             end,
             SendAddonMessage = function(prefix, message, distribution, target)
                 assert(distribution == "CHANNEL", "production data does not send whispers")
-                world.dataSends[#world.dataSends + 1] = {
+                -- Keep existing feature-specific assertions separate from the new independent presence traffic.
+                local sends = isRosterMessage(message) and world.rosterSends or world.dataSends
+                sends[#sends + 1] = {
                     prefix = prefix, message = message, target = target,
                 }
                 return 0
@@ -275,7 +282,7 @@ local function loadAddon(savedVariables, loggedIn)
     }, { __index = _G })
     environment._G = environment
     local addon = {}
-    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Minimap.lua", "Commands.lua" }) do
+    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Roster.lua", "Minimap.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)
@@ -596,6 +603,18 @@ do
     connectedWorld:completeJoin(dataRoom, 7)
     assert(connected:IsDataConnected() and #connectedWorld.dataSends == 0
         and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
+    local presence = assert(connectedWorld.rosterSends[1], "presence broadcasts while position sharing is off")
+    assert(presence.prefix == connected:GetDataPrefix() and presence.target == "7"
+        and presence.message:match("^1|roster|1|%d+|%d+|12|0|0|0|0$"),
+        "production startup sends independent level and party metadata without coordinates")
+    connectedEvent("CHAT_MSG_ADDON", presence.prefix, presence.message, "CHANNEL", "RosterFriend", nil, 0, 7, dataRoom)
+    local rosterFriend
+    for _, player in ipairs(connected:GetOverviewPlayers()) do
+        if player.id == "rosterfriend-testrealm" then rosterFriend = player end
+    end
+    assert(rosterFriend and rosterFriend.online and rosterFriend.level == 12 and not rosterFriend.map
+        and connected.db.roster.peers["rosterfriend-testrealm"],
+        "production data delivery discovers and retains roster peers while position sharing is off")
     assert(connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("7. " .. dataRoom)
         == "7. LockInTools Data" and connected:GetGroupDataChannelName() == dataRoom,
         "the data alias changes its displayed label while retaining the native route")
@@ -771,7 +790,10 @@ do
         and pendingWorld.dataJoinCalls[3] == pending:GetGroupDataChannelName(),
         "the existing delayed check joins the newly selected group once")
     local alternateSends = 0
-    local alternate = function() alternateSends = alternateSends + 1; return true end
+    local alternate = function(_, message)
+        if not isRosterMessage(message) then alternateSends = alternateSends + 1 end
+        return true
+    end
     assert(pending:SetDataTransport(alternate))
     assert(pending:SetPositionSharing(true))
     pendingWorld:advance(2)
@@ -1321,7 +1343,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     end
     for _, name in ipairs({ "SetPoint", "SetAllPoints", "SetFrameStrata", "SetClampedToScreen",
         "SetMovable", "EnableMouse", "RegisterForDrag", "StartMoving", "StopMovingOrSizing",
-        "SetJustifyH", "SetAutoFocus", "SetTextInsets", "Raise" }) do
+        "SetJustifyH", "SetAutoFocus", "SetTextInsets", "SetMotionScriptsWhileDisabled", "Raise" }) do
         methods[name] = function() end
     end
     function methods:SetSize(width, height) self.width, self.height = width, height end
@@ -1462,7 +1484,7 @@ local function loadOptions(uiAddon, uiEnvironment)
             return unpack(result, 1, result.n)
         end
     end
-    for _, file in ipairs({ "Theme.lua", "Options.lua" }) do
+    for _, file in ipairs({ "Theme.lua", "Overview.lua", "Options.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)
@@ -1842,6 +1864,115 @@ do
         and navigationEnvironment.namedFrameCreations.LockInToolsOptions == 1
         and navigationEnvironment.namedFrameCreations.LockInToolsWelcome == 1,
         "all navigation paths keep one instance of each window")
+end
+
+-- Overview reuses category navigation, pages every player and invokes native party actions.
+do
+    local overview, api, _, _, overviewWorld = loadAddon(settings(SECRET, false), false)
+    local invites, requests, grouped, mayInvite = {}, {}, false, true
+    api.IsInGroup = function() return grouped end
+    api.C_PartyInfo = {
+        CanInvite = function() return mayInvite end,
+        IsPartyFull = function() return false end,
+        InviteUnit = function(name) invites[#invites + 1] = name end,
+        RequestInviteFromUnit = function(name) requests[#requests + 1] = name end,
+    }
+    api.C_Map.GetMapInfo = function(map) assert(map == 37); return { name = "Elwynn Forest" } end
+    overviewWorld:initialize()
+    overviewWorld:completeJoin(overview:GetGroupDataChannelName(), 7)
+    local now = api.GetServerTime()
+    for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
+        assert(overview:ReceiveRoster(name .. "-TestRealm", "1|" .. now .. "|1|"
+            .. (name == "Bravo" and 0 or 20 + index) .. "|" .. (name == "Bravo" and 1 or 0)
+            .. "|1|0|" .. (name == "Alpha" and 1 or 0)))
+    end
+    local positions = { ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,
+        stamp = now, positionStamp = now - 120, positionAvailable = true, online = true } }
+    overview.GetSharedPositions = function() return positions end
+    local snapshotCalls, originalSnapshot = 0, overview.RequestRosterSnapshot
+    overview.RequestRosterSnapshot = function(self)
+        snapshotCalls = snapshotCalls + 1
+        return originalSnapshot(self)
+    end
+    loadOptions(overview, api)
+    local command = api.SlashCmdList.LOCKINTOOLS
+    command("options")
+    local options = overview.optionsPanel
+    assert(options.selectedTab == "group" and not options.pages.overview:IsVisible(),
+        "adding overview preserves the initial Group category")
+    options.secret:UserInput(OTHER_SECRET)
+    options.secret:SetFocus()
+    options.applyGroup:Click()
+    command("overview")
+    local page = options.overviewPage
+    assert(options.selectedTab == "overview" and page:IsVisible() and snapshotCalls == 1
+        and options.secret:GetText() == "" and not options.secret.focused
+        and options.applyGroup:GetText() == "Use key" and overview:GetGroupSecret() == SECRET,
+        "overview command selects its category and clears group-key drafts and confirmation")
+    assert(page.summary:GetText():find("11 active", 1, true)
+        and page.pagination:GetText() == "Page 1 / 3" and not page.previous:IsEnabled() and page.next:IsEnabled()
+        and page.rows[1].name:GetText():find("(you)", 1, true),
+        "overview includes the local character and paginates more than ten known players")
+    assert(page.rows[2].name:GetText() == "Alpha-TestRealm" and page.rows[2].level:GetText() == "21"
+        and page.rows[2].position:GetText():find("Elwynn Forest", 1, true)
+        and page.rows[2].position:GetText():find("25.0, 75.0 · 2m ago", 1, true)
+        and page.rows[3].level:GetText() == "—" and page.rows[4].position:GetText() == "Not sharing",
+        "overview shows level, explicit unknown metadata and the actual coordinate age")
+    assert(not page.rows[1].invite:IsEnabled() and not page.rows[1].request:IsEnabled()
+        and page.rows[2].invite:IsEnabled() and not page.rows[2].request:IsEnabled()
+        and not page.rows[3].invite:IsEnabled() and page.rows[3].request:IsEnabled(),
+        "row buttons reflect native invite permissions and peer party metadata")
+    page.rows[1].invite.scripts.OnEnter(page.rows[1].invite)
+    assert(api.GameTooltip.shown and api.GameTooltip.text == "This is your character.",
+        "disabled actions explain their reason on hover")
+    page.rows[1].invite.scripts.OnLeave(page.rows[1].invite)
+    assert(not api.GameTooltip.shown)
+    page.rows[2].invite:Click()
+    page.rows[3].request:Click()
+    assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and #requests == 1 and requests[1] == "Bravo-TestRealm"
+        and options.feedback:GetText():find("invitation notices", 1, true),
+        "overview clicks invoke the real guarded native actions with complete names")
+    mayInvite = false
+    page.rows[2].invite:Click()
+    assert(#invites == 1 and not page.rows[2].invite:IsEnabled()
+        and options.feedback:GetText() == "You cannot invite players right now.",
+        "an enabled stale row cannot bypass the action-time permission check")
+    mayInvite = true
+    overview:RefreshOverview()
+    page.next:Click()
+    assert(page.rows[1].playerID == "delta-testrealm" and page.pagination:GetText() == "Page 2 / 3")
+    page.next:Click()
+    assert(page.rows[1].playerID == "hotel-testrealm" and not page.rows[4]:IsShown()
+        and not page.next:IsEnabled() and page.previous:IsEnabled(),
+        "pagination exposes all players and hides unused pooled rows")
+    page.previous:Click()
+    page.previous:Click()
+    overviewWorld:advance(60)
+    assert(page.scripts.OnUpdate, "only the active overview page installs an age refresh")
+    page.scripts.OnUpdate(page, 1)
+    assert(page.rows[2].position:GetText():find("3m ago", 1, true)
+        and page.rows[2].seen:GetText():find("1m ago", 1, true) and snapshotCalls == 1,
+        "visible age updates do not trigger repeated roster snapshots")
+    options.CloseButton:Click()
+    assert(not page.active and not page.scripts.OnUpdate, "closing options stops live overview work")
+    command("options")
+    assert(options.selectedTab == "overview" and page.active and snapshotCalls == 2,
+        "reopening options restores overview and requests one bounded snapshot")
+    options.tabs.chat:Click()
+    assert(not page.active and not page.scripts.OnUpdate)
+    command("overview")
+    assert(snapshotCalls == 3 and options.selectedTab == "overview")
+    overview:OpenOptions("unknown")
+    assert(options.selectedTab == "overview", "invalid direct category names preserve the selected page")
+    page.next:Click()
+    positions, overview.rosterState.peers = {}, {}
+    overview:RefreshOverview()
+    assert(page.pagination:GetText() == "Page 1 / 1" and page.rows[1].playerID == "self-testrealm"
+        and not page.rows[2]:IsShown() and not page.next:IsEnabled(),
+        "live roster removal clamps pagination and removes old row targets")
+    assert(overview:LeaveGroup())
+    assert(page.summary:GetText():find("Choose a group key", 1, true) and not page.rows[1]:IsShown(),
+        "leaving the global group clears the overview while it remains open")
 end
 
 -- Welcome creates one persisted key and keeps copying separate from joining a friend.

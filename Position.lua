@@ -65,6 +65,7 @@ end
 local function Refresh(self)
     if self.RefreshPositionPins then self:RefreshPositionPins() end
     if self.RefreshOptions then self:RefreshOptions() end
+    if self.RefreshOverview then self:RefreshOverview() end
 end
 
 local function SavePeer(self, sender)
@@ -73,6 +74,7 @@ local function SavePeer(self, sender)
     if self.db.position.keepLastKnown and peer then
         self.db.position.peers[sender] = {
             name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp, class = peer.class,
+            positionStamp = peer.positionStamp,
         }
     else
         self.db.position.peers[sender] = nil
@@ -122,6 +124,9 @@ function addon:InitializePositions()
             self.positionState.peers[sender] = {
                 name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp,
                 online = false, class = ClassToken(peer.class),
+                -- Old activity stamps may follow an unavailable-position update.
+                positionStamp = Number(peer.positionStamp, 0, peer.stamp, true) and peer.positionStamp or nil,
+                positionAvailable = false,
             }
             self.positionState.latest[sender] = peer.stamp
             if ClassToken(peer.class) then
@@ -324,16 +329,24 @@ function addon:ReceivePosition(sender, payload)
         state.peers[canonical] = {
             name = sender, map = map, x = x, y = y, stamp = stamp, lastReceived = GetTime(), online = true,
             class = state.classes[canonical] and state.classes[canonical].class,
+            positionStamp = stamp, positionAvailable = true,
         }
     elseif self.db.position.keepLastKnown then
         local peer = state.peers[canonical]
-        if peer then peer.stamp, peer.lastReceived, peer.online = stamp, GetTime(), true end
+        if peer then
+            peer.stamp, peer.lastReceived, peer.online = stamp, GetTime(), true
+            peer.positionAvailable = false
+        end
     else
         state.peers[canonical] = nil
     end
     SavePeer(self, canonical)
     if kind == "P" or not self.db.position.keepLastKnown
-        or (state.peers[canonical] and wasOnline ~= true) then Refresh(self) end
+        or (state.peers[canonical] and wasOnline ~= true) then
+        Refresh(self)
+    elseif self.RefreshOverview then
+        self:RefreshOverview()
+    end
     return true
 end
 

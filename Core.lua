@@ -66,6 +66,7 @@ function addon:Initialize()
     self:InitializeChat()
     self:InitializeData()
     self:InitializePositions()
+    self:InitializeRoster()
 
     -- Also support loading after login through an addon manager.
     if IsLoggedIn() then
@@ -93,6 +94,7 @@ function addon:OnLogin()
     self:OnChatLogin()
     self:OnDataLogin()
     self:OnPositionLogin()
+    self:OnRosterLogin()
     if self.db.showWelcome and not self:HasGroup() and not self.savedDataReadOnly then
         self:OpenWelcome()
     end

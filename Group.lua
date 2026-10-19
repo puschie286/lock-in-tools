@@ -59,6 +59,7 @@ local function NotifyChanged(self, previousChannel)
     if self.OnDataGroupChanged then self:OnDataGroupChanged() end
     if self.OnGroupChanged then self:OnGroupChanged(previousChannel) end
     if self.OnPositionGroupChanged then self:OnPositionGroupChanged() end
+    if self.OnRosterGroupChanged then self:OnRosterGroupChanged() end
     if self.RefreshOptions then self:RefreshOptions() end
 end
 

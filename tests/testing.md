@@ -37,6 +37,8 @@ Player-icon filter checks cover a default-on account-wide preference, persistenc
 
 Minimap-button checks in `tests/smoke.lua` cover login creation, reused controls, left/right navigation, tooltips, scaled dragging, saved position restoration, invalid saved values and read-only data preservation. Actual icon rendering and mouse behavior remain part of the [interface in-game checks](../feature/interface.md#limits-and-in-game-checks).
 
+`tests/overview.lua` checks presence with position sharing disabled, bounded snapshots and heartbeats, sender identity and ordering, level/party updates, last-contact expiry, retained metadata, group isolation and read-only data. Position checks preserve coordinate age through unavailable/class updates and reload. Overview UI checks in `tests/smoke.lua` cover direct command/tab navigation, key cleanup, paging, labels and action callbacks. Native party eligibility is rechecked on click; mocks cover self, stale/same-party targets, permission, capacity and unsupported APIs. Perform the [overview in-game checks](../feature/overview.md#in-game-checks) for real native target eligibility, delivery and rendering.
+
 Any failed check stops verification with a nonzero exit code. Fix the cause and rerun. Add regression coverage to the existing suites when behavior changes can be meaningfully exercised by the mocks; register new suites in `tools/verify.ps1` when needed. Keep test files out of `LockInTools.toc`.
 
 ## In-game verification

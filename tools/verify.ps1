@@ -36,7 +36,7 @@ try {
     [xml](Get-Content -LiteralPath (Join-Path $repositoryRoot 'PositionPins.xml') -Raw) | Out-Null
     Write-Host 'PASS: position pin XML syntax'
 
-    foreach ($suite in @('tests/group.lua', 'tests/smoke.lua', 'tests/data.lua', 'tests/position.lua', 'tests/position-map.lua')) {
+    foreach ($suite in @('tests/group.lua', 'tests/smoke.lua', 'tests/data.lua', 'tests/position.lua', 'tests/position-map.lua', 'tests/overview.lua')) {
         Write-Host "Running $suite..."
         & $luaExecutable $suite
         if ($LASTEXITCODE -ne 0) {

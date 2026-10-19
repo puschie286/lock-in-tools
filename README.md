@@ -1,6 +1,6 @@
 # LockInTools
 
-A World of Warcraft Forever addon for playing with friends. Feature guides: [groups](feature/group.md), [shared chat](feature/shared-chat.md) and [interface](feature/interface.md). Planned: [position sharing](feature/position-sharing.md) and [activity monitoring](feature/activity-monitoring.md).
+A World of Warcraft Forever addon for playing with friends. Feature guides: [groups](feature/group.md), [player overview](feature/overview.md), [shared chat](feature/shared-chat.md) and [interface](feature/interface.md). Planned: [position sharing](feature/position-sharing.md) and [activity monitoring](feature/activity-monitoring.md).
 
 ## Development setup
 

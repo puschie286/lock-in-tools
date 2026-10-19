@@ -12,9 +12,11 @@ Group.lua
 Chat.lua
 Data.lua
 Position.lua
+Roster.lua
 PositionMap.lua
 PositionPins.xml
 Theme.lua
+Overview.lua
 Options.lua
 Minimap.lua
 Commands.lua

@@ -31,7 +31,7 @@ Human chat keeps its existing channel. Shared feature data has a separate group-
 
 The group's channels appear locally as **LockInTools** and **LockInTools Data** in chat prefixes, join/leave notices, the composer header and addon status. These display aliases leave derived native names/passwords and routing unchanged. Native channel management, channel-list output and moderation notices may show actual names; addons replacing native chat formatting may display labels differently.
 
-`Data.lua` provides one pipeline with the addon prefix `LockInToolsData`. Position sharing registers as `position`; future features register their own identifier and use the same backend. Streaming messages use `1|feature|payload`, preserving the payload verbatim, with a 255-byte total packet cap. Sampling, ordering, persistence and message retries remain each feature's responsibility; the pipeline owns connection retries.
+`Data.lua` provides one pipeline with the addon prefix `LockInToolsData`. Position sharing registers as `position`; the [player overview](overview.md) uses `roster` for presence and snapshots, independently of position sharing. Future features register their own identifier and use the same backend. Streaming messages use `1|feature|payload`, preserving the payload verbatim, with a 255-byte total packet cap. Sampling, ordering, persistence and message retries remain each feature's responsibility; the pipeline owns connection retries.
 
 Shared internal helpers:
 

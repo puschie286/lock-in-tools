@@ -1029,4 +1029,76 @@ do
         "Class-only updates cannot keep live-only coordinates past their expiry")
 end
 
+-- Overview location age follows coordinate samples, independently of peer activity.
+do
+    local locations, clock = newAddon()
+    clock:login()
+    locations:SetPositionSharing(true)
+    local overviewRefreshes = 0
+    function locations:RefreshOverview() overviewRefreshes = overviewRefreshes + 1 end
+    assert(locations:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
+    local peer = assert(locations:GetSharedPositions()["friend-testrealm"])
+    assert(peer.positionStamp == clock.epoch and peer.positionAvailable == true)
+    assert(overviewRefreshes == 1, "A coordinate sample refreshes the overview")
+    clock:advance(10)
+    local mapRefreshes, overviewBefore = clock.refreshes, overviewRefreshes
+    assert(locations:ReceivePosition("Friend", clock:unavailable()))
+    assert(peer.stamp == clock.epoch + 10 and peer.positionStamp == clock.epoch
+        and peer.positionAvailable == false and peer.online == true and peer.x == 0.3,
+        "Unavailable activity preserves the actual coordinate age and marks its location as last known")
+    assert(clock.refreshes == mapRefreshes and overviewRefreshes == overviewBefore + 1,
+        "An unavailable update refreshes overview labels without changing map behavior")
+    assert(not locations:ReceivePosition("Friend", clock:unavailable()))
+    assert(overviewRefreshes == overviewBefore + 1, "Duplicate activity does not refresh the overview")
+    clock:advance(1)
+    assert(locations:ReceivePosition("Friend", clock:unavailable()))
+    assert(overviewRefreshes == overviewBefore + 2 and peer.positionStamp == clock.epoch,
+        "Further unavailable activity refreshes last-seen labels without renewing the coordinate age")
+    assert(locations:ReceivePosition("Friend", classPacket(clock, "MAGE")))
+    assert(peer.positionStamp == clock.epoch and peer.positionAvailable == false,
+        "Class metadata cannot renew a last-known location")
+    local snapshot = copy(locations.db)
+    local savedPeer = assert(snapshot.position.peers["friend-testrealm"])
+    assert(savedPeer.positionStamp == clock.epoch and savedPeer.stamp == clock.epoch + 11
+        and savedPeer.positionAvailable == nil,
+        "Persistence records coordinate age without claiming a saved location is currently available")
+    local restored, restoredClock = newAddon(copy(snapshot))
+    restoredClock:login()
+    local restoredPeer = assert(restored:GetSharedPositions()["friend-testrealm"])
+    assert(restoredPeer.positionStamp == clock.epoch and restoredPeer.positionAvailable == false
+        and restoredPeer.online == false, "Reload restores a last-known location with its actual coordinate age")
+    for _, invalidStamp in ipairs({ false, "2000000000", -1, clock.epoch + 12, 0 / 0, math.huge }) do
+        local invalid = copy(snapshot)
+        invalid.position.peers["friend-testrealm"].positionStamp = invalidStamp
+        local legacy, legacyClock = newAddon(invalid)
+        legacyClock:login()
+        local legacyPeer = assert(legacy:GetSharedPositions()["friend-testrealm"])
+        assert(legacyPeer.x == 0.3 and legacyPeer.positionStamp == nil and legacyPeer.positionAvailable == false,
+            "Malformed optional coordinate ages preserve valid retained locations without guessing an age")
+    end
+    local oldSaved = copy(snapshot)
+    oldSaved.position.peers["friend-testrealm"].positionStamp = nil
+    local legacy, legacyClock = newAddon(oldSaved)
+    legacyClock:login()
+    local legacyPeer = assert(legacy:GetSharedPositions()["friend-testrealm"])
+    assert(legacyPeer.positionStamp == nil and legacyPeer.stamp == clock.epoch + 11,
+        "Legacy activity stamps cannot be used as coordinate acquisition times")
+    locations:SetPositionSharing(false)
+    assert(next(locations:GetSharedPositions()) == nil
+        and locations.db.position.peers["friend-testrealm"].positionStamp == clock.epoch,
+        "Overview location access retains the existing opt-in gate")
+    locations:SetPositionSharing(true)
+    clock:advance(1)
+    assert(locations:ReceivePosition("Friend", clock:position(37, 0.4, 0.6)))
+    peer = assert(locations:GetSharedPositions()["friend-testrealm"])
+    assert(peer.positionStamp == clock.epoch + 12 and peer.positionAvailable == true,
+        "A new coordinate sample restores availability and replaces its acquisition time")
+    locations:SetPositionRetention(false)
+    assert(next(locations.db.position.peers) == nil)
+    clock:advance(1)
+    assert(locations:ReceivePosition("Friend", clock:unavailable()))
+    assert(next(locations:GetSharedPositions()) == nil,
+        "Unavailable live-only locations are still removed immediately")
+end
+
 print("Position tests passed.")

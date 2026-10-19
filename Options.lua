@@ -305,7 +305,10 @@ local function CreateOptionsPanel()
     panel.feedback:SetPoint("TOPLEFT", 24, -434)
     panel.feedback:SetWidth(672)
 
+    addon:CreateOverviewPage(panel)
+
     local function SelectTab(name)
+        if not panel.pages[name] then return end
         if panel.selectedTab == name then return end
         if panel.selectedTab == "group" then
             HideSecret(panel, true)
@@ -321,8 +324,10 @@ local function CreateOptionsPanel()
         end
         SetFeedback(panel)
         addon:RefreshOptions()
+        if name == "overview" then panel.overviewPage:Activate() end
     end
-    local categories = { { "group", "Group", 134 }, { "chat", "Shared chat", 152 },
+    panel.SelectTab = SelectTab
+    local categories = { { "overview", "Overview", 130 }, { "group", "Group", 134 }, { "chat", "Shared chat", 152 },
         { "position", "Shared positions", 172 } }
     local tabX = 20
     for _, category in ipairs(categories) do
@@ -354,12 +359,14 @@ local function CreateOptionsPanel()
         panel.positionTrailLength:SetText(tostring(trailLength))
         SetFeedback(panel)
         addon:RefreshOptions()
+        if panel.selectedTab == "overview" then panel.overviewPage:Activate() end
     end)
     panel:SetScript("OnHide", function()
         HideSecret(panel, true)
         ApplyTrailLength(panel, true)
         panel.positionTrailLength:ClearFocus()
         ResetConfirmation(panel)
+        panel.overviewPage:Deactivate()
         panel:StopMovingOrSizing()
     end)
 
@@ -378,6 +385,7 @@ function addon:RefreshOptions()
     panel.groupStatus:SetText("Group: " .. self:GetGroupStatusText())
     panel.status:SetText("Status: " .. self:GetChatStatusText())
     panel.positionStatus:SetText("Status: " .. self:GetPositionStatusText())
+    self:RefreshOverview()
 
     -- Status events must preserve the group key and trail-length text being edited.
     local editable = not self.savedDataReadOnly
@@ -400,7 +408,7 @@ function addon:RefreshOptions()
     end
 end
 
-function addon:OpenOptions()
+function addon:OpenOptions(category)
     if not self.initialized then
         self:Print("Still loading. Please try again after login.")
         return
@@ -411,6 +419,7 @@ function addon:OpenOptions()
         self.optionsPanel = CreateOptionsPanel()
     end
 
+    if category then self.optionsPanel.SelectTab(category) end
     self.optionsPanel:Show()
     self.optionsPanel:Raise()
 end
