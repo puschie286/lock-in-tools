@@ -4,8 +4,8 @@ Share world-map positions with friends using the same [group key](group.md), int
 
 ## Use and behavior
 
-1. Open `/lit options`, enable **Enable position sharing**, and click **Save position settings** on each client. **Keep last-known positions** starts enabled.
-2. Check `/lit status` for the group-data connection and position state, then open the world map. `/lit data join` retries the connection; `/lit data leave` pauses it for this session without leaving the group or human chat.
+1. Open `/lit options`, enable **Enable position sharing**, and click **Save position settings** on each client. Saving with sharing enabled automatically reconnects a paused or failed data connection when a group is configured and the character is ready. An existing connection or pending join continues unchanged. **Keep last-known positions** starts enabled.
+2. Check `/lit status` for the group-data connection and position state, then open the world map. `/lit data leave` pauses it without leaving the group or human chat; it stays paused until you save with sharing enabled again or use `/lit data join`.
 
 The model checks movement every two seconds. It broadcasts changed serialized map/coordinates, or a heartbeat after 15 seconds without an accepted send: normally every 16 seconds with two-second polling. Unavailable positions use the same suppression and heartbeat. Failed sends retry the current sample on the next tick, without a backlog. Reconnecting, switching groups or re-enabling sharing resets suppression.
 
@@ -25,7 +25,7 @@ Each moving sender produces up to 30 broadcasts/minute; unchanged positions norm
 
 ## Live evidence
 
-The standalone probe validated transport on client **1.60.1/70450**; it does not establish production pin rendering or recovery.
+Transport checks using a now-removed standalone probe ran on client **1.60.1/70450**; they do not establish production pin rendering or recovery.
 
 | Test | Observed result |
 | --- | --- |
@@ -40,7 +40,6 @@ The channel run used five-second probe samples, not production movement suppress
 - With two clients sharing a key, internal realm and faction, enable sharing and confirm moving pins near two-second updates, unchanged/unavailable heartbeats near 16 seconds, and gray offline pins after 60 seconds of silence. Check names, self-echo exclusion, retention on/off and restored peers after reload.
 - Check zone/continent projection, delayed map loading, combat, layers, unavailable coordinates and recovery after loading. Repeat with 6–10 clients and longer runs; inspect errors and update gaps.
 - Check automatic data connection with chat autojoin and sharing disabled, `/lit data leave`/`join`, channel renumbering and disconnect recovery. Changing/leaving the group must leave the old data channel and clear position caches while preserving unrelated channels and human-chat preferences.
+- Leave the data channel, then enable sharing and save; it must reconnect and resume positions without `/lit data join`. Repeat by saving while sharing is already enabled. An intentional leave afterward must stay paused until another enabled save/retry. Existing joins must not duplicate or restart, and rejected joins must stop after bounded retries.
 
-For transport diagnostics, build the separate addon with `.\tools\position-probe\prepare.ps1`, install `tools/position-probe/package/LockInToolsPositionProbe` beside LockInTools, restart WoW and enable it. It is excluded from `LockInTools.toc` and stays inactive until started. `/litprobe channel` runs broadcasts every five seconds for two minutes; `/litprobe status` reports receipt gaps, traffic, filters and native errors; `/litprobe stop` stops and leaves only its channel. `/litprobe self` checks local receipts; `/litprobe roster` requests native chatlist evidence. `/litprobe whisper Full Character Name` temporarily tests an explicit peer without discovery. The optional roster-whisper and combined runs remain diagnostic only and do not enable a production fallback.
-
-[Offline verification](../tests/testing.md) checks the model, native channel callbacks, map callbacks and probe. Delivery between clients, rendering and larger-group performance require the live checks above.
+[Offline verification](../tests/testing.md) checks the model, native channel callbacks and map callbacks. Delivery between clients, rendering and larger-group performance require the live checks above.

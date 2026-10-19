@@ -471,6 +471,138 @@ do
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 
+-- Enabling or re-saving positions resumes data without changing human-chat preferences.
+do
+    local resumed, resumedEnvironment, _, _, resumedWorld = loadAddon(settings(nil, false), false)
+    resumedWorld:initialize()
+    local dataRoom = resumed:GetGroupDataChannelName()
+    resumedWorld:completeJoin(dataRoom, 7)
+    local resumedCommand = resumedEnvironment.SlashCmdList.LOCKINTOOLS
+    resumedCommand("data leave")
+    assert(resumed.dataState.paused and not resumed.db.position.sharing)
+    assert(resumed:SetPositionSharing(true))
+    assert(#resumedWorld.dataJoinCalls == 2 and not resumed.dataState.paused
+        and not resumed.db.chat.autoJoin and #resumedWorld.joinCalls == 0,
+        "enabling positions resumes a deliberately left data channel without joining human chat")
+    resumedWorld:completeJoin(dataRoom, 14)
+    resumedWorld:advance(2)
+    assert(resumed:IsDataConnected() and #resumedWorld.dataSends == 1
+        and resumedWorld.dataSends[1].target == "14"
+        and resumedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("14. " .. dataRoom)
+            == "14. LockInTools Data", "automatic reconnection sends positions through the aliased native channel")
+    resumedCommand("data leave")
+    resumedWorld.fire("PLAYER_ENTERING_WORLD")
+    resumedWorld:advance(30)
+    assert(resumed.db.position.sharing and #resumedWorld.dataJoinCalls == 2
+        and not resumed:IsDataConnected() and #resumedWorld.dataSends == 1,
+        "a later deliberate data leave stays paused through position ticks and world events")
+    assert(resumed:SetPositionSharing(true))
+    assert(#resumedWorld.dataJoinCalls == 3 and not resumed.dataState.paused,
+        "re-saving already-enabled position sharing resumes data without a separate join command")
+    resumedWorld:completeJoin(dataRoom, 18)
+    resumedWorld:advance(2)
+    assert(resumed:IsDataConnected() and resumedWorld.dataSends[2].target == "18",
+        "re-saving enabled sharing restores current-position broadcasts on the new native number")
+end
+
+-- Saving position preferences preserves joins and recovery checks already in progress.
+do
+    local pending, _, _, _, pendingWorld = loadAddon(settings(nil, false), false)
+    pendingWorld:initialize()
+    local state = pending.dataState
+    local timer, generation = state.timer, state.generation
+    assert(state.pending and state.attempts == 1 and timer)
+    assert(pending:SetPositionSharing(true))
+    assert(#pendingWorld.dataJoinCalls == 1 and state.attempts == 1
+        and state.timer == timer and state.generation == generation and not timer:IsCancelled(),
+        "enabling positions does not duplicate or reset an in-progress startup join")
+    pendingWorld:advance(2)
+    timer, generation = state.timer, state.generation
+    assert(state.attempts == 2 and #pendingWorld.dataJoinCalls == 2)
+    assert(pending:SetPositionSharing(true))
+    assert(#pendingWorld.dataJoinCalls == 2 and state.attempts == 2
+        and state.timer == timer and state.generation == generation and not timer:IsCancelled(),
+        "re-saving enabled sharing preserves the current retry delay and attempt budget")
+    pendingWorld:completeJoin(pending:GetGroupDataChannelName(), 7)
+    local send = state.send
+    assert(pending:SetPositionSharing(true))
+    assert(#pendingWorld.dataJoinCalls == 2 and state.send == send and pending:IsDataConnected(),
+        "saving enabled sharing leaves a connected data transport intact")
+    assert(pending:SetGroupSecret(OTHER_SECRET))
+    timer, generation = state.timer, state.generation
+    assert(not state.pending and timer and not pending:IsDataConnected())
+    assert(pending:SetPositionSharing(true))
+    assert(#pendingWorld.dataJoinCalls == 2 and state.timer == timer
+        and state.generation == generation and not timer:IsCancelled(),
+        "saving enabled sharing preserves the delayed group-switch connection check")
+    pendingWorld:advance(1)
+    assert(#pendingWorld.dataJoinCalls == 3
+        and pendingWorld.dataJoinCalls[3] == pending:GetGroupDataChannelName(),
+        "the existing delayed check joins the newly selected group once")
+    local alternateSends = 0
+    local alternate = function() alternateSends = alternateSends + 1; return true end
+    assert(pending:SetDataTransport(alternate))
+    assert(pending:SetPositionSharing(true))
+    pendingWorld:advance(2)
+    assert(pending:IsDataConnected() and state.send == alternate and alternateSends == 1
+        and #pendingWorld.dataJoinCalls == 3,
+        "saving enabled sharing preserves an existing alternate transport and uses it for positions")
+end
+
+-- Explicit sharing saves may retry failures, while background position ticks remain bounded.
+do
+    local failed, _, _, _, failedWorld = loadAddon(settings(nil, false), false)
+    failedWorld:initialize()
+    local dataRoom = failed:GetGroupDataChannelName()
+    failedWorld:notice("WRONG_PASSWORD", dataRoom)
+    assert(failed.dataState.failed and not failed.dataState.timer)
+    assert(failed:SetPositionSharing(true))
+    assert(#failedWorld.dataJoinCalls == 2 and not failed.dataState.failed,
+        "enabling sharing explicitly retries a failed data connection")
+    failedWorld:advance(60)
+    assert(#failedWorld.dataJoinCalls == 5 and failed.dataState.failed and not failed.dataState.timer,
+        "an unanswered sharing reconnect exhausts the existing four-attempt budget")
+    failedWorld:advance(60)
+    assert(#failedWorld.dataJoinCalls == 5 and #failedWorld.dataSends == 0,
+        "position ticks do not restart exhausted data joins")
+    assert(failed:SetPositionSharing(true))
+    assert(#failedWorld.dataJoinCalls == 6 and not failed.dataState.failed
+        and failed.dataState.attempts == 1,
+        "re-saving enabled sharing starts one fresh bounded retry sequence")
+    failedWorld:notice("BANNED", dataRoom)
+    failedWorld:advance(60)
+    assert(#failedWorld.dataJoinCalls == 6 and failed.dataState.failed and not failed.dataState.timer,
+        "a terminal rejection also stops automatic retries while positions remain enabled")
+end
+
+-- Position preferences never bypass login, group setup or newer-schema protection.
+do
+    local loading, _, _, loadingEvent, loadingWorld = loadAddon(settings(nil, false), false)
+    loadingEvent("ADDON_LOADED", "LockInTools")
+    assert(loading:SetPositionSharing(true))
+    loadingWorld:advance(30)
+    assert(#loadingWorld.dataJoinCalls == 0 and #loadingWorld.dataSends == 0,
+        "saving enabled sharing before login does not send network requests")
+    loadingEvent("PLAYER_LOGIN")
+    assert(#loadingWorld.dataJoinCalls == 1,
+        "login starts the normal single data join after sharing was enabled during loading")
+    local ungrouped, _, _, _, ungroupedWorld = loadAddon(settings("", false), false)
+    ungroupedWorld:initialize()
+    assert(ungrouped:SetPositionSharing(true))
+    ungroupedWorld:advance(30)
+    assert(#ungroupedWorld.dataJoinCalls == 0 and #ungroupedWorld.dataSends == 0,
+        "saving enabled sharing without a group does not join or broadcast")
+    local futureSettings = settings(nil, false)
+    futureSettings.schemaVersion = 4
+    futureSettings.position = { sharing = false, keepLastKnown = true, peers = {} }
+    local future, _, _, _, futureWorld = loadAddon(futureSettings, false)
+    futureWorld:initialize()
+    assert(not future:SetPositionSharing(true))
+    futureWorld:advance(30)
+    assert(not futureSettings.position.sharing and #futureWorld.dataJoinCalls == 0
+        and #futureWorld.dataSends == 0, "read-only preferences cannot enable sharing or reconnect data")
+end
+
 -- Matching group secrets derive one room and password; membership is asynchronous.
 local chatAddon, _, chatMessages, _, chatWorld = loadAddon(settings(), false)
 chatWorld:initialize()

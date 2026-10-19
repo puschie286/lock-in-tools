@@ -6,7 +6,7 @@ function addon:ShowHelp()
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
-    self:Print("/lit data join or /lit data leave - Reconnect or leave shared feature data.")
+    self:Print("/lit data join or /lit data leave - Retry or briefly disconnect shared data; it reconnects automatically.")
     self:Print("/lit status - Show addon and client information.")
     self:Print("/lit welcome on|off - Enable or disable the login message and initial welcome screen.")
 end

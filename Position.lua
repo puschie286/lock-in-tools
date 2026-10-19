@@ -139,7 +139,15 @@ function addon:SetPositionSharing(enabled)
     if not allowed then return false, message end
     if self.db.position.sharing ~= enabled then ResetSendState(self) end
     self.db.position.sharing = enabled
-    if enabled then ExpirePeers(self) end
+    if enabled then
+        ExpirePeers(self)
+        local data = self.dataState
+        if Active(self) and not self:IsDataConnected() and not data.pending and not data.timer then
+            -- Saving enabled sharing is an explicit retry, including after a
+            -- deliberate leave. Preserve any join/retry already in progress.
+            self:JoinDataChannel(true)
+        end
+    end
     self:UpdatePositionTimer()
     Refresh(self)
     return true
