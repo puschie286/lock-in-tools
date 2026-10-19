@@ -1102,4 +1102,457 @@ do
         "A connection callback may request fresh data, but the old callback's reply must be discarded")
 end
 
+local function statusFixture(values, accepted)
+    local current, clock = newAddon()
+    local samples, connections, contacts = {}, {}, {}
+    assert(current:RegisterDataStatusProvider("player", function() return values end,
+        function(sender, fields, stamp, sequence, metadata)
+            samples[#samples + 1] = { sender = sender, fields = fields, stamp = stamp, sequence = sequence, metadata = metadata }
+        end, function(connected) connections[#connections + 1] = connected end,
+        function(sender, stamp, metadata)
+            contacts[#contacts + 1] = { sender = sender, stamp = stamp, metadata = metadata }
+        end))
+    current.ready = true
+    clock:connect(accepted)
+    return current, clock, samples, connections, contacts
+end
+
+local function full(session, stamp, revision, body)
+    return "2|F|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. body
+end
+
+local function delta(session, stamp, revision, base, body)
+    return "2|D|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. base .. "|" .. body
+end
+
+local function heartbeat(session, stamp, revision)
+    return "2|H|" .. session .. "|" .. stamp .. "|" .. revision
+end
+
+local function receive(current, sender, payload)
+    return current:ReceiveData(sender, "1|status|" .. payload)
+end
+
+-- One shared five-second scheduler broadcasts only changes. Idle presence is a
+-- short heartbeat carrying the sender session/revision, without repeating fields.
+do
+    local values = { xpState = "known", xpMax = 100, xp = 10, level = 24 }
+    local current, clock, samples, connections = statusFixture(values)
+    assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|2|F|[^|]+|2000000000|1|"))
+    assert(clock.sent[1].message:find("level=24|xp=10|xpMax=100|xpState=known", 1, true))
+    local send = current.dataState.send
+    current:SetDataTransport(send)
+    current:OnDataLogin()
+    clock:advance(25)
+    assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 1)
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].at == 30 and clock.sent[2].message:match("^1|status|2|H|[^|]+|2000000030|1$"))
+    values.xp = 20
+    clock:advance(5)
+    assert(#clock.sent == 3 and clock.sent[3].message:match("|2|D|[^|]+|2000000035|2|1|xp=20$"),
+        "A changed field omits identical level and XP capacity")
+    values.xp = 21
+    clock:advance(1)
+    assert(not current:DataStatusTick() and #clock.sent == 3)
+    values.xp = 29
+    clock:advance(4)
+    assert(#clock.sent == 4 and clock.sent[4].at == 40 and clock.sent[4].message:match("|3|2|xp=29$"))
+    values.xp = 30
+    assert(current:ReceiveData("Friend", "1|Q|status|joined|" .. full("friend-1", 2000000040, 1,
+        "level=25|xp=5|xpMax=200|xpState=known")))
+    assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.xp == "5"
+        and samples[1].metadata.kind == "full")
+    assert(#clock.sent == 5 and clock.sent[5].message:match("^1|R|status|joined|friend%-testrealm|2|F|"))
+    assert(clock.sent[5].message:find("xp=30", 1, true))
+    clock:advance(5)
+    assert(#clock.sent == 6 and clock.sent[6].message:match("^1|status|2|F|")
+        and clock.sent[6].message:find("xp=30", 1, true),
+        "An unpublished requested snapshot forces a coherent full broadcast without clearing dirty state")
+    clock:advance(25)
+    assert(#clock.sent == 6)
+    clock:advance(5)
+    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|2|H|"))
+end
+
+-- A temporary value shared in a requested reply must be corrected even if it
+-- changes back to the previously published value before the next tick.
+do
+    local values = { xp = 1 }
+    local current, clock = statusFixture(values)
+    values.xp = 2
+    assert(current:ReceiveData("Friend", "1|Q|status|temporary|2|S"))
+    assert(clock.sent[2].message:find("xp=2", 1, true))
+    values.xp = 1
+    clock:advance(5)
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|2|F|")
+        and clock.sent[3].message:match("|3|xp=1$"))
+end
+
+-- Full and delta messages dispatch complete independent merged tables. Missing
+-- values are explicit deletion markers, distinct from a real empty string.
+do
+    local current, clock, samples, _, contacts = statusFixture({ level = 24 })
+    local second = {}
+    assert(current:RegisterDataStatusProvider("future", function() return { future = true, text = "a|b=c%" } end,
+        function(_, fields, _, _, metadata)
+            second[#second + 1] = { level = fields.level, metadata = metadata }
+            fields.level = "mutated"; metadata.kind = "mutated"
+        end))
+    assert(not current:RegisterDataStatusProvider("future", function() end, function() end))
+    for _, name in ipairs({ "", "Upper", "bad|name", string.rep("a", 33) }) do
+        assert(not current:RegisterDataStatusProvider(name, function() end, function() end))
+    end
+    assert(not current:RegisterDataStatusProvider("bad", nil, function() end))
+    assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, true))
+    assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, nil, true))
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|2|D|")
+        and clock.sent[2].message:find("future=true|text=a%7Cb%3Dc%25", 1, true)
+        and not clock.sent[2].message:find("level=", 1, true))
+    assert(clock:activeTimers() == 1 and current.dataState.features.status and current.dataState.requests.status
+        and not current.dataState.features.player and not current.dataState.features.future)
+    local initial = full("friend-1", 2000000005, 10, "level=25|extra=future%7Cvalue|empty=|gone=old")
+    assert(receive(current, "Friend", initial))
+    assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.extra == "future|value"
+        and samples[1].fields.empty == "" and second[1].level == "25"
+        and samples[1].metadata.kind == "full" and contacts[1].metadata.synchronized)
+    assert(not receive(current, "FRIEND-Test Realm", initial))
+    assert(not receive(current, "Friend", full("friend-1", 2000000004, 9, "level=26")))
+    assert(not receive(current, "Self-TestRealm", initial))
+    assert(receive(current, "Friend", delta("friend-1", 2000000006, 11, 10, "xp=20|gone")))
+    assert(#samples == 2 and samples[2].fields.level == "25" and samples[2].fields.xp == "20"
+        and samples[2].fields.extra == "future|value" and samples[2].fields.gone == nil
+        and samples[2].metadata.kind == "delta" and samples[2].metadata.coherent)
+    assert(receive(current, "Friend", heartbeat("friend-1", 2000000036, 11)))
+    assert(#samples == 2 and #contacts == 3 and contacts[3].metadata.kind == "heartbeat",
+        "Heartbeats refresh contact only, never the age of a sampled XP value")
+    assert(not receive(current, "Friend", heartbeat("friend-1", 2000000036, 11)))
+    local attempts, healthy = 0, 0
+    assert(current:RegisterDataStatusProvider("declining", function() error("Collector failed") end,
+        function() attempts = attempts + 1; return false end))
+    assert(current:RegisterDataStatusProvider("broken", function() return nil end,
+        function() error("Receiver failed") end, nil, function() error("Contact failed") end))
+    assert(current:RegisterDataStatusProvider("healthy", function() return { good = 1 } end,
+        function() healthy = healthy + 1 end))
+    assert(receive(current, "Other", full("other-1", 2000000005, 1, "level=99")))
+    assert(receive(current, "Other", delta("other-1", 2000000006, 2, 1, "level=26")))
+    assert(attempts == 2 and healthy == 2, "Failed and declining callbacks cannot stop other consumers")
+    clock:advance(5)
+    assert(clock.sent[#clock.sent].message:find("good=1", 1, true))
+end
+
+-- Detect lost or out-of-order patches and changes of sender session. Resync
+-- requests contain no repeated self snapshot and are rate limited globally.
+do
+    local values = { xp = 1 }
+    local current, clock, samples, _, contacts = statusFixture(values)
+    assert(receive(current, "Friend", full("friend-1", 2000000000, 1, "level=24|xp=10")))
+    assert(not receive(current, "Friend", delta("friend-1", 2000000005, 3, 2, "xp=30")))
+    assert(#samples == 1 and #contacts == 2 and not contacts[2].metadata.synchronized)
+    values.xp = 2
+    clock:advance(5)
+    assert(clock.sent[#clock.sent].message:match("^1|Q|status|[^|]+|2|S$"),
+        "Continuous local changes cannot starve a remote baseline resync")
+    local requestID = clock.sent[#clock.sent].message:match("^1|Q|status|([^|]+)|2|S$")
+    assert(current:ReceiveData("Friend", "1|R|status|" .. requestID .. "|self-testrealm|"
+        .. full("friend-1", 2000000005, 3, "level=24|xp=30")))
+    assert(#samples == 2 and samples[2].fields.xp == "30" and samples[2].metadata.synchronized)
+    clock:advance(5)
+    assert(clock.sent[#clock.sent].message:match("^1|status|2|D|")
+        and clock.sent[#clock.sent].message:match("xp=2$"))
+    assert(not receive(current, "Friend", delta("friend-1", 2000000001, 2, 1, "xp=20")))
+    assert(receive(current, "Friend", heartbeat("friend-1", 2000000030, 4)))
+    assert(not contacts[#contacts].metadata.synchronized and #samples == 2)
+    clock:advance(20)
+    local before = #clock.sent
+    clock:advance(5)
+    assert(#clock.sent == before + 1 and clock.sent[#clock.sent].message:match("|2|S$"))
+    assert(receive(current, "Friend", full("friend-1", 2000000035, 4, "level=24|xp=40")))
+    assert(receive(current, "Friend", heartbeat("friend-2", 2000000035, 1)),
+        "A new session may have a heartbeat in the same server second")
+    assert(not contacts[#contacts].metadata.hasBaseline and not contacts[#contacts].metadata.synchronized)
+    assert(not receive(current, "Friend", full("friend-1", 2000000040, 5, "level=99")),
+        "A retired sender session cannot overwrite the replacement")
+    assert(receive(current, "Friend", full("friend-2", 2000000035, 1, "level=25|xp=0")))
+    assert(samples[#samples].fields.xp == "0" and samples[#samples].metadata.synchronized)
+    assert(not receive(current, "Unknown", delta("unknown-1", 2000000040, 2, 1, "xp=99")))
+    assert(not contacts[#contacts].metadata.hasBaseline)
+end
+
+-- Nested deliveries finish the current callback set first; neither a receiver
+-- nor a contact callback can mix a newer table with an older sample's metadata.
+do
+    local current, _, samples = statusFixture({ level = 24 })
+    local delivered, nested = {}, false
+    assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
+        function(sender, fields, _, revision)
+            delivered[#delivered + 1] = "alpha:" .. revision .. ":" .. fields.level
+            if not nested then
+                nested = true
+                assert(receive(current, sender, full("peer", 2000000001, 2, "level=26")))
+            end
+        end))
+    assert(current:RegisterDataStatusProvider("beta", function() return {} end,
+        function(_, fields, _, revision) delivered[#delivered + 1] = "beta:" .. revision .. ":" .. fields.level end))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "level=25")))
+    assert(table.concat(delivered, ",") == "alpha:1:25,beta:1:25,alpha:2:26,beta:2:26"
+        and #samples == 2 and samples[1].fields.level == "25" and samples[2].fields.level == "26")
+    local contactNested = false
+    assert(current:RegisterDataStatusProvider("contact_nested", function() return {} end, function() end, nil,
+        function(sender, _, metadata)
+            if metadata.kind == "heartbeat" and not contactNested then
+                contactNested = true
+                assert(receive(current, sender, full("peer", 2000000030, 3, "level=27")))
+            end
+        end))
+    assert(receive(current, "Friend", heartbeat("peer", 2000000030, 3)))
+    assert(samples[#samples].fields.level == "27" and samples[#samples].metadata.kind == "full")
+end
+
+-- Logically targeted replies do not postpone the public heartbeat needed by
+-- other peers. Switching to read-only settings stops this scheduler as well.
+do
+    local current, clock = statusFixture({ level = 24 })
+    clock:advance(10)
+    assert(current:ReceiveData("Friend", "1|Q|status|first|2|S"))
+    clock:advance(10)
+    assert(current:ReceiveData("Friend", "1|Q|status|second|2|S"))
+    clock:advance(10)
+    assert(clock.sent[#clock.sent].message:match("^1|status|2|H|"))
+    current.savedDataReadOnly = true
+    local sent = #clock.sent
+    clock:advance(60)
+    assert(#clock.sent == sent and clock:activeTimers() == 0 and not current.dataState.status.connected)
+end
+
+-- A full reply may be ahead of a patch's target revision; an already obsolete
+-- delta is ignored without invalidating a newer coherent full baseline.
+do
+    local current, clock, samples, _, contacts = statusFixture({ xp = 1 })
+    assert(receive(current, "Friend", full("friend-1", 2000000000, 4, "xp=40")))
+    assert(not receive(current, "Friend", delta("friend-1", 2000000000, 3, 2, "xp=30")))
+    assert(#samples == 1 and #contacts == 1 and not current.dataState.status.resyncNeeded)
+    clock:advance(5)
+    assert(#clock.sent == 1)
+    assert(receive(current, "Friend", delta("friend-1", 2000000005, 5, 4, "xp=50")))
+    assert(samples[2].fields.xp == "50")
+end
+
+-- Decode every field before dispatch. Invalid frames cannot partially merge or
+-- consume a revision, and obsolete v1 status snapshots are rejected.
+do
+    local current, _, samples = statusFixture({ level = 24 })
+    for _, payload in ipairs({
+        "1|2000000000|1|level=25", "3|F|peer|2000000000|1|level=25",
+        "2|F|peer|10000000000|1|level=25", "2|F|peer|0200000000|1|level=25",
+        "2|F|peer|2000000000|0|level=25", "2|F|peer|2000000000|1000000000|level=25",
+        "2|F|peer|2000000000|01|level=25", "2|F||2000000000|1|level=25",
+        "2|F|peer|2000000000|1|level=25|level=26", "2|F|peer|2000000000|1|level=25|",
+        "2|F|peer|2000000000|1||level=25", "2|F|peer|2000000000|1|1bad=x",
+        "2|F|peer|2000000000|1|level", "2|F|peer|2000000000|1|level=25=26",
+        "2|F|peer|2000000000|1|level=%", "2|F|peer|2000000000|1|level=%GG",
+        "2|F|peer|2000000000|1|level=%0A", "2|F|peer|2000000000|1|level=bad\nvalue",
+        "2|F|peer|2000000000|1|level=%7F", "2|H|peer|2000000000|1|extra=bad",
+        "2|D|peer|2000000000|2|2|level=25", "2|D|peer|2000000000|2|0|level=25",
+        "2|D|peer|2000000000|2|1|", "2|D|peer|2000000000|2|1|level|level=25",
+    }) do
+        assert(not receive(current, "Friend", payload), payload)
+        assert(not current:ReceiveData("Friend", "1|Q|status|malformed|" .. payload), payload)
+    end
+    assert(#samples == 0)
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "level=25")))
+    assert(#samples == 1)
+    assert(not receive(current, "Friend", delta("peer", 2000000005, 2, 1, "xp=20|bad=%GG")))
+    assert(receive(current, "Friend", delta("peer", 2000000005, 2, 1, "xp=20")))
+    assert(samples[2].fields.level == "25" and samples[2].fields.xp == "20")
+end
+
+-- The full envelope, including the request ID and normalized recipient name,
+-- must fit 255 bytes. Overlarge frames fail atomically and recover next tick.
+do
+    local values = { v = "x" }
+    local current, clock = statusFixture(values)
+    local sender, requestID = string.rep("a", 118) .. "-TestRealm", string.rep("r", 32)
+    assert(#sender == 128)
+    assert(current:ReceiveData(sender, "1|Q|status|" .. requestID .. "|2|S"))
+    local response = clock.sent[#clock.sent].message
+    values.v = string.rep("x", 256 - #response)
+    assert(current:ReceiveData(sender, "1|Q|status|" .. string.rep("s", 32) .. "|2|S"))
+    assert(#clock.sent[#clock.sent].message == 255)
+    local sent = #clock.sent
+    values.v = values.v .. "x"
+    assert(not current:ReceiveData(sender, "1|Q|status|" .. string.rep("t", 32) .. "|2|S"))
+    assert(#clock.sent == sent)
+    values.v = string.rep("x", 250)
+    clock:advance(5)
+    assert(#clock.sent == sent)
+    values.v = "recovered"
+    clock:advance(5)
+    assert(#clock.sent == sent + 1 and clock.sent[#clock.sent].message:find("v=recovered", 1, true))
+end
+
+-- A provider with no initial sample stays quiet. Once it had a sample, becoming
+-- unavailable explicitly removes its old fields instead of retaining stale data.
+do
+    local current, clock = newAddon()
+    local values, marker = nil, {}
+    clock.environment.issecretvalue = function(value) return rawequal(value, marker) end
+    assert(current:RegisterDataStatusProvider("unsafe", function() return values end, function() end))
+    clock:login(); clock:connect()
+    for _, invalid in ipairs({ marker, { v = marker }, { [marker] = "secret" }, { v = 0 / 0 },
+        { v = math.huge }, { v = "bad\nvalue" }, { ["bad|key"] = 1 }, { v = {} } }) do
+        values = invalid
+        clock:advance(5)
+        assert(#clock.sent == 0)
+    end
+    values = { v = false }
+    clock:advance(5)
+    assert(#clock.sent == 1 and clock.sent[1].message:find("v=false", 1, true))
+    values = nil
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|2|1|v$"))
+end
+
+-- Send failures retain the latest unpublished state, and a failed resync is
+-- retried at the bounded 30-second cadence despite repeated incoming gaps.
+do
+    local values = { xp = 1 }
+    local current, clock, _, connections = statusFixture(values, false)
+    assert(#clock.sent == 1 and next(current.dataState.pendingRequests) == nil)
+    for _ = 1, 10 do current:DataStatusTick() end
+    assert(#clock.sent == 1)
+    values.xp = 2
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].message:find("xp=2", 1, true))
+    current:SetDataTransport(nil)
+    assert(clock:activeTimers() == 0 and not connections[#connections])
+    clock:connect()
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|Q|status|") and connections[#connections])
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "xp=7")))
+    current:SetDataTransport(nil); clock:connect()
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "xp=8")))
+    local reject = false
+    current:SetDataTransport(function(_, message)
+        clock.sent[#clock.sent + 1] = { at = clock.now, message = message }
+        return not reject
+    end)
+    reject = true
+    assert(receive(current, "Friend", heartbeat("peer", 2000000005, 2)))
+    clock:advance(5)
+    assert(clock.sent[#clock.sent].message:match("|2|S$"))
+    local function resyncs()
+        local total = 0
+        for _, packet in ipairs(clock.sent) do if packet.message:match("|2|S$") then total = total + 1 end end
+        return total
+    end
+    local requests = resyncs()
+    clock:advance(25)
+    assert(resyncs() == requests)
+    clock:advance(5)
+    assert(resyncs() == requests + 1 and clock.sent[#clock.sent].message:match("|2|S$"))
+    clock:fire("PLAYER_LOGOUT")
+    local sent = #clock.sent
+    clock:advance(60)
+    assert(#clock.sent == sent and clock:activeTimers() == 0)
+end
+
+-- Real multi-client fan-out converges with synchronous delivery as well as a
+-- queued native transport, without per-feature schedulers or response loops.
+for _, synchronous in ipairs({ false, true }) do
+    local bus = newRequestBus()
+    local values, learned = {}, {}
+    bus.synchronous = synchronous
+    for index, client in ipairs(bus.clients) do
+        values[index], learned[index] = { level = index + 20, xp = index }, {}
+        assert(client.addon:RegisterDataStatusProvider("player", function() return values[index] end,
+            function(sender, fields) learned[index][sender] = fields.xp end))
+    end
+    bus:pump()
+    for index, client in ipairs(bus.clients) do
+        for otherIndex, other in ipairs(bus.clients) do
+            if index ~= otherIndex then assert(learned[index][other.name .. "-TestRealm"] == tostring(otherIndex)) end
+        end
+        client.world:advance(15)
+    end
+    local sent = 0
+    for _, client in ipairs(bus.clients) do sent = sent + #client.world.nativeSends end
+    values[1].xp = 100
+    bus.clients[1].world:advance(5)
+    bus:pump()
+    local total = 0
+    for _, client in ipairs(bus.clients) do total = total + #client.world.nativeSends end
+    assert(total == sent + 1 and learned[2]["Alice-TestRealm"] == "100" and learned[3]["Alice-TestRealm"] == "100")
+end
+
+-- Real roster fields share the native status snapshot; idle activity heartbeats
+-- preserve presence without repeating player metadata or refreshing XP samples.
+do
+    local bus = newRequestBus()
+    for index, client in ipairs(bus.clients) do
+        local clock, environment = client.world, client.world.environment
+        clock.level, clock.xp, clock.xpMax = 24, 100 * index, 1000
+        environment.UnitLevel = function(unit) assert(unit == "player"); return clock.level end
+        environment.UnitXP = function(unit) assert(unit == "player"); return clock.xp end
+        environment.UnitXPMax = function(unit) assert(unit == "player"); return clock.xpMax end
+        environment.GetMaxPlayerLevel = function() return 60 end
+        loadModule("Roster.lua", client.addon, environment)
+        client.addon:InitializeRoster()
+        client.addon:OnRosterLogin()
+    end
+    bus:pump()
+    local alice, bob = bus.clients[1], bus.clients[2]
+    local function player(client, name)
+        for _, row in ipairs(client.addon:GetOverviewPlayers()) do
+            if row.id == name:lower() .. "-testrealm" then return row end
+        end
+        error("Missing discovered player " .. name)
+    end
+    for _, client in ipairs(bus.clients) do
+        assert(#client.addon:GetOverviewPlayers() == 3)
+        for index, other in ipairs(bus.clients) do
+            local row = player(client, other.name)
+            assert(row.level == 24 and row.xp == 100 * index and row.xpMax == 1000
+                and row.xpState == "known" and row.online and not row.xpStale)
+        end
+    end
+    local function counts(client)
+        local changes, heartbeats = 0, 0
+        for _, packet in ipairs(client.world.nativeSends) do
+            assert(#packet.message <= 255 and not packet.message:match("^1|[QR]?|?roster|"))
+            if packet.message:match("^1|status|2|[FD]|") then changes = changes + 1 end
+            if packet.message:match("^1|status|2|H|") then heartbeats = heartbeats + 1 end
+        end
+        return changes, heartbeats
+    end
+    assert(counts(alice) == 0)
+    assert(alice.addon:RegisterDataStatusProvider("activity", function() return { activity = "questing" } end, function() end))
+    alice.world.xp = 420
+    alice.world:fire("PLAYER_XP_UPDATE", "player")
+    assert(player(alice, "Alice").xp == 420 and player(bob, "Alice").xp == 100)
+    alice.world:advance(4); bus:pump(); assert(counts(alice) == 0)
+    alice.world:advance(1); bus:pump()
+    assert(counts(alice) == 1 and player(bob, "Alice").xp == 420 and not alice.addon.dataState.features.activity)
+    local xpStamp = player(bob, "Alice").xpUpdatedAt
+    alice.world:advance(30); bus:pump()
+    local changes, heartbeats = counts(alice)
+    assert(changes == 1 and heartbeats == 1 and not player(bob, "Alice").xpStale
+        and player(bob, "Alice").xpUpdatedAt == xpStamp)
+    alice.world.level, alice.world.xp, alice.world.xpMax = 25, 0, 1200
+    alice.world:fire("PLAYER_LEVEL_UP", 25)
+    alice.world:fire("PLAYER_XP_UPDATE", "player")
+    bus:pump()
+    assert(player(bob, "Alice").level == 24 and player(bob, "Alice").xp == 420,
+        "Level and XP wait for the same coherent shared status update")
+    alice.world:advance(5); bus:pump()
+    assert(player(bob, "Alice").level == 25 and player(bob, "Alice").xp == 0
+        and player(bob, "Alice").xpMax == 1200 and counts(alice) == 2)
+    local send = alice.addon.dataState.send
+    alice.addon:SetDataTransport(nil)
+    assert(player(alice, "Bob").xpStale)
+    alice.addon:SetDataTransport(send)
+    assert(player(alice, "Bob").xp == nil)
+    bus:pump()
+    assert(player(alice, "Bob").xp == 200 and not player(alice, "Bob").xpStale)
+end
+
 print("Data tests passed.")

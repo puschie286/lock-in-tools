@@ -4,15 +4,20 @@ local function isRosterMessage(message)
     return message:match("^1|roster|") or message:match("^1|[QR]|roster|")
 end
 
+local function isStatusMessage(message)
+    return message:match("^1|status|") or message:match("^1|[QR]|status|")
+end
+
 local function loadAddon(savedVariables, loggedIn)
     local messages, frames, timers = {}, {}, {}
     local world = {
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
-        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, prefixes = {},
+        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, statusSends = {}, prefixes = {},
         resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
         optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
+        level = 12, xp = 0, xpMax = 1000, maxLevel = 60,
     }
     local function channelByName(name)
         if type(name) == "string" then return world.channels[name:lower()] end
@@ -98,6 +103,7 @@ local function loadAddon(savedVariables, loggedIn)
     function tooltip:AddLine(text) self.lines[#self.lines + 1] = text end
     function tooltip:Show() self.shown = true end
     function tooltip:Hide() self.shown = false end
+    function tooltip:IsShown() return self.shown end
     local function newMinimapButton(name, parent)
         assert(name == "LockInToolsMinimapButton" and parent == minimap,
             "the addon button uses a named native minimap child")
@@ -156,7 +162,10 @@ local function loadAddon(savedVariables, loggedIn)
         GetServerTime = function() return 2000000000 + math.floor(world.now) end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         UnitFullName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
-        UnitLevel = function(unit) assert(unit == "player"); return 12 end,
+        UnitLevel = function(unit) assert(unit == "player"); return world.level end,
+        UnitXP = function(unit) assert(unit == "player"); return world.xp end,
+        UnitXPMax = function(unit) assert(unit == "player"); return world.xpMax end,
+        GetMaxPlayerLevel = function() return world.maxLevel end,
         C_Map = {
             GetBestMapForUnit = function() return 37 end,
             GetPlayerMapPosition = function()
@@ -246,8 +255,9 @@ local function loadAddon(savedVariables, loggedIn)
             end,
             SendAddonMessage = function(prefix, message, distribution, target)
                 assert(distribution == "CHANNEL", "production data does not send whispers")
-                -- Keep existing feature-specific assertions separate from the new independent presence traffic.
-                local sends = isRosterMessage(message) and world.rosterSends or world.dataSends
+                -- Keep feature assertions separate from independent presence and status traffic.
+                local sends = isStatusMessage(message) and world.statusSends
+                    or isRosterMessage(message) and world.rosterSends or world.dataSends
                 sends[#sends + 1] = {
                     prefix = prefix, message = message, target = target,
                 }
@@ -618,10 +628,15 @@ do
     connectedWorld:completeJoin(dataRoom, 7)
     assert(connected:IsDataConnected() and #connectedWorld.dataSends == 0
         and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
-    local presence = assert(connectedWorld.rosterSends[1], "presence broadcasts while position sharing is off")
+    local presence = assert(connectedWorld.statusSends[1], "shared status broadcasts while position sharing is off")
     assert(presence.prefix == connected:GetDataPrefix() and presence.target == "7"
-        and presence.message:match("^1|roster|1|%d+|%d+|12|0|0|0|0$"),
-        "production startup sends independent level and party metadata without coordinates")
+        and presence.message:match("^1|Q|status|[^|]+|2|F|[^|]+|%d+|%d+|")
+        and presence.message:find("|level=12", 1, true) and presence.message:find("|xp=0", 1, true)
+        and presence.message:find("|xpMax=1000", 1, true) and presence.message:find("|xpState=known", 1, true)
+        and presence.message:find("|inParty=false", 1, true) and presence.message:find("|canInvite=false", 1, true)
+        and presence.message:find("|partyFull=false", 1, true) and presence.message:find("|sharing=false", 1, true)
+        and #connectedWorld.rosterSends == 0,
+        "production startup shares level, XP and party metadata once through status without a separate roster packet")
     connectedEvent("CHAT_MSG_ADDON", presence.prefix, presence.message, "CHANNEL", "RosterFriend", nil, 0, 7, dataRoom)
     local rosterFriend
     for _, player in ipairs(connected:GetOverviewPlayers()) do
@@ -629,7 +644,7 @@ do
     end
     assert(rosterFriend and rosterFriend.online and rosterFriend.level == 12 and not rosterFriend.map
         and connected.db.roster.peers["rosterfriend-testrealm"],
-        "production data delivery discovers and retains roster peers while position sharing is off")
+        "production shared-status delivery discovers and retains peers while position sharing is off")
     assert(connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("7. " .. dataRoom)
         == "7. LockInTools Data" and connected:GetGroupDataChannelName() == dataRoom,
         "the data alias changes its displayed label while retaining the native route")
@@ -806,7 +821,7 @@ do
         "the existing delayed check joins the newly selected group once")
     local alternateSends = 0
     local alternate = function(_, message)
-        if not isRosterMessage(message) then alternateSends = alternateSends + 1 end
+        if not isRosterMessage(message) and not isStatusMessage(message) then alternateSends = alternateSends + 1 end
         return true
     end
     assert(pending:SetDataTransport(alternate))
@@ -2268,7 +2283,7 @@ end
 
 -- Overview scrolls and sorts the Content roster, with guarded native actions in a dropdown.
 do
-    local overview, api, _, _, overviewWorld = loadAddon(settings(SECRET, false), false)
+    local overview, api, _, overviewEvent, overviewWorld = loadAddon(settings(SECRET, false), false)
     local invites, requests, grouped, mayInvite = {}, {}, false, true
     api.IsInGroup = function() return grouped end
     api.C_PartyInfo = {
@@ -2285,10 +2300,16 @@ do
     overviewWorld:completeJoin(overview:GetGroupDataChannelName(), 7)
     local now = api.GetServerTime()
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
-        assert(overview:ReceiveRoster(name .. "-TestRealm", "1|" .. now .. "|1|"
-            .. (name == "Bravo" and 0 or 20 + index) .. "|" .. (name == "Bravo" and 1 or 0)
-            .. "|1|0|" .. (name == "Alpha" and 1 or 0)))
+        overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
+            "1|status|2|F|peer-" .. name:lower() .. "|" .. now .. "|1|level="
+            .. (name == "Bravo" and 0 or 20 + index) .. "|xpState=unavailable|inParty="
+            .. (name == "Bravo" and "true" or "false") .. "|canInvite=true|partyFull=false|sharing="
+            .. (name == "Alpha" and "true" or "false"),
+            "CHANNEL", name .. "-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     end
+    overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
+        "1|status|2|D|peer-alpha|" .. now .. "|2|1|future=value|xp=420|xpMax=1000|xpState=known",
+        "CHANNEL", "Alpha-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     local positions = {
         ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,
             stamp = now, positionStamp = now - 120, positionAvailable = true, online = true },
@@ -2296,10 +2317,10 @@ do
             stamp = now, positionStamp = now - 180, positionAvailable = false, online = true },
     }
     overview.GetSharedPositions = function() return positions end
-    local snapshotCalls, originalSnapshot = 0, overview.RequestRosterSnapshot
-    overview.RequestRosterSnapshot = function(self)
-        snapshotCalls = snapshotCalls + 1
-        return originalSnapshot(self)
+    local snapshotCalls, originalRequest = 0, overview.RequestData
+    overview.RequestData = function(self, feature, ...)
+        if feature == "status" then snapshotCalls = snapshotCalls + 1 end
+        return originalRequest(self, feature, ...)
     end
     loadOptions(overview, api)
     local command = api.SlashCmdList.LOCKINTOOLS
@@ -2314,7 +2335,7 @@ do
     local content = overview.contentPanel
     local page = content.overviewPage
     assert(content.selectedTab == "overview" and not options:IsVisible()
-        and page:IsVisible() and page.active and snapshotCalls == 1
+        and page:IsVisible() and page.active and snapshotCalls == 0
         and options.secret:GetText() == "" and not options.secret.focused
         and options.applyGroup:GetText() == "Use key" and overview:GetGroupSecret() == SECRET,
         "overview command opens Content and clears group-key drafts and confirmation")
@@ -2322,8 +2343,8 @@ do
     command("content")
     content.tabs.overview:Click()
     overview:OpenOptions("overview")
-    assert(page.active and page.scripts.OnUpdate and snapshotCalls == 1,
-        "reopening Content or selecting its current Overview page does not repeat activation or snapshots")
+    assert(page.active and page.scripts.OnUpdate and snapshotCalls == 0,
+        "reopening Content or selecting its current Overview page does not request status")
     assert(not page.summary and not page.previous and not page.next and not page.pagination and not page.pageNumber
         and #page.rows == 8 and page.offset == 0 and not page.sortKey
         and page.rows[1].name:GetText():find("(you)", 1, true)
@@ -2333,10 +2354,11 @@ do
     assert(page.scrollbar:IsShown() and minimum == 0 and maximum == 3 and page.scrollbar:GetValue() == 0,
         "the native scrollbar exposes all eleven players through a bounded row offset")
     assert(page.rows[2].name:GetText() == "Alpha-TestRealm" and page.rows[2].level:GetText() == "21"
-        and page.rows[2].position:GetText() == "Elwynn Forest\n2m ago"
+        and page.rows[2].progress:GetText() == "· 42%" and page.rows[2].progressFill:IsShown()
+        and page.rows[2].position:GetText() == "Elwynn Forest" and page.rows[2].seen:GetText() == "Active"
         and page.rows[3].level:GetText() == "—" and page.rows[5].position:GetText() == "Not sharing"
-        and page.rows[4].position:GetText() == "Last: Westfall\n3m ago",
-        "positions show only the region and location age, including retained regions without coordinates")
+        and page.rows[4].position:GetText() == "Last: Westfall" and page.rows[4].seen:GetText() == "Active",
+        "status reaches level progress, and region labels omit ages while active players show only Active")
     for _, row in ipairs(page.rows) do
         assert(row.actions:IsEnabled() and not row.invite and not row.request,
             "each row has one dropdown trigger instead of individual action buttons")
@@ -2445,35 +2467,37 @@ do
     page.headers.name:Click()
     -- Ascending names put Alpha first and provide a stable anchor for live age updates.
     menu = openMenu(1)
+    assert(page.rows[1].seen:GetText() == "Active" and page.rows[1].position:GetText() == "Elwynn Forest",
+        "an active contact with an older seen timestamp still shows only Active and the region name")
     overviewWorld:advance(90)
     assert(page.scripts.OnUpdate, "only the active overview page installs an age refresh")
     page.scripts.OnUpdate(page, 1)
-    assert(page.rows[1].position:GetText():find("3m ago", 1, true)
-        and page.rows[1].seen:GetText():find("1m ago", 1, true) and snapshotCalls == 1
+    assert(page.rows[1].position:GetText() == "Last: Elwynn Forest"
+        and page.rows[1].seen:GetText() == "1m ago" and snapshotCalls == 0
         and menu:IsShown() and menu.playerID == "alpha-testrealm" and not menu.invite:IsEnabled()
         and menu.invite.reason == "No recent contact with this player.",
-        "visible age updates do not trigger repeated roster snapshots")
+        "offline rows show only elapsed contact age, retain the region without age and do not request status")
     content.CloseButton:Click()
     assert(not page.active and not page.scripts.OnUpdate and not menu:IsShown(),
         "closing Content stops live overview work and dismisses its action menu")
     command("options")
     assert(options.selectedTab == "group"
         and options.pages.group:IsVisible() and not page.active and not page.scripts.OnUpdate
-        and snapshotCalls == 1,
+        and snapshotCalls == 0,
         "opening Settings does not reactivate the hidden Content page")
     options.content:Click()
-    assert(content.selectedTab == "overview" and page.active and snapshotCalls == 2,
-        "returning to Content reactivates Overview with one bounded snapshot")
+    assert(content.selectedTab == "overview" and page.active and snapshotCalls == 0,
+        "returning to Content reactivates Overview without requesting another status snapshot")
     content.options:Click()
     options.tabs.chat:Click()
     assert(options.selectedTab == "chat"
         and not page.active and not page.scripts.OnUpdate,
         "opening Settings deactivates Overview and stops its age updates")
     overview:OpenOptions("unknown")
-    assert(options.selectedTab == "chat" and options.pages.chat:IsVisible() and snapshotCalls == 2,
+    assert(options.selectedTab == "chat" and options.pages.chat:IsVisible() and snapshotCalls == 0,
         "invalid settings page names preserve the selected page without activating Content")
     command("overview")
-    assert(snapshotCalls == 3 and content.selectedTab == "overview" and content:IsVisible()
+    assert(snapshotCalls == 0 and content.selectedTab == "overview" and content:IsVisible()
         and not options:IsVisible())
     page:SetOffset(999)
     openMenu(1)
@@ -2487,6 +2511,138 @@ do
     assert(page.empty:IsShown() and page.empty:GetText():find("Choose a group key", 1, true)
         and not page.rows[1]:IsShown() and not page.rows[1].playerID,
         "leaving the global group clears the overview while it remains open")
+end
+
+-- The local player's progress is read directly and has no remote-report age.
+do
+    local localAddon, api, _, _, localWorld = loadAddon(settings(SECRET, false), false)
+    localWorld:initialize()
+    loadOptions(localAddon, api)
+    localAddon:OpenContent()
+    local page, tooltip = localAddon.contentPanel.overviewPage, api.GameTooltip
+    local row = page.rows[1]
+    row.levelCell.scripts.OnEnter(row.levelCell)
+    assert(row.levelCell.player.isSelf and tooltip.lines[1] == "XP: 0 / 1000"
+        and tooltip.lines[2] == "To next level: 1000 XP" and #tooltip.lines == 2,
+        "local progress details show exact live XP without a Last reported label")
+    localWorld:advance(1.2)
+    localWorld.xp = 250
+    localWorld.fire("PLAYER_XP_UPDATE", "player")
+    page.scripts.OnUpdate(page, 1)
+    assert(tooltip.lines[1] == "XP: 250 / 1000" and tooltip.lines[2] == "To next level: 750 XP"
+        and #tooltip.lines == 2,
+        "refreshing live local progress updates XP without adding a flickering report age")
+end
+
+-- Level progress fits the pooled Overview rows and explains exact values without requesting on each refresh.
+do
+    local progressAddon, api, _, _, progressWorld = loadAddon(settings(SECRET, false), false)
+    progressWorld:initialize()
+    local now, snapshots = api.GetServerTime(), 0
+    local players = {
+        { id = "alpha", name = "Alpha", level = 24, xp = 420, xpMax = 1000, xpState = "known", online = true },
+        { id = "bravo", name = "Bravo", level = 24, xp = 0, xpMax = 1000, xpState = "known", online = true },
+        { id = "charlie", name = "Charlie", level = 24, xp = 999, xpMax = 1000, xpState = "known", online = true },
+        { id = "delta", name = "Delta", level = 60, xpState = "max", online = true },
+        { id = "echo", name = "Echo", level = 24, xpState = "unavailable", online = true },
+        { id = "foxtrot", name = "Foxtrot", xpState = "unavailable", online = true },
+        { id = "golf", name = "Golf", level = 24, xp = 500, xpMax = 1000, xpState = "known", online = true, xpStale = true },
+        { id = "hotel", name = "Hotel", level = 24, xp = 750, xpMax = 1000, xpState = "known", online = false },
+        { id = "india", name = "India", level = 24, xp = 200, xpMax = 1000, xpState = "known", online = true },
+        { id = "juliet", name = "Juliet", level = 25, xp = 800, xpMax = 1000, xpState = "known", online = true },
+    }
+    for _, player in ipairs(players) do player.xpUpdatedAt = now end
+    players[9].xpUpdatedAt = now - 50000
+    progressAddon.GetOverviewPlayers = function()
+        local copy = {}
+        for _, player in ipairs(players) do copy[#copy + 1] = player end
+        return copy
+    end
+    progressAddon.RequestData = function() snapshots = snapshots + 1 end
+    loadOptions(progressAddon, api)
+    progressAddon:OpenContent()
+    local content, tooltip = progressAddon.contentPanel, api.GameTooltip
+    local page = content.overviewPage
+    local row = page.rows[1]
+    assert(#page.rows == 8 and page:GetWidth() == 680 and row:GetHeight() == 40
+        and page.headers.level:GetWidth() == 80 and page.headers.region:GetWidth() == 156
+        and row.position:GetWidth() == 156 and row.position.point[2] == 260
+        and row.seen.point[2] == 424 and row.actions.point[2] == 520,
+        "level progress widens Level and moves Region while preserving row count, panel size and later columns")
+    assert(row.level:GetText() == "24" and row.progress:GetText() == "· 42%"
+        and row.progressTrack:IsShown() and row.progressFill:IsShown()
+        and math.abs(row.progressFill:GetWidth() - 76 * 0.42) < 0.000001,
+        "known XP displays the numeric level, floored percentage and proportional thin fill")
+    assert(page.rows[2].progress:GetText() == "· 0%" and page.rows[2].progressTrack:IsShown()
+        and not page.rows[2].progressFill:IsShown() and page.rows[3].progress:GetText() == "· 99%",
+        "zero XP shows an empty track and near-level XP never rounds up to 100 percent")
+    assert(page.rows[4].progress:GetText() == "· MAX" and not page.rows[4].progressTrack:IsShown()
+        and not page.rows[4].progressFill:IsShown()
+        and page.rows[5].progress:GetText() == "· —" and not page.rows[5].progressTrack:IsShown()
+        and page.rows[6].level:GetText() == "—" and page.rows[6].progress:GetText() == "",
+        "maximum level, unavailable XP and unknown level have distinct states without an ordinary XP bar")
+    assert(page.rows[7].progress:GetText() == "· ~50%" and page.rows[7].progress.alpha == 0.55
+        and page.rows[7].progressFill.textureColor[4] == 0.35
+        and page.rows[8].progress:GetText() == "· ~75%",
+        "explicit stale progress and inactive players have a visible marker and subdued fill")
+    progressAddon.Theme.skin = { GetAccentColor = function() return 0.8, 0.2, 0.4 end }
+    progressAddon:RefreshOverview()
+    assert(row.progressFill.textureColor[1] == 0.8 and row.progressFill.textureColor[3] == 0.4,
+        "visible progress uses the current optional skin accent")
+    progressAddon.Theme.skin.GetAccentColor = function() return 0 / 0, 0.2, 0.4 end
+    progressAddon:RefreshOverview()
+    assert(row.progressFill.textureColor[1] == 0.27, "nonfinite skin accents safely fall back to native colors")
+    progressWorld.secretValue = 0.8
+    progressAddon.Theme.skin.GetAccentColor = function() return 0.8, 0.2, 0.4 end
+    progressAddon:RefreshOverview()
+    assert(row.progressFill.textureColor[1] == 0.27, "secret skin colors do not enter progress arithmetic")
+    progressAddon.Theme.skin, progressWorld.secretValue = nil, nil
+    row.levelCell.scripts.OnEnter(row.levelCell)
+    assert(tooltip.shown and tooltip.owner == row.levelCell and tooltip.text == "Alpha — level 24"
+        and tooltip.lines[1] == "XP: 420 / 1000" and tooltip.lines[2] == "To next level: 580 XP"
+        and #tooltip.lines == 2, "the whole Level cell explains exact XP and remaining XP without report details")
+    progressWorld:advance(13)
+    page.scripts.OnUpdate(page, 1)
+    assert(#tooltip.lines == 2 and tooltip.lines[1] == "XP: 420 / 1000"
+        and row.progress:GetText() == "· 42%" and snapshots == 0,
+        "refreshing remote progress does not add report details, mark unchanged XP stale or request status")
+    row.levelCell.scripts.OnLeave(row.levelCell)
+    assert(not tooltip.shown, "leaving the Level cell dismisses progress details")
+    page.rows[4].levelCell.scripts.OnEnter(page.rows[4].levelCell)
+    assert(tooltip.lines[1] == "Maximum level" and #tooltip.lines == 1,
+        "maximum-level details do not invent zero required XP or add report details")
+    page.rows[5].levelCell.scripts.OnEnter(page.rows[5].levelCell)
+    assert(tooltip.lines[1] == "Level progress unavailable" and #tooltip.lines == 1,
+        "unknown XP is explained without report details")
+    page.rows[7].levelCell.scripts.OnEnter(page.rows[7].levelCell)
+    assert(tooltip.lines[1] == "XP: 500 / 1000" and tooltip.lines[2] == "To next level: 500 XP"
+        and #tooltip.lines == 2, "stale progress tooltips show only XP and remaining XP")
+    page:SetOffset(2)
+    assert(not tooltip.shown and page.rows[1].playerID == "charlie" and page.rows[1].progress:GetText() == "· 99%"
+        and page.rows[7].playerID == "india" and page.rows[7].progress:GetText() == "· 20%"
+        and page.rows[7].progressFill.textureColor[4] == 1,
+        "scrolling dismisses old tooltips, resets pooled progress styling and keeps old unchanged online reports current")
+    page.rows[1].levelCell.scripts.OnEnter(page.rows[1].levelCell)
+    page.headers.level:Click()
+    assert(not tooltip.shown and page.rows[1].playerID == "alpha", "sorting dismisses progress tooltips and keeps numeric level ordering")
+    page:SetOffset(2)
+    assert(page.rows[8].playerID == "foxtrot", "unknown levels remain after known levels when sorting ascending")
+    page.headers.level:Click()
+    page:SetOffset(2)
+    assert(page.rows[8].playerID == "foxtrot", "unknown levels remain last when sorting descending")
+    page:SetOffset(0)
+    page.rows[1].levelCell.scripts.OnEnter(page.rows[1].levelCell)
+    content.options:Click()
+    assert(not tooltip.shown and not page.active, "leaving Content dismisses progress details and stops live work")
+    progressAddon.optionsPanel.content:Click()
+    assert(snapshots == 0, "returning to Content reuses status instead of requesting another snapshot")
+    row = page.rows[1]
+    row.levelCell.scripts.OnEnter(row.levelCell)
+    players = {}
+    progressAddon:RefreshOverview()
+    assert(not tooltip.shown and not row:IsShown() and not row.levelCell.player and row.progress:GetText() == ""
+        and not row.progressTrack:IsShown() and not row.progressFill:IsShown(),
+        "removing a player clears the pooled cell, progress textures and any owned tooltip")
 end
 
 -- Initial Content setup creates one saved key; copying and friend import live only in Settings > Group.
@@ -2792,8 +2948,11 @@ do
     appearance.font = "SkinFont-B.ttf"
     appearance.accent = { 0.9, 0.3, 0.6 }
     for _, callback in ipairs(appearance.looks) do callback() end
-    assert(content.TitleText.font[1] == appearance.font and not early.optionsPanel,
-        "live Content appearance changes preserve lazy Settings creation")
+    early:RefreshOverview()
+    assert(content.TitleText.font[1] == appearance.font and not early.optionsPanel
+        and content.overviewPage.rows[1].progressFill.textureColor[1] == appearance.accent[1]
+        and content.overviewPage.rows[1].progressFill.textureColor[3] == appearance.accent[3],
+        "live Content font and progress accent updates preserve lazy Settings creation")
     content.options:Click()
     local options = early.optionsPanel
     assert(options.skinApplied and options.TitleText.font[1] == appearance.font

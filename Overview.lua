@@ -21,14 +21,80 @@ local function Region(player)
     return zone
 end
 
-local function Location(player, now)
+local function Location(player)
     if not player.region then return player.sharing == false and "Not sharing" or "No position" end
     local prefix = player.positionAvailable and player.online and "" or "Last: "
-    return prefix .. player.region .. "\n" .. Age(player.positionStamp, now)
+    return prefix .. player.region
 end
 
 local function HideTooltip(button)
     if GameTooltip and GameTooltip:IsOwned(button) then GameTooltip:Hide() end
+end
+
+local function KnownXP(player)
+    return player.level and player.xpState == "known" and type(player.xp) == "number"
+        and type(player.xpMax) == "number" and player.xpMax > 0
+end
+
+local function ProgressTooltip(cell)
+    local player = cell.player
+    if not player or not GameTooltip then return end
+    GameTooltip:SetOwner(cell, "ANCHOR_RIGHT")
+    GameTooltip:SetText(player.name .. (player.level and " — level " .. player.level or " — level unknown"))
+    if KnownXP(player) then
+        GameTooltip:AddLine("XP: " .. player.xp .. " / " .. player.xpMax)
+        GameTooltip:AddLine("To next level: " .. math.max(0, player.xpMax - player.xp) .. " XP")
+    elseif player.level and player.xpState == "max" then
+        GameTooltip:AddLine("Maximum level")
+    else
+        GameTooltip:AddLine("Level progress unavailable")
+    end
+    GameTooltip:Show()
+end
+
+local function ProgressColor()
+    local skin = UI.skin
+    if skin and type(skin.GetAccentColor) == "function" then
+        local ok, red, green, blue = pcall(skin.GetAccentColor)
+        local function Valid(value)
+            if type(issecretvalue) == "function" and issecretvalue(value) then return false end
+            return type(value) == "number" and value == value and value >= 0 and value <= 1
+        end
+        if ok and Valid(red) and Valid(green) and Valid(blue) then return red, green, blue end
+    end
+    return 0.27, 0.65, 1
+end
+
+local function RefreshProgress(row, player)
+    local cell = row.levelCell
+    cell.player = player
+    row.level:SetText(player.level and tostring(player.level) or "—")
+    row.progress:SetText("")
+    row.progress:SetAlpha(1)
+    row.progressTrack:Hide()
+    row.progressFill:Hide()
+    if player.level then
+        local stale = player.xpStale or player.online == false
+        if KnownXP(player) then
+            local fraction = math.max(0, math.min(1, player.xp / player.xpMax))
+            row.progress:SetText("· " .. (stale and "~" or "") .. math.floor(fraction * 100) .. "%")
+            row.progress:SetAlpha(stale and 0.55 or 1)
+            local red, green, blue = ProgressColor()
+            row.progressTrack:SetColorTexture(red * 0.25, green * 0.25, blue * 0.25, 0.8)
+            row.progressFill:SetColorTexture(red, green, blue, stale and 0.35 or 1)
+            row.progressTrack:Show()
+            if fraction > 0 then
+                row.progressFill:SetWidth(76 * fraction)
+                row.progressFill:Show()
+            end
+        elseif player.xpState == "max" then
+            row.progress:SetText("· " .. (stale and "~" or "") .. "MAX")
+            row.progress:SetAlpha(stale and 0.55 or 1)
+        else
+            row.progress:SetText("· —")
+        end
+    end
+    if GameTooltip and GameTooltip:IsOwned(cell) and GameTooltip:IsShown() then ProgressTooltip(cell) end
 end
 
 local function ActionButton(menu, panel, label, action, y)
@@ -125,8 +191,8 @@ function addon:CreateOverviewPage(panel)
     page.empty = UI:Label(page, "", 13, "muted")
     page.empty:SetPoint("TOPLEFT", 16, -56)
     page.empty:SetSize(626, 50)
-    for _, column in ipairs({ { "Name", "name", 16, 164 }, { "Lv", "level", 188, 36 },
-        { "Region", "region", 232, 200 }, { "Last seen", "seen", 440, 88 } }) do
+    for _, column in ipairs({ { "Name", "name", 16, 164 }, { "Level", "level", 188, 80 },
+        { "Region", "region", 276, 156 }, { "Last seen", "seen", 440, 88 } }) do
         local title, key = column[1], column[2]
         local header = UI:Button(page, title)
         header:SetPoint("TOPLEFT", column[3], -12)
@@ -153,12 +219,30 @@ function addon:CreateOverviewPage(panel)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
         row.name:SetSize(164, 30)
-        row.level = UI:Label(row, "", 12)
-        row.level:SetPoint("TOPLEFT", 172, -7)
-        row.level:SetWidth(36)
+        row.levelCell = CreateFrame("Frame", nil, row)
+        row.levelCell.themeOwner = row.themeOwner
+        row.levelCell:SetPoint("TOPLEFT", 172, -2)
+        row.levelCell:SetSize(80, 36)
+        row.levelCell:EnableMouse(true)
+        row.levelCell:SetScript("OnEnter", ProgressTooltip)
+        row.levelCell:SetScript("OnLeave", HideTooltip)
+        row.levelCell:SetScript("OnHide", HideTooltip)
+        row:SetScript("OnHide", function() HideTooltip(row.levelCell) end)
+        row.level = UI:Label(row.levelCell, "", 12)
+        row.level:SetPoint("TOPLEFT", 0, -5)
+        row.level:SetWidth(24)
+        row.progress = UI:Label(row.levelCell, "", 11)
+        row.progress:SetPoint("TOPLEFT", 24, -5)
+        row.progress:SetWidth(56)
+        row.progressTrack = row.levelCell:CreateTexture(nil, "BACKGROUND")
+        row.progressTrack:SetPoint("TOPLEFT", 0, -24)
+        row.progressTrack:SetSize(76, 3)
+        row.progressFill = row.levelCell:CreateTexture(nil, "ARTWORK")
+        row.progressFill:SetPoint("TOPLEFT", row.progressTrack, "TOPLEFT")
+        row.progressFill:SetHeight(3)
         row.position = UI:Label(row, "", 11, "muted")
-        row.position:SetPoint("TOPLEFT", 216, -3)
-        row.position:SetSize(200, 36)
+        row.position:SetPoint("TOPLEFT", 260, -3)
+        row.position:SetSize(156, 36)
         row.seen = UI:Label(row, "", 11, "muted")
         row.seen:SetPoint("TOPLEFT", 424, -3)
         row.seen:SetSize(88, 36)
@@ -194,6 +278,7 @@ function addon:CreateOverviewPage(panel)
     end)
     function page:SetOffset(value)
         self.actionMenu:Hide()
+        for _, row in ipairs(self.rows) do HideTooltip(row.levelCell) end
         self.offset = math.max(0, math.min(math.floor(value + 0.5), self.maxOffset or 0))
         addon:RefreshOverview()
     end
@@ -212,13 +297,13 @@ function addon:CreateOverviewPage(panel)
                 addon:RefreshOverview()
             end
         end)
-        addon:RequestRosterSnapshot()
         addon:RefreshOverview()
     end
     function page:Deactivate()
         self.active = false
         self:SetScript("OnUpdate", nil)
         self.actionMenu:Hide()
+        for _, row in ipairs(self.rows) do HideTooltip(row.levelCell) end
     end
     page:SetScript("OnShow", function() page:Activate() end)
     page:SetScript("OnHide", function() page:Deactivate() end)
@@ -252,14 +337,20 @@ function addon:RefreshOverview()
     for index, row in ipairs(page.rows) do
         local player = players[page.offset + index]
         if menu:IsShown() and row.playerID ~= (player and player.id) then menu:Hide() end
+        if row.playerID ~= (player and player.id) then HideTooltip(row.levelCell) end
         row.playerID = player and player.id or nil
         if player then
             row.name:SetText(player.name .. (player.isSelf and " (you)" or ""))
-            row.level:SetText(player.level and tostring(player.level) or "—")
-            row.position:SetText(Location(player, now))
-            row.seen:SetText((player.online and "Active" or "Last seen") .. "\n" .. Age(player.seenAt, now))
+            RefreshProgress(row, player)
+            row.position:SetText(Location(player))
+            row.seen:SetText(player.online and "Active" or Age(player.seenAt, now))
             row:Show()
         else
+            row.levelCell.player = nil
+            row.level:SetText("")
+            row.progress:SetText("")
+            row.progressTrack:Hide()
+            row.progressFill:Hide()
             row:Hide()
         end
     end

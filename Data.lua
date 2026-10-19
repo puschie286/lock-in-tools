@@ -4,6 +4,7 @@ local REQUEST_WINDOW, MAX_REQUEST_SEQUENCE = 10, 999999999
 local RETRY_DELAYS = { 2, 4, 8, 8, 30 }
 local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
 local LEAVE_CACHE_CHECK_LIMIT = 5
+local STATUS_INTERVAL, STATUS_HEARTBEAT_INTERVAL, MAX_STATUS_STAMP = 5, 30, 9999999999
 local FAILURE_NOTICES = {
     WRONG_PASSWORD = "The data-channel password was rejected.",
     BANNED = "You are banned from the data channel.",
@@ -139,6 +140,381 @@ local function NotifyConnection(self)
     for _, feature in pairs(self.dataState.features) do
         if feature.connectionChanged then pcall(feature.connectionChanged, connected) end
     end
+end
+
+local function StatusNames(providers)
+    local names = {}
+    for name in pairs(providers) do names[#names + 1] = name end
+    table.sort(names)
+    return names
+end
+
+local function StatusField(name)
+    return not IsSecret(name) and type(name) == "string" and #name <= 32
+        and name:match("^[a-z][a-zA-Z0-9_]*$")
+end
+
+local function StatusString(value)
+    if IsSecret(value) then return nil end
+    if type(value) == "number" then
+        if value ~= value or value < -9007199254740991 or value > 9007199254740991 then return nil end
+        value = string.format("%.17g", value)
+    elseif type(value) == "boolean" then value = value and "true" or "false"
+    elseif type(value) ~= "string" then return nil end
+    if value:find("[%z\001-\031\127]") then return nil end
+    return value
+end
+
+local function EscapeStatus(value)
+    return (value:gsub("[%%|=]", function(character) return string.format("%%%02X", string.byte(character)) end))
+end
+
+local function UnescapeStatus(value)
+    if value:find("=", 1, true) then return nil end
+    local index = 1
+    while true do
+        local at = value:find("%", index, true)
+        if not at then break end
+        if not value:sub(at + 1, at + 2):match("^[0-9A-F][0-9A-F]$") then return nil end
+        index = at + 3
+    end
+    value = value:gsub("%%([0-9A-F][0-9A-F])", function(hex) return string.char(tonumber(hex, 16)) end)
+    return StatusString(value)
+end
+
+local function StatusInteger(value, maximum, minimum)
+    if not value or #value > 10 or not value:match("^%d+$")
+        or (#value > 1 and value:sub(1, 1) == "0") then return nil end
+    local number = tonumber(value)
+    if number < minimum or number > maximum then return nil end
+    return number
+end
+
+local function DecodeStatus(payload)
+    if IsSecret(payload) or type(payload) ~= "string" or payload:find("[%z\001-\031\127]") then return nil end
+    local kind, session, stampText, revisionText, body = payload:match("^2|([FDH])|([^|]+)|(%d+)|(%d+)(.*)$")
+    local stamp = StatusInteger(stampText, MAX_STATUS_STAMP, 0)
+    local revision = StatusInteger(revisionText, MAX_REQUEST_SEQUENCE, 1)
+    if not kind or not ValidRequestID(session) or not stamp or not revision then return nil end
+    local message = { kind = kind, session = session, stamp = stamp, revision = revision, fields = {} }
+    if kind == "H" then return body == "" and message or nil end
+    if kind == "D" then
+        local baseText
+        baseText, body = body:match("^|(%d+)|(.*)$")
+        message.base = StatusInteger(baseText, MAX_REQUEST_SEQUENCE, 1)
+        if not message.base or message.base >= revision or body == "" then return nil end
+    else
+        body = body:match("^|(.*)$")
+        if body == nil then return nil end
+    end
+    if body ~= "" then
+        if body:sub(-1) == "|" then return nil end
+        for part in (body .. "|"):gmatch("(.-)|") do
+            local name, encoded = part:match("^([^=]+)=(.*)$")
+            if not name and kind == "D" then name = part end
+            if not StatusField(name) or message.fields[name] ~= nil then return nil end
+            local value = encoded ~= nil and UnescapeStatus(encoded)
+            if encoded ~= nil and value == nil then return nil end
+            message.fields[name] = encoded == nil and false or value
+        end
+    end
+    return message
+end
+
+local function SameStatus(left, right)
+    if not left or not right then return left == right end
+    for name, value in pairs(left) do if value ~= right[name] then return false end end
+    for name in pairs(right) do if left[name] == nil then return false end end
+    return true
+end
+
+local function CopyStatus(fields)
+    local copy = {}
+    for name, value in pairs(fields) do copy[name] = value end
+    return copy
+end
+
+-- Providers share one complete snapshot. A broken provider cannot stop healthy
+-- providers, and omitted fields remain unavailable rather than retaining old data.
+local function CollectStatus(self)
+    local status, fields, available = self.dataState.status, {}, false
+    for _, name in ipairs(StatusNames(status.providers)) do
+        local ok, values = pcall(status.providers[name].collect)
+        if ok and not IsSecret(values) and type(values) == "table" then
+            local collected, valid = {}, true
+            for key, value in pairs(values) do
+                local encoded = StatusString(value)
+                if not StatusField(key) or encoded == nil then valid = false; break end
+                collected[key] = encoded
+            end
+            if valid then
+                available = true
+                for key, value in pairs(collected) do
+                    if fields[key] ~= nil then return nil end
+                    fields[key] = value
+                end
+            end
+        end
+    end
+    if not available and not status.current then return nil end
+    return fields
+end
+
+local function CurrentStatus(self)
+    local status = self.dataState.status
+    local generation = status.generation
+    local fields = CollectStatus(self)
+    if not fields or generation ~= status.generation then return nil end
+    if not SameStatus(fields, status.current) then
+        if status.revision >= MAX_REQUEST_SEQUENCE then return nil end
+        status.revision, status.current = status.revision + 1, fields
+    end
+    return status.current, status.revision
+end
+
+local function EncodeStatus(self, kind, fields, revision, base)
+    local status = self.dataState.status
+    local stamp = GetServerTime()
+    if IsSecret(stamp) or type(stamp) ~= "number" or stamp ~= stamp or stamp < 0
+        or stamp > MAX_STATUS_STAMP or stamp % 1 ~= 0 then return nil end
+    stamp = math.max(stamp, status.lastStamp or 0)
+    status.lastStamp = stamp
+    local header = "2|" .. kind .. "|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision
+    if kind == "H" then return header end
+    local encoded = {}
+    for _, name in ipairs(StatusNames(fields)) do
+        encoded[#encoded + 1] = fields[name] == false and name or name .. "=" .. EscapeStatus(fields[name])
+    end
+    return header .. "|" .. (base and base .. "|" or "") .. table.concat(encoded, "|")
+end
+
+local function ContactStatus(self, sender, message, peer)
+    local status, generation = self.dataState.status, self.dataState.status.generation
+    local synchronized = peer.fields ~= nil and not peer.unsynchronized
+    local metadata = { kind = ({ F = "full", D = "delta", H = "heartbeat" })[message.kind],
+        session = message.session, revision = message.revision, hasBaseline = peer.fields ~= nil,
+        coherent = synchronized, synchronized = synchronized }
+    for _, name in ipairs(StatusNames(status.providers)) do
+        local provider = status.providers[name]
+        if provider.contact then pcall(provider.contact, sender, message.stamp, CopyStatus(metadata)) end
+        if status.generation ~= generation then return false end
+    end
+    return metadata
+end
+
+local function ProcessStatus(self, sender, payload, requested)
+    local status, normalized = self.dataState.status, SenderName(sender)
+    local message = DecodeStatus(payload)
+    if not message or not normalized or normalized:find("[%z\001-\031\127]") or self:IsDataSelf(sender) then return false end
+    local peer, generation = status.received[normalized], status.generation
+    if not peer then
+        peer = { retired = {}, revision = 0, advertised = 0 }
+        status.received[normalized] = peer
+    end
+    if peer.retired[message.session] then return false end
+    if peer.session ~= message.session then
+        if peer.stamp and message.stamp < peer.stamp then return false end
+        if peer.session then peer.retired[peer.session] = true end
+        peer.session, peer.fields, peer.revision, peer.advertised = message.session, nil, 0, 0
+        peer.unsynchronized, peer.contactStamp = true, nil
+    end
+    if message.revision < peer.revision or message.revision < peer.advertised then return false end
+    if peer.stamp and message.stamp < peer.stamp and message.revision <= peer.revision then return false end
+    if message.kind == "H" then
+        if peer.contactStamp and message.stamp <= peer.contactStamp then return false end
+        peer.advertised = message.revision
+        if not peer.fields or message.revision ~= peer.revision then peer.unsynchronized = true; status.resyncNeeded = true end
+        peer.stamp, peer.contactStamp = message.stamp, message.stamp
+        return ContactStatus(self, sender, message, peer) ~= false
+    end
+    if message.kind == "D" then
+        if message.revision == peer.revision then return false end
+        if not peer.fields or peer.unsynchronized or message.base ~= peer.revision then
+            peer.unsynchronized, peer.advertised = true, message.revision
+            peer.stamp, peer.contactStamp, status.resyncNeeded = message.stamp, message.stamp, true
+            ContactStatus(self, sender, message, peer)
+            return false
+        end
+        local merged = CopyStatus(peer.fields)
+        for name, value in pairs(message.fields) do merged[name] = value ~= false and value or nil end
+        peer.fields = merged
+    else
+        if message.revision == peer.revision and not SameStatus(message.fields, peer.fields) then return false end
+        if message.revision == peer.revision and not requested and message.stamp <= (peer.contactStamp or -1) then return false end
+        peer.fields = message.fields
+    end
+    peer.revision, peer.advertised, peer.stamp = message.revision, message.revision, message.stamp
+    peer.contactStamp, peer.unsynchronized = message.stamp, false
+    local metadata = ContactStatus(self, sender, message, peer)
+    if not metadata or generation ~= status.generation then return false end
+    for _, name in ipairs(StatusNames(status.providers)) do
+        -- Each callback owns its copies. Central revision ordering keeps one
+        -- coherent baseline even if a consumer throws or rejects the sample.
+        local provider = status.providers[name]
+        pcall(provider.receive, sender, CopyStatus(peer.fields), message.stamp, message.revision, CopyStatus(metadata))
+        if status.generation ~= generation then return false end
+    end
+    return true
+end
+
+local function ReceiveStatus(self, sender, payload, requested)
+    local status = self.dataState.status
+    if status.receiving then
+        if not DecodeStatus(payload) or #status.receiveQueue >= 64 then return false end
+        status.receiveQueue[#status.receiveQueue + 1] = {
+            sender = sender, payload = payload, requested = requested, generation = status.generation }
+        return true
+    end
+    -- Deliver one coherent sample to all consumers before processing a nested
+    -- transport callback. Otherwise one provider could see an old revision with
+    -- the fields of a newer sample received reentrantly by another provider.
+    status.receiving, status.receiveQueue = true, {}
+    local ok, accepted = pcall(ProcessStatus, self, sender, payload, requested)
+    local count = 0
+    while #status.receiveQueue > 0 and count < 64 do
+        local nextMessage = table.remove(status.receiveQueue, 1)
+        count = count + 1
+        if nextMessage.generation == status.generation then
+            pcall(ProcessStatus, self, nextMessage.sender, nextMessage.payload, nextMessage.requested)
+        end
+    end
+    status.receiving, status.receiveQueue = false, {}
+    return ok and accepted
+end
+
+local function ScheduleStatus(self)
+    local status = self.dataState.status
+    if status.timer or not status.connected or not self:IsDataConnected() then return end
+    local generation = status.generation
+    status.timer = C_Timer.NewTimer(STATUS_INTERVAL, function()
+        if status.generation ~= generation then return end
+        status.timer = nil
+        self:DataStatusTick()
+    end)
+end
+
+local function StatusConnectionChanged(self, connected)
+    local state, status = self.dataState, self.dataState.status
+    -- Another feature callback may have changed the route reentrantly.
+    connected = self:IsDataConnected()
+    local send, fingerprint = connected and state.send or nil, connected and state.groupFingerprint or nil
+    if status.connected == connected and status.send == send and status.fingerprint == fingerprint then return end
+    status.generation = status.generation + 1
+    if status.timer then status.timer:Cancel(); status.timer = nil end
+    status.connected, status.send, status.fingerprint = connected, send, fingerprint
+    status.received, status.lastBroadcast, status.lastAttemptAt = {}, nil, nil
+    status.receiveQueue = {}
+    status.current, status.revision, status.broadcastRevision = nil, 0, 0
+    status.forceFull, status.resyncNeeded, status.lastResyncAttemptAt, status.lastTrafficAt = false, false, nil, nil
+    status.session = state.requestSession .. "-" .. status.generation
+    status.requestNeeded = connected
+    local generation = status.generation
+    for _, name in ipairs(StatusNames(status.providers)) do
+        local callback = status.providers[name].connectionChanged
+        if callback then pcall(callback, connected) end
+        if status.generation ~= generation then return end
+    end
+    if connected then ScheduleStatus(self); self:DataStatusTick() end
+end
+
+-- Polling, change suppression and join snapshots belong to the data protocol,
+-- so adding a provider does not add another wire feature or another scheduler.
+function addon:RegisterDataStatusProvider(name, collect, receive, connectionChanged, contact)
+    local state = self.dataState
+    if not state then return false, "Group data is still loading." end
+    if not ValidFeature(name) or type(collect) ~= "function" or type(receive) ~= "function"
+        or (connectionChanged ~= nil and type(connectionChanged) ~= "function")
+        or (contact ~= nil and type(contact) ~= "function") then
+        return false, "Invalid status provider registration."
+    end
+    if state.status and state.status.providers[name] then return false, "Status provider already registered." end
+    local first = not state.status
+    if first then
+        if state.features.status or state.requests.status then return false, "Status data is already registered." end
+        state.status = { providers = {}, received = {}, generation = 0, revision = 0 }
+    end
+    local status = state.status
+    status.providers[name] = { collect = collect, receive = receive, connectionChanged = connectionChanged, contact = contact }
+    if first then
+        self:RegisterDataRequest("status", function(sender, payload, budget)
+            local generation = status.generation
+            if payload ~= "2|S" then
+                local message = DecodeStatus(payload)
+                if not message or message.kind ~= "F" then return nil end
+                ReceiveStatus(self, sender, payload, true)
+            end
+            if status.generation ~= generation then return nil end
+            local fields, revision = CurrentStatus(self)
+            if fields == nil or status.generation ~= generation then return nil end
+            local response = EncodeStatus(self, "F", fields, revision)
+            -- A recipient of an unpublished full snapshot cannot apply a later
+            -- patch against the older broadcast baseline. Publish a full next.
+            if revision ~= status.broadcastRevision then status.forceFull = true end
+            if response and #response <= budget then return response end
+            -- A reply never marks a changed snapshot as broadcast to all peers.
+        end, function(sender, payload)
+            local message = DecodeStatus(payload)
+            return message and message.kind == "F" and ReceiveStatus(self, sender, payload, true) or false
+        end)
+        self:RegisterDataFeature("status", function(sender, payload) return ReceiveStatus(self, sender, payload) end,
+            function(connected) StatusConnectionChanged(self, connected) end)
+    elseif connectionChanged then pcall(connectionChanged, self:IsDataConnected()) end
+    return true
+end
+
+function addon:DataStatusTick()
+    local state = self.dataState
+    local status = state and state.status
+    if not status or status.ticking then return false end
+    if not self:IsDataConnected() then
+        StatusConnectionChanged(self, false)
+        return false
+    end
+    local generation, now = status.generation, GetTime()
+    if status.lastAttemptAt and now - status.lastAttemptAt < STATUS_INTERVAL then ScheduleStatus(self); return false end
+    status.ticking = true
+    local fields, revision = CurrentStatus(self)
+    local sent = false
+    if fields ~= nil and generation == status.generation and self:IsDataConnected() then
+        local payload, request, broadcast
+        if status.requestNeeded then
+            payload, request, broadcast = EncodeStatus(self, "F", fields, revision), true, true
+        elseif status.resyncNeeded and (not status.lastResyncAttemptAt or now - status.lastResyncAttemptAt >= STATUS_HEARTBEAT_INTERVAL) then
+            payload, request = "2|S", true
+        elseif status.forceFull or revision ~= status.broadcastRevision then
+            local changed = {}
+            for name, value in pairs(fields) do
+                if not status.lastBroadcast or status.lastBroadcast[name] ~= value then changed[name] = value end
+            end
+            for name in pairs(status.lastBroadcast or {}) do if fields[name] == nil then changed[name] = false end end
+            local kind = (status.forceFull or not status.lastBroadcast or not next(changed)) and "F" or "D"
+            payload, broadcast = EncodeStatus(self, kind, kind == "F" and fields or changed, revision,
+                kind == "D" and status.broadcastRevision or nil), true
+        elseif status.lastTrafficAt and now - status.lastTrafficAt >= STATUS_HEARTBEAT_INTERVAL then
+            payload = EncodeStatus(self, "H", nil, status.broadcastRevision)
+        end
+        if payload then
+            status.lastAttemptAt = now
+            if payload == "2|S" then
+                status.resyncNeeded, status.lastResyncAttemptAt = false, now
+            end
+            if request then sent = self:RequestData("status", payload)
+            else sent = self:SendData("status", payload) end
+            if generation == status.generation and sent then
+                if broadcast then
+                    status.requestNeeded, status.lastBroadcast, status.broadcastRevision = false, fields, revision
+                    -- Synchronous callbacks can collect newer local state.
+                    status.forceFull = status.revision ~= revision
+                end
+                if payload ~= "2|S" then status.lastTrafficAt = now end
+            elseif generation == status.generation and payload == "2|S" then
+                status.resyncNeeded = true
+            end
+        end
+    end
+    status.ticking = false
+    if generation == status.generation then ScheduleStatus(self) end
+    return sent
 end
 
 function addon:RegisterDataFeature(name, receive, connectionChanged)
@@ -463,9 +839,10 @@ local function ReceiveRequest(self, sender, message)
     if state.repliedRequests[key] then return false end
     state.repliedRequests[key] = now + REQUEST_WINDOW
     local epoch = state.requestEpoch
-    local ok, response = pcall(registration.onRequest, sender, payload)
+    local header = "1|R|" .. feature .. "|" .. id .. "|" .. normalized .. "|"
+    local ok, response = pcall(registration.onRequest, sender, payload, MAX_MESSAGE_BYTES - #header)
     if not ok or IsSecret(response) or type(response) ~= "string" or state.requestEpoch ~= epoch then return false end
-    return SendFrame(self, "1|R|" .. feature .. "|" .. id .. "|" .. normalized .. "|" .. response)
+    return SendFrame(self, header .. response)
 end
 
 local function ReceiveResponse(self, sender, message)

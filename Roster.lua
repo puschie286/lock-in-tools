@@ -1,5 +1,5 @@
 local _, addon = ...
-local HEARTBEAT, TIMEOUT, TICK, SNAPSHOT_COOLDOWN = 30, 90, 5, 10
+local TIMEOUT = 90
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
@@ -49,19 +49,35 @@ local function Refresh(self)
     if self.RefreshOverview then self:RefreshOverview() end
 end
 
-local function LocalMetadata(self)
-    local level = type(UnitLevel) == "function" and UnitLevel("player") or 0
-    if not Number(level, 1000) then level = 0 end
-    return level, Grouped(), NativeBoolean(C_PartyInfo and C_PartyInfo.CanInvite),
-        NativeBoolean(C_PartyInfo and C_PartyInfo.IsPartyFull), self.db.position and self.db.position.sharing == true
+local function NativeNumber(callback, maximum, ...)
+    if type(callback) ~= "function" then return nil end
+    local ok, value = pcall(callback, ...)
+    if ok and Number(value, maximum) then return value end
 end
 
-local function Encode(self)
+local function LocalStatus(self)
     local state = self.rosterState
-    state.sequence = state.sequence + 1
-    local level, grouped, invite, full, sharing = LocalMetadata(self)
-    return string.format("1|%d|%d|%d|%d|%d|%d|%d", GetServerTime(), state.sequence,
-        level, grouped and 1 or 0, invite and 1 or 0, full and 1 or 0, sharing and 1 or 0)
+    local nativeLevel = NativeNumber(UnitLevel, 1000, "player") or 0
+    if state.pendingLevel and nativeLevel >= state.pendingLevel and state.xpUpdateAfterLevel then
+        state.pendingLevel, state.waitingForXP, state.xpUpdateAfterLevel = nil, nil, nil
+    end
+    local level = state.pendingLevel and math.max(nativeLevel, state.pendingLevel) or nativeLevel
+    local result = { level = level, xpState = "unavailable", inParty = Grouped(),
+        canInvite = NativeBoolean(C_PartyInfo and C_PartyInfo.CanInvite),
+        partyFull = NativeBoolean(C_PartyInfo and C_PartyInfo.IsPartyFull),
+        sharing = self.db.position and self.db.position.sharing == true or false }
+    local maximumLevel = NativeNumber(GetMaxPlayerLevel, 1000)
+    if level > 0 and maximumLevel and maximumLevel > 0 and level >= maximumLevel then
+        result.xpState = "max"
+    elseif level > 0 and nativeLevel == level and not state.waitingForXP then
+        local xp = NativeNumber(UnitXP, 9999999999, "player")
+        local maximum = NativeNumber(UnitXPMax, 9999999999, "player")
+        if xp and maximum and maximum > 0 and xp <= maximum then
+            result.xp, result.xpMax, result.xpState = xp, maximum, "known"
+        end
+    end
+    state.localStatus = result
+    return result
 end
 
 local function SavePeer(self, id, peer)
@@ -69,40 +85,82 @@ local function SavePeer(self, id, peer)
     self.db.roster.peers[id] = { name = peer.name, level = peer.level, seenAt = peer.seenAt }
 end
 
-local function Decode(payload)
-    if IsSecret(payload) or type(payload) ~= "string" or #payload > 160 then return nil end
-    local stamp, sequence, level, grouped, invite, full, sharing = payload:match(
-        "^1|(%d+)|(%d+)|(%d+)|([01])|([01])|([01])|([01])$")
-    stamp, sequence, level = tonumber(stamp), tonumber(sequence), tonumber(level)
-    if not Number(stamp, 9999999999) or not Number(sequence, 999999999)
-        or not Number(level, 1000) then return nil end
-    return stamp, sequence, level, grouped == "1", invite == "1", full == "1", sharing == "1"
-end
-
-function addon:ReceiveRoster(sender, payload)
+function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
     if not Active(self) or not self:IsDataConnected() or not Identity(sender)
         or self:IsDataSelf(sender) then return false end
-    local stamp, sequence, level, grouped, invite, full, sharing = Decode(payload)
-    if not stamp then return false end
     local id, state = Identity(sender), self.rosterState
-    local previous = state.peers[id]
-    if previous and previous.stamp and (stamp < previous.stamp
-        or (stamp == previous.stamp and sequence <= previous.sequence)) then return false end
-    local peer = { name = sender, level = level > 0 and level or nil, stamp = stamp, sequence = sequence,
-        seenAt = GetServerTime(), lastReceived = GetTime(), inParty = grouped,
-        canInvite = invite, partyFull = full, sharing = sharing }
-    state.peers[id] = peer
+    local function Reject()
+        -- Transport coherence does not prove that this consumer accepted the
+        -- merged player data. Retain the last good values visibly stale.
+        if metadata and (metadata.kind == "full" or metadata.kind == "delta") and state.peers[id] then
+            state.peers[id].statusSynchronized = false
+            if state.progress[id] then state.progress[id].disconnected = true end
+            Refresh(self)
+        end
+        return false
+    end
+    if type(fields) ~= "table" then return Reject() end
+    local function FieldNumber(value)
+        if not IsSecret(value) and (type(value) == "string" or type(value) == "number") then return tonumber(value) end
+    end
+    local level, xp, maximum = FieldNumber(fields.level), FieldNumber(fields.xp), FieldNumber(fields.xpMax)
+    local flags = {}
+    for _, name in ipairs({ "inParty", "canInvite", "partyFull", "sharing" }) do
+        local value = fields[name]
+        if IsSecret(value) then return Reject() end
+        if value == true or value == "true" then flags[name] = true
+        elseif value == false or value == "false" then flags[name] = false
+        elseif value ~= nil then return Reject() end
+    end
+    local kind = fields.xpState
+    if IsSecret(kind) then return Reject() end
+    if not Number(level, 1000) or not Number(stamp, 9999999999) or not Number(sequence, 999999999)
+        or (kind ~= "known" and kind ~= "max" and kind ~= "unavailable") then return Reject() end
+    if kind == "known" and (level == 0 or not Number(xp, 9999999999)
+        or not Number(maximum, 9999999999) or maximum == 0 or xp > maximum) then return Reject() end
+    if kind == "max" and level == 0 then return Reject() end
+    local previous, peer = state.progress[id], state.peers[id]
+    -- The shared protocol validates sessions/revisions, including requested full
+    -- snapshots of an unchanged revision. Direct callers retain ordering.
+    if previous and not metadata
+        and (stamp < previous.stamp or (stamp == previous.stamp and sequence <= previous.sequence)) then
+        return false
+    end
+    local now = GetServerTime()
+    local updatedAt = previous and previous.xpUpdatedAt
+    if not previous or previous.level ~= (level > 0 and level or nil) or previous.xpState ~= kind
+        or previous.xp ~= (kind == "known" and xp or nil) or previous.xpMax ~= (kind == "known" and maximum or nil)
+        or not metadata or metadata.kind == "full" then updatedAt = now end
+    state.progress[id] = { level = level > 0 and level or nil, xp = kind == "known" and xp or nil,
+        xpMax = kind == "known" and maximum or nil, xpState = kind, xpUpdatedAt = updatedAt,
+        stamp = stamp, sequence = sequence,
+        disconnected = metadata and metadata.coherent == false or false }
+    if not peer then
+        peer = { name = sender }
+        state.peers[id] = peer
+    end
+    peer.level, peer.seenAt, peer.lastReceived = level > 0 and level or nil, now, GetTime()
+    peer.inParty, peer.canInvite, peer.partyFull, peer.sharing = flags.inParty, flags.canInvite, flags.partyFull, flags.sharing
+    peer.statusSynchronized = not metadata or metadata.coherent ~= false
     SavePeer(self, id, peer)
     Refresh(self)
     return true
 end
 
-function addon:RequestRosterSnapshot()
-    if not Active(self) or not self:IsDataConnected() then return false end
-    local state = self.rosterState
-    if state.lastSnapshot and GetTime() - state.lastSnapshot < SNAPSHOT_COOLDOWN then return false end
-    state.lastSnapshot = GetTime()
-    return self:RequestData("roster", Encode(self))
+function addon:ReceivePlayerContact(sender, stamp, metadata)
+    if not Active(self) or not self:IsDataConnected() or not Identity(sender)
+        or self:IsDataSelf(sender) or not Number(stamp, 9999999999) then return false end
+    local id = Identity(sender)
+    local peer, progress = self.rosterState.peers[id], self.rosterState.progress[id]
+    if not peer then return false end
+    peer.seenAt, peer.lastReceived = GetServerTime(), GetTime()
+    if metadata and metadata.coherent == false then
+        if progress then progress.disconnected = true end
+        peer.statusSynchronized = false
+    end
+    SavePeer(self, id, peer)
+    Refresh(self)
+    return true
 end
 
 function addon:InitializeRoster()
@@ -112,7 +170,7 @@ function addon:InitializeRoster()
     local fingerprint = self:GetGroupFingerprint()
     if settings.groupFingerprint ~= fingerprint or type(settings.peers) ~= "table" then settings.peers = {} end
     settings.groupFingerprint = fingerprint
-    self.rosterState = { peers = {}, sequence = 0, generation = 0 }
+    self.rosterState = { peers = {}, progress = {} }
     for id, saved in pairs(settings.peers) do
         if type(saved) == "table" and Identity(saved.name) == id and Number(saved.seenAt, 9999999999)
             and (saved.level == nil or Number(saved.level, 1000)) then
@@ -121,83 +179,63 @@ function addon:InitializeRoster()
             settings.peers[id] = nil
         end
     end
-    self:RegisterDataRequest("roster", function(sender, payload)
-        if not Active(self) or not self:IsDataConnected() or not Identity(sender)
-            or self:IsDataSelf(sender) or not Decode(payload) then return nil end
-        -- A snapshot can arrive after a newer broadcast; still answer discovery.
-        self:ReceiveRoster(sender, payload)
-        return Encode(self)
-    end, function(sender, payload) return self:ReceiveRoster(sender, payload) end)
-    self:RegisterDataFeature("roster", function(sender, payload) return self:ReceiveRoster(sender, payload) end,
-        function(connected)
-            local state = self.rosterState
-            state.lastSent, state.lastSnapshot = nil, nil
-            if not connected then
-                for _, peer in pairs(state.peers) do peer.lastReceived = nil end
-            elseif Active(self) then
-                self:RosterTick()
-                self:RequestRosterSnapshot()
-            end
-            Refresh(self)
-        end)
+    self:RegisterDataStatusProvider("player", function()
+        if Active(self) then return LocalStatus(self) end
+    end, function(sender, fields, stamp, sequence, metadata)
+        return self:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
+    end, function(connected)
+        if connected then self.rosterState.progress = {}
+        else
+            for _, progress in pairs(self.rosterState.progress) do progress.disconnected = true end
+            for _, peer in pairs(self.rosterState.peers) do peer.lastReceived = nil end
+        end
+        Refresh(self)
+    end, function(sender, stamp, metadata)
+        return self:ReceivePlayerContact(sender, stamp, metadata)
+    end)
     self.rosterFrame = CreateFrame("Frame")
     for _, event in ipairs({ "PLAYER_LEVEL_UP", "GROUP_ROSTER_UPDATE", "PARTY_LEADER_CHANGED",
-        "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }) do self.rosterFrame:RegisterEvent(event) end
-    self.rosterFrame:SetScript("OnEvent", function(_, event)
+        "PLAYER_XP_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }) do self.rosterFrame:RegisterEvent(event) end
+    self.rosterFrame:SetScript("OnEvent", function(_, event, value)
         if event == "PLAYER_LOGOUT" then self:OnRosterLogout(); return end
-        if Active(self) then self:RosterTick(true) end
+        local state = self.rosterState
+        if event == "PLAYER_LEVEL_UP" and Number(value, 1000) and value > 0 then
+            state.waitingForXP = not (state.localStatus and state.localStatus.level == value
+                and state.localStatus.xpState == "known")
+            state.pendingLevel, state.xpUpdateAfterLevel = state.waitingForXP and value or nil, nil
+        elseif event == "PLAYER_XP_UPDATE" then
+            if value ~= nil and value ~= "player" then return end
+            local level = NativeNumber(UnitLevel, 1000, "player")
+            if state.pendingLevel then state.xpUpdateAfterLevel = true end
+            if level and (not state.pendingLevel or level >= state.pendingLevel) then
+                state.pendingLevel, state.waitingForXP, state.xpUpdateAfterLevel = nil, nil, nil
+            end
+        elseif event == "PLAYER_ENTERING_WORLD" then
+            state.pendingLevel, state.waitingForXP, state.xpUpdateAfterLevel = nil, nil, nil
+        end
+        if Active(self) then LocalStatus(self) end
+        Refresh(self)
     end)
 end
 
-function addon:UpdateRosterTimer()
-    local state = self.rosterState
-    if not state then return end
-    state.generation = state.generation + 1
-    if state.timer then state.timer:Cancel(); state.timer = nil end
-    if not Active(self) then return end
-    local generation = state.generation
-    local function Tick()
-        if generation ~= state.generation or not Active(self) then return end
-        state.timer = nil
-        self:RosterTick()
-        if generation == state.generation and Active(self) then state.timer = C_Timer.NewTimer(TICK, Tick) end
-    end
-    state.timer = C_Timer.NewTimer(TICK, Tick)
-end
-
-function addon:RosterTick(force)
-    if not Active(self) then return end
-    local state = self.rosterState
-    local level, grouped, invite, full, sharing = LocalMetadata(self)
-    local metadata = table.concat({ level, grouped and 1 or 0, invite and 1 or 0, full and 1 or 0, sharing and 1 or 0 }, "|")
-    if self:IsDataConnected() and (force or metadata ~= state.lastMetadata or not state.lastSent
-        or GetTime() - state.lastSent >= HEARTBEAT) then
-        if self:SendData("roster", Encode(self)) then state.lastSent, state.lastMetadata = GetTime(), metadata end
-    end
-    Refresh(self)
-end
-
 function addon:OnRosterLogin()
-    self:UpdateRosterTimer()
-    self:RosterTick()
-    self:RequestRosterSnapshot()
+    if Active(self) then LocalStatus(self) end
+    Refresh(self)
 end
 
 function addon:OnRosterGroupChanged()
     local state = self.rosterState
     if not state then return end
-    state.peers, state.lastSent, state.lastSnapshot, state.lastMetadata = {}, nil, nil, nil
+    state.peers, state.progress = {}, {}
     if not self.savedDataReadOnly then
         self.db.roster.peers, self.db.roster.groupFingerprint = {}, self:GetGroupFingerprint()
     end
-    self:UpdateRosterTimer()
     Refresh(self)
 end
 
 function addon:OnRosterLogout()
     if not self.rosterState then return end
     self.rosterState.stopped = true
-    self:UpdateRosterTimer()
 end
 
 function addon:GetOverviewPlayers()
@@ -206,16 +244,27 @@ function addon:GetOverviewPlayers()
     local function Add(id, peer, isSelf)
         local row = { id = id, name = peer.name, level = peer.level, seenAt = peer.seenAt, isSelf = isSelf,
             online = isSelf or (self:IsDataConnected() and peer.lastReceived ~= nil and GetTime() - peer.lastReceived < TIMEOUT),
-            inParty = peer.inParty, canInvite = peer.canInvite, partyFull = peer.partyFull, sharing = peer.sharing }
+            inParty = peer.inParty, canInvite = peer.canInvite, partyFull = peer.partyFull, sharing = peer.sharing,
+            statusSynchronized = peer.statusSynchronized }
+        local progress = isSelf and LocalStatus(self) or self.rosterState.progress[id]
+        row.xpState, row.xpStale = "unavailable", false
+        if progress then
+            row.xpUpdatedAt = isSelf and GetServerTime() or progress.xpUpdatedAt
+            row.xpStale = not isSelf and (not row.online or progress.disconnected == true) or false
+            if progress.level == row.level then
+                row.xp, row.xpMax, row.xpState = progress.xp, progress.xpMax, progress.xpState
+            end
+        end
         rows[#rows + 1], byID[id] = row, row
         return row
     end
     local name = self.ready and SelfName()
     local ownID = name and Identity(name)
     if ownID then
-        local level, grouped, invite, full, sharing = LocalMetadata(self)
+        local status = LocalStatus(self)
+        local level, sharing = status.level, status.sharing
         local row = Add(ownID, { name = name, level = level > 0 and level or nil, seenAt = GetServerTime(),
-            inParty = grouped, canInvite = invite, partyFull = full, sharing = sharing }, true)
+            inParty = status.inParty, canInvite = status.canInvite, partyFull = status.partyFull, sharing = sharing }, true)
         if sharing and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
             local map = C_Map.GetBestMapForUnit("player")
             if Number(map, 1000000) and map > 0 then
@@ -239,7 +288,7 @@ function addon:GetOverviewPlayers()
             row.map, row.x, row.y = position.map, position.x, position.y
             row.positionStamp = position.positionStamp
             row.positionAvailable = position.positionAvailable == true and position.online == true and row.sharing ~= false
-            -- Old clients still supply useful positions, but no party eligibility metadata.
+            -- Position discovery provides no party eligibility metadata.
             if not self.rosterState.peers[id] then row.online = self:IsDataConnected() and position.online == true end
         end
     end
@@ -260,6 +309,7 @@ function addon:GetOverviewActionState(id)
     elseif not row then reason = "This player is no longer available."
     elseif row.isSelf then reason = "This is your character."
     elseif not row.online then reason = "No recent contact with this player."
+    elseif row.statusSynchronized == false then reason = "Waiting for this player's current status."
     elseif NativeBoolean(UnitInParty, row.name) or NativeBoolean(UnitInRaid, row.name) then
         reason = "Already in your party or raid."
     end
@@ -268,12 +318,14 @@ function addon:GetOverviewActionState(id)
         result.inviteReason = "Invitations are unavailable in this client."
     elseif not NativeBoolean(C_PartyInfo.CanInvite) then result.inviteReason = "You cannot invite players right now."
     elseif NativeBoolean(C_PartyInfo.IsPartyFull) then result.inviteReason = "Your party or raid is full."
+    elseif row.inParty == nil then result.inviteReason = "This player's party status is unavailable."
     elseif row.inParty then result.inviteReason = "This player is already grouped."
     else result.invite = true end
     if not C_PartyInfo or type(C_PartyInfo.RequestInviteFromUnit) ~= "function" then
         result.requestReason = "Join requests are unavailable in this client."
     elseif Grouped() then result.requestReason = "Leave your current party before requesting to join another."
     elseif not row.inParty then result.requestReason = "No active party is known for this player."
+    elseif row.partyFull == nil then result.requestReason = "Their party capacity is unavailable."
     elseif row.partyFull then result.requestReason = "Their party or raid is full."
     else result.request = true end
     return result

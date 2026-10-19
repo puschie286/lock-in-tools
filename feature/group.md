@@ -14,6 +14,8 @@ Key fields remain readable. **Group info** provides scope, sharing limits and th
 
 [Player overview](overview.md) and [position sharing](position-sharing.md) share an automatically reconnecting data connection, separate from human chat. It remains available when chat autojoin or position sharing is off. `/lit status` shows its connection state.
 
+The connection carries extensible player status: level, XP, party availability and the position-sharing preference. Changed fields are combined into updates at most every five seconds, with full snapshots on connection or recovery. A small heartbeat after thirty seconds without a status update maintains presence without resending player details. Missed changes trigger snapshot recovery. Position updates keep their own timing.
+
 ## Limits
 
 Group keys provide shared access for trusted friends. All holders have equal authority; replace the key to remove access. Keys are stored locally, and shared messages are not encrypted or individually authenticated. Delivery is limited to the same internal realm and faction; cross-realm sharing is unsupported.
