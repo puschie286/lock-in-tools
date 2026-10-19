@@ -107,6 +107,7 @@ function addon:InitializePositions()
     if type(settings) ~= "table" then settings = {}; self.db.position = settings end
     if type(settings.sharing) ~= "boolean" then settings.sharing = false end
     if type(settings.keepLastKnown) ~= "boolean" then settings.keepLastKnown = true end
+    if type(settings.showPlayerIcons) ~= "boolean" then settings.showPlayerIcons = true end
     if type(settings.peers) ~= "table" then settings.peers = {} end
     local fingerprint = self:GetGroupFingerprint()
     if settings.groupFingerprint ~= fingerprint or not settings.keepLastKnown then settings.peers = {} end
@@ -178,6 +179,18 @@ local function CanChange(self, enabled)
     if not self.initialized or not self.positionState then return false, "Still loading. Please try again after login." end
     if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
     if type(enabled) ~= "boolean" then return false, "Choose on or off." end
+    return true
+end
+
+function addon:GetShowPlayerIcons()
+    return not self.db or type(self.db.position) ~= "table" or self.db.position.showPlayerIcons ~= false
+end
+
+function addon:SetShowPlayerIcons(enabled)
+    local allowed, message = CanChange(self, enabled)
+    if not allowed then return false, message end
+    self.db.position.showPlayerIcons = enabled
+    if self.RefreshPositionPins then self:RefreshPositionPins() end
     return true
 end
 

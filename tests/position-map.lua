@@ -19,17 +19,25 @@ local function Vector(x, y)
 end
 
 local function LoadMap()
-    local addon = { positions = {} }
-    function addon:GetSharedPositions() return self.positions end
+    local addon = {
+        positions = {}, initialized = true, positionState = {},
+        db = { position = { showPlayerIcons = true } },
+    }
     local world = {
         frames = {}, added = 0, created = 0, released = 0, rectangles = {},
         bounds = {}, secretValues = {}, worldConversions = 0, mapConversions = 0, now = 0,
+        menuModifiers = {}, menuRegistrations = 0,
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
         Mixin = Mixin,
         CreateVector2D = Vector,
         GetTime = function() return world.now end,
+        Menu = { ModifyMenu = function(tag, callback)
+            world.menuRegistrations = world.menuRegistrations + 1
+            assert(not world.menuModifiers[tag], "register each menu modifier only once")
+            world.menuModifiers[tag] = callback
+        end },
         issecretvalue = function(value) return world.secretValues[value] == true end,
         CLASS_ICON_TCOORDS = {
             WARRIOR = { 0, 0.25, 0, 0.25 },
@@ -71,9 +79,12 @@ local function LoadMap()
         end,
     }, { __index = _G })
     world.environment, world.mapAPI = environment, environment.C_Map
-    local chunk = assert(loadfile("PositionMap.lua"))
-    setfenv(chunk, environment)
-    chunk("LockInTools", addon)
+    for _, file in ipairs({ "Position.lua", "PositionMap.lua" }) do
+        local chunk = assert(loadfile(file))
+        setfenv(chunk, environment)
+        chunk("LockInTools", addon)
+    end
+    function addon:GetSharedPositions() return self.positions end
     -- Simulate a virtual template retaining its mixin table before map load.
     world.templateMixin = assert(environment.LockInToolsPositionPinMixin)
 
@@ -157,6 +168,21 @@ local function LoadMap()
             if frame.events[event] then frame.callback(frame, event, name) end
         end
     end
+    function world:openMenu(tag)
+        local root = { entries = { { kind = "native" } } }
+        function root:CreateDivider() self.entries[#self.entries + 1] = { kind = "divider" } end
+        function root:CreateTitle(text) self.entries[#self.entries + 1] = { kind = "title", text = text } end
+        function root:CreateCheckbox(text, isSelected, toggle)
+            local checkbox = { kind = "checkbox", text = text, IsSelected = isSelected, toggle = toggle }
+            function checkbox:SetEnabled(enabled) self.enabled = enabled end
+            function checkbox:Click() if self.enabled then self.toggle() end end
+            self.entries[#self.entries + 1] = checkbox
+            return checkbox
+        end
+        local modifier = self.menuModifiers[tag]
+        if modifier then modifier({}, root) end
+        return root.entries
+    end
     function world:advance(seconds)
         self.now = self.now + seconds
         if self.map and self.map:IsShown() then
@@ -178,6 +204,7 @@ addon.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
 addon:InitializePositionMap()
 addon:InitializePositionMap()
 assert(#world.frames == 1 and world.added == 0, "wait for native map without duplicate event frames")
+assert(world.menuRegistrations == 1, "register the filter once before the world map loads")
 world:fire("ADDON_LOADED", "UnrelatedAddon")
 assert(world.added == 0)
 world:loadNativeMap(false)
@@ -230,6 +257,70 @@ early.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
 early:InitializePositionMap()
 assert(earlyWorld.added == 1 and #earlyWorld.map.pins == 1 and #earlyWorld.frames == 0,
     "an already loaded world map refreshes immediately without a late-load event")
+
+local filtered, filterWorld = LoadMap()
+filterWorld:loadNativeMap(true)
+local filteredPeer = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true }
+filtered.positions.alice = filteredPeer
+filtered:InitializePositionMap()
+local menu = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")
+assert(#menu == 4 and menu[1].kind == "native" and menu[2].kind == "divider"
+    and menu[3].text == "LockInTools", "append a distinct addon section without changing native filters")
+local icons = menu[4]
+assert(icons.text == "Show player icons" and icons:IsSelected() and icons.enabled,
+    "the world-map filter reflects the default-enabled preference")
+assert(#filterWorld:openMenu("MENU_MINIMAP_TRACKING") == 1, "leave other map menus alone")
+filteredPeer.x = 0.3
+filtered:RefreshPositionPins()
+local filteredPin = filterWorld.map.pins[1]
+assert(filteredPin:GetScript("OnUpdate"), "the pin is moving before being hidden")
+icons:Click()
+assert(not filtered.db.position.showPlayerIcons and not icons:IsSelected() and #filterWorld.map.pins == 0,
+    "unchecking the filter saves the preference and hides pins immediately")
+assert(filteredPin:GetScript("OnUpdate") == nil and next(filtered.positionMapProvider.positions) == nil,
+    "hiding icons clears animated pins and cached motion")
+local createdWhileFiltered = filterWorld.created
+filteredPeer.x = 0.35
+filtered:RefreshPositionPins()
+filterWorld.map:changeMap(100)
+filterWorld.map:changeMap(101)
+filterWorld.map:show()
+assert(#filterWorld.map.pins == 0 and filterWorld.created == createdWhileFiltered
+    and filtered.positions.alice == filteredPeer, "hidden updates and map changes preserve the model without creating pins")
+menu = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")
+icons = menu[4]
+assert(#menu == 4 and not icons:IsSelected(), "reopening has one checkbox with the current preference")
+icons:Click()
+assert(filtered.db.position.showPlayerIcons and #filterWorld.map.pins == 1 and filterWorld.map.unrelatedPin,
+    "checking the filter immediately restores only addon pins")
+Near(filterWorld.map.pins[1].x, 0.35)
+assert(filterWorld.map.pins[1]:GetScript("OnUpdate") == nil, "restored pins snap to the latest received position")
+filtered.savedDataReadOnly = true
+icons = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")[4]
+assert(not icons.enabled, "newer-schema settings disable the map checkbox")
+icons:Click()
+assert(filtered:GetShowPlayerIcons() and #filterWorld.map.pins == 1, "disabled checkbox preserves read-only settings")
+filtered.savedDataReadOnly, filtered.initialized = false, false
+assert(not filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")[4].enabled, "disable the checkbox while settings are loading")
+
+local delayedMenu, delayedMenuWorld = LoadMap()
+local nativeMenu = delayedMenuWorld.environment.Menu
+delayedMenuWorld.environment.Menu = nil
+delayedMenuWorld:loadNativeMap(true)
+delayedMenu:InitializePositionMap()
+delayedMenu:InitializePositionMap()
+assert(delayedMenuWorld.added == 1 and delayedMenuWorld.menuRegistrations == 0
+    and #delayedMenuWorld.frames == 1, "missing menu APIs preserve the map provider and use one late-load listener")
+delayedMenuWorld.environment.Menu = {}
+delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
+assert(delayedMenuWorld.menuRegistrations == 0, "an unavailable menu registration function is safe")
+delayedMenuWorld.environment.Menu = nativeMenu
+delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
+assert(delayedMenuWorld.added == 1 and delayedMenuWorld.menuRegistrations == 1
+    and not delayedMenuWorld.frames[1].events.ADDON_LOADED, "late menu loading registers without duplicating the existing provider")
+delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
+delayedMenu:InitializePositionMap()
+assert(delayedMenuWorld.menuRegistrations == 1, "repeated initialization never duplicates menu entries")
 
 local presence, presenceWorld = LoadMap()
 presenceWorld:loadNativeMap(true)
@@ -672,4 +763,4 @@ Near(projectedMoving.y, 0.56)
 assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
     "projected movement ends at native map coordinates without changing the shared source data")
 
-print("PASS: native map attachment, class icons/fallbacks, presence labels/colors, projection, smooth movement and pooled pin lifecycle")
+print("PASS: native map attachment/filter, class icons/fallbacks, presence labels/colors, projection, smooth movement and pooled pin lifecycle")

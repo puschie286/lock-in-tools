@@ -91,6 +91,21 @@ local function NewMotion(peer, mapID, x, y, previous, now)
     return motion
 end
 
+local function RegisterMapFilter(self)
+    if self.positionMapFilterRegistered or not Menu or type(Menu.ModifyMenu) ~= "function" then return end
+    Menu.ModifyMenu("MENU_WORLD_MAP_TRACKING", function(_, rootDescription)
+        rootDescription:CreateDivider()
+        rootDescription:CreateTitle("LockInTools")
+        local checkbox = rootDescription:CreateCheckbox("Show player icons", function()
+            return self:GetShowPlayerIcons()
+        end, function()
+            self:SetShowPlayerIcons(not self:GetShowPlayerIcons())
+        end)
+        checkbox:SetEnabled(self.initialized and not self.savedDataReadOnly)
+    end)
+    self.positionMapFilterRegistered = true
+end
+
 function Pin:OnLoad()
     self:SetScalingLimits(1, 1, 1)
     self:SetIgnoreGlobalPinScale(true)
@@ -164,7 +179,7 @@ function Provider:RefreshAllData(fromOnShow)
     local previous = not fromOnShow and self.positions or nil
     self:RemoveAllData()
     local map = self:GetMap()
-    if not map:IsShown() then return end
+    if not map:IsShown() or not self.addon:GetShowPlayerIcons() then return end
     local mapID = map:GetMapID()
     local now = GetTime()
     for sender, peer in pairs(self.addon:GetSharedPositions()) do
@@ -184,25 +199,27 @@ function addon:RefreshPositionPins()
 end
 
 function addon:InitializePositionMap()
-    if self.positionMapProvider then return end
-    if not WorldMapFrame or not WorldMapFrame.AddDataProvider
-        or not MapCanvasDataProviderMixin or not MapCanvasPinMixin then
-        if not self.positionMapFrame then
-            self.positionMapFrame = CreateFrame("Frame")
-            self.positionMapFrame:RegisterEvent("ADDON_LOADED")
-            self.positionMapFrame:SetScript("OnEvent", function(_, _, loadedAddon)
-                if loadedAddon == "Blizzard_WorldMap" then self:InitializePositionMap() end
-            end)
-        end
-        return
+    RegisterMapFilter(self)
+    if not self.positionMapProvider and WorldMapFrame and WorldMapFrame.AddDataProvider
+        and MapCanvasDataProviderMixin and MapCanvasPinMixin then
+        -- Keep the XML mixin table stable when native map code loads later.
+        Mixin(LockInToolsPositionPinMixin, MapCanvasPinMixin, Pin)
+        local provider = CreateFromMixins(MapCanvasDataProviderMixin, Provider)
+        provider.addon = self
+        WorldMapFrame:AddDataProvider(provider)
+        self.positionMapProvider = provider
+        provider:RefreshAllData()
     end
 
-    -- Keep the XML mixin table stable when native map code loads later.
-    Mixin(LockInToolsPositionPinMixin, MapCanvasPinMixin, Pin)
-    local provider = CreateFromMixins(MapCanvasDataProviderMixin, Provider)
-    provider.addon = self
-    WorldMapFrame:AddDataProvider(provider)
-    self.positionMapProvider = provider
-    if self.positionMapFrame then self.positionMapFrame:UnregisterEvent("ADDON_LOADED") end
-    provider:RefreshAllData()
+    if self.positionMapProvider and self.positionMapFilterRegistered then
+        if self.positionMapFrame then self.positionMapFrame:UnregisterEvent("ADDON_LOADED") end
+    elseif not self.positionMapFrame then
+        self.positionMapFrame = CreateFrame("Frame")
+        self.positionMapFrame:RegisterEvent("ADDON_LOADED")
+        self.positionMapFrame:SetScript("OnEvent", function(_, _, loadedAddon)
+            if loadedAddon == "Blizzard_WorldMap" or loadedAddon == "Blizzard_Menu" then
+                self:InitializePositionMap()
+            end
+        end)
+    end
 end

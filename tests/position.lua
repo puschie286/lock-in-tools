@@ -140,11 +140,12 @@ local function fields(payload)
     return result
 end
 
--- Existing profiles gain disabled sharing and retention without changing group/schema data.
+-- Existing profiles gain disabled sharing, retention and visible icons without changing group/schema data.
 local addon, world = newAddon()
 local fingerprint = addon:GetGroupFingerprint()
 assert(addon.db.schemaVersion == 3 and addon.db.group.secret == "otter-4827")
 assert(addon.db.position.sharing == false and addon.db.position.keepLastKnown == true)
+assert(addon:GetShowPlayerIcons() == true and addon.db.position.showPlayerIcons == true)
 assert(next(addon:GetSharedPositions()) == nil)
 world:connect()
 world:advance(10)
@@ -165,6 +166,40 @@ world.x = 0.5
 world:advance(2)
 assert(#world.sent == 2 and world.sent[2].at - world.sent[1].at == 2)
 assert(tonumber(fields(world.sent[2].payload)[5]) == 0.5)
+
+-- Display preferences are saved independently, with invalid data defaulting to visible icons.
+do
+    for _, invalid in ipairs({ "false", 0, {} }) do
+        local profile = copy(addon.db)
+        profile.position.showPlayerIcons = invalid
+        local normalized = newAddon(profile)
+        assert(normalized:GetShowPlayerIcons() == true and normalized.db.position.showPlayerIcons == true)
+    end
+    local display, clock = newAddon()
+    assert(display:SetShowPlayerIcons(false))
+    local restored = newAddon(copy(display.db))
+    assert(restored:GetShowPlayerIcons() == false and restored.db.position.showPlayerIcons == false,
+        "An explicitly hidden icon preference must survive a reload")
+    local before, refreshes = copy(display.db), clock.refreshes
+    local changed, problem = display:SetShowPlayerIcons("false")
+    assert(changed == false and type(problem) == "string")
+    display.initialized = false
+    changed, problem = display:SetShowPlayerIcons(true)
+    assert(changed == false and type(problem) == "string")
+    display.initialized = true
+    local state = display.positionState
+    display.positionState = nil
+    changed, problem = display:SetShowPlayerIcons(true)
+    assert(changed == false and type(problem) == "string")
+    display.positionState, display.savedDataReadOnly = state, true
+    changed, problem = display:SetShowPlayerIcons(true)
+    assert(changed == false and type(problem) == "string")
+    assert(equal(display.db, before) and clock.refreshes == refreshes,
+        "Invalid, uninitialized and read-only changes cannot save preferences or refresh pins")
+    display.savedDataReadOnly, display.RefreshPositionPins = nil, nil
+    assert(display:SetShowPlayerIcons(true) and display:GetShowPlayerIcons() == true,
+        "The display setting remains available before the map provider is loaded")
+end
 
 -- Incoming updates use the actual sender and replace only an older valid position.
 assert(addon:ReceiveData("Friend-Test Realm", "1|position|" .. world:position(37, 0.4, 0.6)),
@@ -304,6 +339,7 @@ world:connect()
 world:login()
 addon:SetPositionSharing(true)
 addon:SetPositionRetention(false)
+assert(not addon:SetShowPlayerIcons(false))
 addon:ReceivePosition("Friend", world:position(37, 0.9, 0.1))
 world:advance(20)
 assert(equal(readOnlySaved, original), "Position initialization and setters must preserve read-only data")
@@ -527,6 +563,68 @@ end
 local function classRequest(wire)
     local id, payload = wire:match("^1|Q|position%-class|([^|]+)|(.*)$")
     return payload, id
+end
+
+-- Hiding icons keeps sampling, discovery state, incoming updates and retention running.
+do
+    local display, clock = newAddon()
+    clock.environment.UnitClass = function() return "Localized mage", "MAGE" end
+    clock:login()
+    clock:connect()
+    display:SetPositionSharing(true)
+    clock:advance(2)
+    assert(#clock.sent == 2 and classRequest(clock.sent[1].wire))
+    assert(display:ReceivePosition("Friend", classPacket(clock, "DRUID")))
+    assert(display:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
+    local state, timer = display.positionState, display.positionState.timer
+    local sentSample, sentAt = state.lastSentSample, state.lastSentAt
+    local generation, optionsRefreshes = state.generation, 0
+    function display:RefreshOptions() optionsRefreshes = optionsRefreshes + 1 end
+    local refreshes = clock.refreshes
+    assert(display:SetShowPlayerIcons(false))
+    assert(display:GetShowPlayerIcons() == false and clock.refreshes == refreshes + 1 and optionsRefreshes == 0)
+    assert(display.db.position.sharing == true and display.db.position.keepLastKnown == true
+        and display:IsDataConnected() and state.timer == timer and state.generation == generation
+        and state.lastSentSample == sentSample and state.lastSentAt == sentAt and state.lastSendSucceeded == true
+        and state.classRequestPending == false and state.classRequestAttempts == 1,
+        "Hiding icons must only refresh map pins, preserving transport, timers and send/discovery state")
+    clock:advance(2)
+    assert(#clock.sent == 2 and clock.samples == 2,
+        "Hidden icons still sample without restarting position suppression or class discovery")
+    clock.x = 0.6
+    clock:advance(2)
+    assert(#clock.sent == 3 and tonumber(fields(clock.sent[3].payload)[5]) == 0.6,
+        "Movement continues to broadcast while icons are hidden")
+    assert(display:ReceivePosition("Friend", clock:position(37, 0.4, 0.6)))
+    assert(display:ReceivePosition("Friend", classPacket(clock, "PRIEST")))
+    local peer = assert(display:GetSharedPositions()["friend-testrealm"])
+    assert(peer.x == 0.4 and peer.class == "PRIEST"
+        and display.db.position.peers["friend-testrealm"].x == 0.4
+        and display.db.position.peers["friend-testrealm"].class == "PRIEST",
+        "Hidden updates still replace runtime and retained positions and classes")
+    clock:advance(60)
+    assert(peer.online == false and display.db.position.peers["friend-testrealm"].x == 0.4,
+        "Hidden retained peers still time out without losing their last-known location")
+    local requests = 0
+    for _, packet in ipairs(clock.sent) do if classRequest(packet.wire) then requests = requests + 1 end end
+    assert(requests == 1)
+    local sent, samples = #clock.sent, clock.samples
+    timer, generation = state.timer, state.generation
+    sentSample, sentAt = state.lastSentSample, state.lastSentAt
+    assert(display:SetShowPlayerIcons(true))
+    assert(state.timer == timer and state.generation == generation and state.lastSentSample == sentSample
+        and state.lastSentAt == sentAt and state.classRequestPending == false and state.classRequestAttempts == 1
+        and display:GetSharedPositions()["friend-testrealm"] == peer,
+        "Showing icons preserves the latest peer and sampling/discovery state")
+    clock:advance(2)
+    assert(#clock.sent == sent and clock.samples == samples + 1,
+        "Showing icons does not resend an unchanged position or request classes again")
+    display:SetPositionRetention(false)
+    assert(display:ReceivePosition("Friend", clock:position(37, 0.5, 0.5)))
+    assert(display:SetShowPlayerIcons(false))
+    clock:advance(60)
+    assert(next(display:GetSharedPositions()) == nil and next(display.db.position.peers) == nil,
+        "Hidden non-retained peers expire normally")
 end
 
 -- Class discovery requests run once per connection or sharing session, without a heartbeat.
