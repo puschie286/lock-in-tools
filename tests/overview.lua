@@ -1,4 +1,5 @@
 -- Overview presence and native party-action checks without the WoW UI or a live channel.
+local loadNotifications = dofile("tests/support/notifications.lua")
 local function loadModule(file, addon, environment)
     local chunk, problem
     if setfenv then
@@ -110,6 +111,7 @@ local function newAddon(saved, readOnly, name)
         return (character .. "-" .. realm:gsub("%s", "")):lower() == (world.name .. "-TestRealm"):lower()
     end
     function addon:RefreshOverview() world.refreshes = world.refreshes + 1 end
+    world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
     function addon:GetSharedPositions()
         return self.db.position.sharing and world.positions or {}

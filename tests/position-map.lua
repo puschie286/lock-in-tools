@@ -1,4 +1,5 @@
 -- Native MapCanvas callback contracts are mocked; rendering needs in-game checks.
+local loadNotifications = dofile("tests/support/notifications.lua")
 local function Mix(...)
     local result = {}
     for index = 1, select("#", ...) do
@@ -21,7 +22,7 @@ end
 local function LoadMap(enableTrails)
     local addon = {
         positions = {}, initialized = true, positionState = {},
-        db = { position = { showPlayerIcons = true, showTrails = enableTrails == true, trailLength = 10 } },
+        db = { position = { showPlayerIcons = true, showTrails = enableTrails == true } },
     }
     local world = {
         frames = {}, added = 0, created = 0, released = 0, rectangles = {},
@@ -79,6 +80,7 @@ local function LoadMap(enableTrails)
         end,
     }, { __index = _G })
     world.environment, world.mapAPI = environment, environment.C_Map
+    world.notificationErrors = loadNotifications(addon, environment)
     for _, file in ipairs({ "Position.lua", "PositionMap.lua" }) do
         local chunk = assert(loadfile(file))
         setfenv(chunk, environment)
@@ -847,8 +849,9 @@ local function AdvanceFrames(testWorld, seconds)
     for _ = 1, seconds * 4 do testWorld:advance(0.25) end
 end
 
-local function MovingTrail()
+local function MovingTrail(legacyLength)
     local testAddon, testWorld = LoadMap(true)
+    testAddon.db.position.trailLength = legacyLength
     testWorld:loadNativeMap(true)
     local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
     testAddon.positions.alice = peer
@@ -901,30 +904,50 @@ assert(#VisibleTrailLines(trailWorld) == 0 and trailPin:GetScript("OnUpdate") ==
 Near(trailPin.x, 0.24)
 Near(trailPin.y, 0.46)
 
-local lengths, lengthWorld, lengthPeer, lengthPin = MovingTrail()
-AdvanceFrames(lengthWorld, 3)
-assert(#VisibleTrailLines(lengthWorld) > 0, "the default ten-second history remains after a short stop")
-assert(lengths:SetPositionTrailSettings(true, 1))
-assert(#VisibleTrailLines(lengthWorld) == 0 and lengthPin:GetScript("OnUpdate") == nil,
-    "shortening the trail immediately removes history older than the selected length")
-lengthPeer.x = 0.28
-lengths:RefreshPositionPins()
-AdvanceFrames(lengthWorld, 0.5)
-assert(#VisibleTrailLines(lengthWorld) > 0)
-assert(lengths:SetPositionTrailSettings(false, 10))
-lengthPin = FindPin(lengthWorld, lengthPeer.name)
-local afterDisable = lengthPin.x
-assert(#VisibleTrailLines(lengthWorld) == 0 and lengthPin:GetScript("OnUpdate"),
+for _, legacyLength in ipairs({ 1, 30, "invalid", {} }) do
+    local fixed, fixedWorld, fixedPeer, fixedPin = MovingTrail(legacyLength)
+    Near(TrailAlpha(VisibleTrailLines(fixedWorld)[1]), 0.65 * 0.9)
+    AdvanceFrames(fixedWorld, 8.75)
+    assert(HasTrailEndpoint(fixedWorld, 0.2, 0.4), "history remains visible until ten seconds old")
+    AdvanceFrames(fixedWorld, 0.25)
+    assert(not HasTrailEndpoint(fixedWorld, 0.2, 0.4) and #VisibleTrailLines(fixedWorld) > 0,
+        "points expire at ten seconds, regardless of obsolete saved lengths")
+    AdvanceFrames(fixedWorld, 1.5)
+    assert(#VisibleTrailLines(fixedWorld) == 0 and fixedPin:GetScript("OnUpdate") == nil,
+        "fixed-duration history expires completely after movement stops")
+    assert(fixed.db.position.trailLength == legacyLength, "rendering never changes obsolete saved lengths")
+    Near(fixedPin.x, fixedPeer.x)
+    Near(fixedPin.y, fixedPeer.y)
+end
+
+local visibility, visibilityWorld, visibilityPeer, visibilityPin = MovingTrail()
+AdvanceFrames(visibilityWorld, 3)
+assert(#VisibleTrailLines(visibilityWorld) > 0, "the ten-second history remains after a short stop")
+visibilityPeer.x = 0.28
+visibility:RefreshPositionPins()
+AdvanceFrames(visibilityWorld, 0.5)
+assert(#VisibleTrailLines(visibilityWorld) > 0)
+assert(visibility:SetShowPositionTrails(false))
+visibilityPin = FindPin(visibilityWorld, visibilityPeer.name)
+local afterDisable = visibilityPin.x
+assert(#VisibleTrailLines(visibilityWorld) == 0 and visibilityPin:GetScript("OnUpdate"),
     "disabling trails immediately hides lines while preserving active interpolation")
-AdvanceFrames(lengthWorld, 0.5)
-assert(lengthPin.x > afterDisable and #VisibleTrailLines(lengthWorld) == 0,
+AdvanceFrames(visibilityWorld, 0.5)
+assert(visibilityPin.x > afterDisable and #VisibleTrailLines(visibilityWorld) == 0,
     "disabled trails never affect the original two-second pin movement")
-local displayAtEnable = lengthPin.x
-assert(lengths:SetPositionTrailSettings(true, 10))
-assert(#VisibleTrailLines(lengthWorld) == 0, "enabling a trail starts without resurrecting disabled history")
-AdvanceFrames(lengthWorld, 0.5)
-assert(#VisibleTrailLines(lengthWorld) > 0 and HasTrailEndpoint(lengthWorld, displayAtEnable, lengthPin.y),
+local displayAtEnable = visibilityPin.x
+assert(visibility:SetShowPositionTrails(true))
+assert(#VisibleTrailLines(visibilityWorld) == 0, "enabling a trail starts without resurrecting disabled history")
+AdvanceFrames(visibilityWorld, 0.5)
+assert(#VisibleTrailLines(visibilityWorld) > 0 and HasTrailEndpoint(visibilityWorld, displayAtEnable, visibilityPin.y),
     "newly enabled trails start at the displayed position and record subsequent movement")
+AdvanceFrames(visibilityWorld, 9.25)
+assert(HasTrailEndpoint(visibilityWorld, displayAtEnable, visibilityPin.y))
+AdvanceFrames(visibilityWorld, 0.25)
+assert(not HasTrailEndpoint(visibilityWorld, displayAtEnable, visibilityPin.y),
+    "toggling trails preserves their fixed ten-second point lifetime")
+AdvanceFrames(visibilityWorld, 0.5)
+assert(#VisibleTrailLines(visibilityWorld) == 0 and visibilityPin:GetScript("OnUpdate") == nil)
 
 local sized, sizeWorld, sizePeer, sizePin = MovingTrail()
 sizeWorld.map.canvas.width, sizeWorld.map.canvas.height, sizeWorld.map.scale = 1600, 900, 2
@@ -1010,9 +1033,9 @@ end
 local toggled, toggleWorld, togglePeer = MovingTrail()
 local pooledLineCount = #toggleWorld.lines
 for toggle = 1, 12 do
-    assert(toggled:SetPositionTrailSettings(false, 10))
+    assert(toggled:SetShowPositionTrails(false))
     assert(#VisibleTrailLines(toggleWorld) == 0)
-    assert(toggled:SetPositionTrailSettings(true, 10))
+    assert(toggled:SetShowPositionTrails(true))
     togglePeer.x = toggle % 2 == 0 and 0.24 or 0.26
     toggled:RefreshPositionPins()
     AdvanceFrames(toggleWorld, 1)
@@ -1041,7 +1064,6 @@ Near(projectedTrailPeer.x, 0.29)
 Near(projectedTrailPeer.y, 0.56)
 
 local bounded, boundedWorld, boundedPeer = MovingTrail()
-assert(bounded:SetPositionTrailSettings(true, 30))
 for sample = 1, 120 do
     boundedPeer.x = 0.24 + (sample % 20) * 0.002
     bounded:RefreshPositionPins()
@@ -1051,9 +1073,9 @@ for sample = 1, 120 do
     assert(#VisibleTrailLines(boundedWorld) <= 64 and #boundedWorld.lines <= 64,
         "long journeys bound native line allocation and reuse the existing pool")
 end
-AdvanceFrames(boundedWorld, 31)
+AdvanceFrames(boundedWorld, 10)
 assert(#VisibleTrailLines(boundedWorld) == 0 and FindPin(boundedWorld, boundedPeer.name):GetScript("OnUpdate") == nil,
-    "maximum-length trails expire even after a long journey")
+    "ten-second trails expire even after a long journey")
 
 for _, unavailable in ipairs({ "canvas", "CreateLine" }) do
     local fallback, fallbackWorld = LoadMap(true)

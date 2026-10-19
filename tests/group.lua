@@ -1,4 +1,5 @@
 -- Published known-answer vectors exercise algorithms independently of addon logic.
+local loadNotifications = dofile("tests/support/notifications.lua")
 local function loadModule(file, addon, environment)
     local chunk, problem
     if setfenv then
@@ -16,6 +17,7 @@ local function newAddon(saved)
     -- Use the exact-integer fallback even if the test interpreter has bit32.
     local environment = setmetatable({ bit = false, bit32 = false }, { __index = _G })
     local addon = { db = saved or { group = { secret = "" } }, initialized = true }
+    loadNotifications(addon, environment)
     addon.changes, addon.refreshes = {}, 0
     function addon:OnGroupChanged(oldChannel)
         self.changes[#self.changes + 1] = { oldChannel = oldChannel, newChannel = self:GetGroupChannelName() }

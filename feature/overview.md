@@ -20,7 +20,7 @@ The roster is a list of locally discovered characters, not every key holder. Dis
 
 ## In-game checks
 
-- Open Overview directly, switch to Settings and back to Content, and check that Settings retains its selected page and only one window is visible.
+- Open Overview directly, switch to Settings and back to Content in the same window, and check that Settings retains its selected page and the window stays in place.
 - With two clients sharing a key, check discovery, XP gains and party actions while chat and position sharing are off. Check level-up resets, exact-XP tooltips, zero/unknown/MAX states and both interface themes. Then enable positions and check region names without coordinates or ages.
 - Stay at unchanged XP, then reconnect or reload; check that heartbeats keep players **Active**, loss of contact shows an elapsed time and retained progress, and reconnecting refreshes the snapshot. Delivery, level-cap detection and rendering require in-game validation.
 - With more than eight players, check wheel and scrollbar navigation, fixed headers and both sort directions. Check retained inactive players after reload and roster clearing after a group change.

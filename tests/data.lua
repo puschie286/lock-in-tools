@@ -1,4 +1,5 @@
 -- Shared feature routing and the native channel lifecycle run against mocked WoW APIs.
+local loadNotifications = dofile("tests/support/notifications.lua")
 local function loadModule(file, addon, environment)
     local chunk, problem
     if setfenv then
@@ -118,6 +119,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         initialized = true, ready = false, savedDataReadOnly = readOnly,
     }
     function addon:Print(message) world.messages[#world.messages + 1] = message end
+    world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
     function addon:RefreshPositionPins() end
     for _, file in ipairs({ "Crypto.lua", "Group.lua", "Data.lua" }) do

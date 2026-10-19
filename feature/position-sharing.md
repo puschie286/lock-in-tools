@@ -8,9 +8,9 @@ Open `/lit options` → **Shared positions** and enable sharing on each client. 
 
 - **Keep last-known positions** starts enabled and retains locations across reloads and characters. Disabling sharing hides pins and stops position exchange; changing or leaving the group clears retained locations.
 - **Show player icons**, under **LockInTools** in the world map filter, hides pins and names while sharing continues.
-- **Show movement trails** adds fading paths behind moving pins. Trails start enabled at 10 seconds, adjustable from 1–30 seconds. Trail paths are temporary and are not saved or transmitted.
+- **Show movement trails** adds fading paths behind moving pins. Trails start enabled and fade over a fixed 10 seconds. Trail paths are temporary and are not saved or transmitted.
 
-These preferences save account-wide and apply immediately. Checkbox labels are clickable; tooltips explain each setting and provide full connection details. Trail length remains editable while trails are off.
+These preferences save account-wide and apply immediately. Checkbox labels are clickable; tooltips explain each setting and provide full connection details.
 
 ## Connection and limits
 
@@ -20,5 +20,5 @@ Friends must share an internal realm and faction. Cross-realm delivery and whisp
 
 ## In-game checks
 
-- With two clients, check moving pins, class icons, trails, map filtering and stale/retained locations, including after reload and zone changes. Check checkbox labels, trail input and help tooltips at different UI scales.
+- With two clients, check moving pins, class icons, trails fading after 10 seconds, trail visibility, map filtering and stale/retained locations, including after reload and zone changes. Check checkbox labels and help tooltips at different UI scales.
 - Check recovery after a connection loss and cleanup after switching groups. Map rendering, recovery and larger-group performance still require in-game validation.

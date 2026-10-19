@@ -2,6 +2,7 @@ local _, addon = ...
 local PIN_TEMPLATE = "LockInToolsPositionPinTemplate"
 local CLASS_TEXTURE = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES"
 local INTERPOLATION_SECONDS, MAX_INTERPOLATION_DISTANCE = 2, 0.1
+local TRAIL_SECONDS = 10
 local TRAIL_SAMPLE_SECONDS, TRAIL_DRAW_SECONDS, MAX_TRAIL_POINTS = 0.5, 0.05, 64
 local Provider, Pin = {}, {}
 LockInToolsPositionPinMixin = {}
@@ -127,7 +128,7 @@ function Pin:UpdateTrail(x, y, now)
         headChanged = true
         if now - trail.lastSampleAt >= TRAIL_SAMPLE_SECONDS then AppendTrailPoint(trail, trail.head) end
     end
-    local cutoff = now - self.trailLength
+    local cutoff = now - TRAIL_SECONDS
     while trail.points[1] and trail.points[1].at <= cutoff do table.remove(trail.points, 1) end
     local head, points = trail.head, trail.points
     local last = points[#points]
@@ -160,7 +161,7 @@ function Pin:UpdateTrail(x, y, now)
             self.trailLines[used] = line
         end
         line:SetColorTexture(0.1, 0.8, 1, 1)
-        line:SetAlpha(0.65 * math.max(0, 1 - (now - a.at) / self.trailLength))
+        line:SetAlpha(0.65 * math.max(0, 1 - (now - a.at) / TRAIL_SECONDS))
         line:SetThickness(2 / scale)
         line:ClearAllPoints()
         line:SetStartPoint("TOPLEFT", canvas, a.x * width, -a.y * height)
@@ -196,7 +197,7 @@ function Pin:OnLoad()
     self:UseFrameLevelType("PIN_FRAME_LEVEL_GROUP_MEMBER")
 end
 
-function Pin:OnAcquired(name, x, y, online, class, motion, trailMap, trailCanvas, trailLength)
+function Pin:OnAcquired(name, x, y, online, class, motion, trailMap, trailCanvas)
     self.playerName = name
     self.online = online
     -- Native pins are pooled, so reset every texture property before reuse.
@@ -231,7 +232,7 @@ function Pin:OnAcquired(name, x, y, online, class, motion, trailMap, trailCanvas
         self.trailLines = {}
         self.trailLineCanvas = trailCanvas
     end
-    self.trailMap, self.trailCanvas, self.trailLength = trailMap, trailCanvas, trailLength
+    self.trailMap, self.trailCanvas = trailMap, trailCanvas
     self.lastTrailDraw = nil
     if motion then
         self:SetScript("OnUpdate", self.OnUpdate)
@@ -253,7 +254,7 @@ function Pin:OnReleased()
     self:SetScript("OnUpdate", nil)
     HideTrailLines(self)
     self.motion = nil
-    self.trailMap, self.trailCanvas, self.trailLength, self.lastTrailDraw = nil, nil, nil, nil
+    self.trailMap, self.trailCanvas, self.lastTrailDraw = nil, nil, nil
     self.playerName = nil
     self.online = nil
     self.Label:SetText("")
@@ -276,8 +277,7 @@ function Provider:RefreshAllData(fromOnShow)
     local map = self:GetMap()
     if not map:IsShown() or not self.addon:GetShowPlayerIcons() then return end
     local mapID = map:GetMapID()
-    local showTrails, trailLength = self.addon:GetPositionTrailSettings()
-    local canvas = showTrails and map.GetCanvas and map:GetCanvas()
+    local canvas = self.addon:GetShowPositionTrails() and map.GetCanvas and map:GetCanvas()
     if not canvas or not canvas.CreateLine then canvas = nil end
     local now = GetTime()
     for sender, peer in pairs(self.addon:GetSharedPositions()) do
@@ -291,7 +291,7 @@ function Provider:RefreshAllData(fromOnShow)
                     motion.trail = nil
                 end
                 self.positions[sender] = motion
-                map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, peer.class, motion, map, canvas, trailLength)
+                map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, peer.class, motion, map, canvas)
             end
         end
     end

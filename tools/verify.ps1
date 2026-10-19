@@ -36,11 +36,12 @@ try {
     [xml](Get-Content -LiteralPath (Join-Path $repositoryRoot 'PositionPins.xml') -Raw) | Out-Null
     Write-Host 'PASS: position pin XML syntax'
 
-    foreach ($suite in @('tests/group.lua', 'tests/smoke.lua', 'tests/data.lua', 'tests/position.lua', 'tests/position-map.lua', 'tests/overview.lua')) {
-        Write-Host "Running $suite..."
-        & $luaExecutable $suite
+    $suites = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File | Sort-Object Name
+    foreach ($suite in $suites) {
+        Write-Host "Running tests/$($suite.Name)..."
+        & $luaExecutable $suite.FullName
         if ($LASTEXITCODE -ne 0) {
-            throw "Test suite failed: $suite (exit $LASTEXITCODE)"
+            throw "Test suite failed: $($suite.Name) (exit $LASTEXITCODE)"
         }
     }
     Write-Host 'PASS: all offline checks'

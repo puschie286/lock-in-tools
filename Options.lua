@@ -4,8 +4,6 @@ local WINDOW_POINTS = {
     TOPLEFT = true, TOP = true, TOPRIGHT = true, LEFT = true, CENTER = true, RIGHT = true,
     BOTTOMLEFT = true, BOTTOM = true, BOTTOMRIGHT = true,
 }
-local positionFrame
-
 local function ValidWindowPosition(position)
     local function ValidOffset(value)
         return type(value) == "number" and value == value and math.abs(value) <= 100000
@@ -15,9 +13,9 @@ local function ValidWindowPosition(position)
         and ValidOffset(position.x) and ValidOffset(position.y)
 end
 
-function addon:SaveWindowPosition(panel)
-    panel = panel or self.activePanel
-    if not panel or panel ~= self.activePanel then return end
+function addon:SaveWindowPosition()
+    local panel = self.mainPanel
+    if not panel then return end
     panel:StopMovingOrSizing()
     panel:SetUserPlaced(false)
     if not self.initialized or self.savedDataReadOnly then return end
@@ -32,13 +30,11 @@ end
 
 local function TrackWindowPosition(panel)
     panel:SetUserPlaced(false)
-    panel:HookScript("OnDragStop", function() addon:SaveWindowPosition(panel) end)
-    panel:HookScript("OnHide", function() addon:SaveWindowPosition(panel) end)
-    if not positionFrame then
-        positionFrame = CreateFrame("Frame")
-        positionFrame:RegisterEvent("PLAYER_LOGOUT")
-        positionFrame:SetScript("OnEvent", function() addon:SaveWindowPosition() end)
-    end
+    panel:HookScript("OnDragStop", function() addon:SaveWindowPosition() end)
+    panel:HookScript("OnHide", function() addon:SaveWindowPosition() end)
+    local frame = CreateFrame("Frame")
+    frame:RegisterEvent("PLAYER_LOGOUT")
+    frame:SetScript("OnEvent", function() addon:SaveWindowPosition() end)
 end
 
 local function SetFeedback(panel, message, isError)
@@ -96,27 +92,40 @@ local function RefreshKeyAction(panel)
     panel.applyGroup:SetEnabled(editable and hasDraft)
 end
 
-local function ShowPanel(panel)
-    local previous = addon.activePanel
-    UI:Fit(panel)
-    if previous and previous ~= panel then
-        previous:StopMovingOrSizing()
-        local point, relativeTo, relativePoint, x, y = previous:GetPoint()
-        panel:ClearAllPoints()
-        panel:SetPoint(point, relativeTo, relativePoint, x, y)
-        previous:Hide()
-    elseif not previous then
+local function CreateView()
+    local window = addon.mainPanel
+    if not window then
+        window = UI:Window("LockInToolsWindow", 720, 550)
+        addon.mainPanel = window
         local position = addon.db.windowPosition
-        panel:ClearAllPoints()
         if ValidWindowPosition(position) then
-            panel:SetPoint(position.point, UIParent, position.relativePoint, position.x, position.y)
+            window:ClearAllPoints()
+            window:SetPoint(position.point, UIParent, position.relativePoint, position.x, position.y)
         else
-            panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            window:ClearAllPoints()
+            window:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         end
+        TrackWindowPosition(window)
+        window:SetScript("OnShow", function() UI:Fit(window) end)
+        tinsert(UISpecialFrames, "LockInToolsWindow")
     end
-    addon.activePanel = panel
+    local panel = CreateFrame("Frame", nil, window)
+    panel.themeOwner = window
+    panel:SetAllPoints(window)
+    panel:Hide()
+    return panel
+end
+
+local function ShowPanel(panel)
+    local window = addon.mainPanel
+    if window.currentView then addon:SaveWindowPosition() end
+    if window.currentView and window.currentView ~= panel then window.currentView:Hide() end
+    window.currentView = panel
+    window.TitleText:SetText(panel == addon.optionsPanel and "LockInTools - Settings" or "LockInTools")
+    UI:Fit(window)
     panel:Show()
-    panel:Raise()
+    window:Show()
+    window:Raise()
 end
 
 local function ResetConfirmation(panel)
@@ -178,26 +187,8 @@ local function BindPreference(panel, checkbox, getter, setter)
     end)
 end
 
-local function ApplyTrailLength(panel, finish)
-    if not panel.trailLengthEdited then return end
-    local enabled, savedLength = addon:GetPositionTrailSettings()
-    local length = tonumber(panel.positionTrailLength:GetText())
-    local success, message = true
-    if length ~= savedLength then
-        success, message = addon:SetPositionTrailSettings(enabled, length)
-    end
-    if finish then
-        panel.trailLengthEdited = nil
-        local _, currentLength = addon:GetPositionTrailSettings()
-        panel.positionTrailLength:SetText(tostring(currentLength))
-    end
-    SetFeedback(panel, success and "" or (message or "Unable to change the trail length."), not success)
-    addon:RefreshOptions()
-end
-
 local function CreateOptionsPanel()
-    local panel = UI:Window("LockInToolsOptions", 720, 550)
-    panel.TitleText:SetText("LockInTools - Settings")
+    local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
     local group = UI:Section(panel, 20, 116, 680, 414, "Your group")
     panel.pages.group = group
@@ -408,40 +399,13 @@ local function CreateOptionsPanel()
     panel.positionTrails = UI:Checkbox(position)
     panel.positionTrails:SetPoint("TOPLEFT", 12, -166)
     panel.positionTrails:SetSize(28, 28)
-    BindPreference(panel, panel.positionTrails, function() return addon:GetPositionTrailSettings() end,
-        function(self, enabled)
-            local _, length = self:GetPositionTrailSettings()
-            return self:SetPositionTrailSettings(enabled, length)
-        end)
+    BindPreference(panel, panel.positionTrails, function() return addon:GetShowPositionTrails() end,
+        addon.SetShowPositionTrails)
     PreferenceLabel(position, panel.positionTrails, "Show movement trails",
-        "Draw fading paths behind moving players. Trails are temporary, shown only on your map, and are not saved or shared.")
-
-    local trailLengthLabel = UI:Label(position, "Trail length", 13, "muted")
-    trailLengthLabel:SetPoint("TOPLEFT", 42, -216)
-    panel.positionTrailLength = UI:EditBox(position)
-    panel.positionTrailLength:SetPoint("TOPLEFT", 166, -206)
-    panel.positionTrailLength:SetSize(84, 32)
-    panel.positionTrailLength:SetAutoFocus(false)
-    panel.positionTrailLength:SetNumeric(true)
-    panel.positionTrailLength:SetScript("OnEscapePressed", function(editBox) editBox:ClearFocus() end)
-    panel.positionTrailLength:SetScript("OnEnterPressed", function(editBox)
-        ApplyTrailLength(panel, true)
-        editBox:ClearFocus()
-    end)
-    panel.positionTrailLength:SetScript("OnEditFocusLost", function() ApplyTrailLength(panel, true) end)
-    panel.positionTrailLength:SetScript("OnTextChanged", function(_, userInput)
-        if userInput then
-            panel.trailLengthEdited = true
-            ApplyTrailLength(panel, false)
-        end
-    end)
-    OptionTooltip(position, panel.positionTrailLength, "Trail length",
-        "How long movement trails remain visible. Enter a whole number from 1 to 30 seconds. You can set this while trails are off.")
-    local trailLengthHint = UI:Label(position, "seconds (1–30)", 12, "muted")
-    trailLengthHint:SetPoint("LEFT", panel.positionTrailLength, "RIGHT", 12, 0)
+        "Draw fading paths behind moving players for 10 seconds. Trails are temporary, shown only on your map, and are not saved or shared.")
 
     panel.positionStatusHelp = CreateFrame("Frame", nil, position)
-    panel.positionStatusHelp:SetPoint("TOPLEFT", 16, -266)
+    panel.positionStatusHelp:SetPoint("TOPLEFT", 16, -214)
     panel.positionStatusHelp:SetSize(648, 36)
     panel.positionStatusHelp:EnableMouse(true)
     panel.positionStatus = UI:Label(position, "", 12, "muted")
@@ -464,9 +428,6 @@ local function CreateOptionsPanel()
         if panel.selectedTab == name then return end
         if panel.selectedTab == "group" then
             ClearGroupKeys(panel)
-        elseif panel.selectedTab == "position" then
-            ApplyTrailLength(panel, true)
-            panel.positionTrailLength:ClearFocus()
         end
         panel.selectedTab = name
         panel.feedback = panel.pages[name].feedback
@@ -499,31 +460,22 @@ local function CreateOptionsPanel()
     panel.content:SetScript("OnClick", function() addon:OpenContent() end)
 
     panel:SetScript("OnShow", function()
-        UI:Fit(panel)
         ResetConfirmation(panel)
         ClearKeyDraft(panel)
         group.showingKeys = panel.selectedTab == "group"
         panel.autoJoin:SetChecked(addon.db.chat.autoJoin)
         panel.positionSharing:SetChecked(addon.db.position.sharing)
         panel.positionRetention:SetChecked(addon.db.position.keepLastKnown)
-        local showTrails, trailLength = addon:GetPositionTrailSettings()
-        panel.positionTrails:SetChecked(showTrails)
-        panel.trailLengthEdited = nil
-        panel.positionTrailLength:SetText(tostring(trailLength))
+        panel.positionTrails:SetChecked(addon:GetShowPositionTrails())
         SetFeedback(panel)
         addon:RefreshOptions()
     end)
     panel:SetScript("OnHide", function()
         for _, page in pairs(panel.pages) do HidePageTooltips(page) end
         ClearGroupKeys(panel)
-        ApplyTrailLength(panel, true)
-        panel.positionTrailLength:ClearFocus()
-        panel:StopMovingOrSizing()
     end)
 
-    tinsert(UISpecialFrames, "LockInToolsOptions")
-    TrackWindowPosition(panel)
-    UI:Finish(panel)
+    UI:Finish(addon.mainPanel)
     return panel
 end
 
@@ -546,7 +498,7 @@ function addon:RefreshOptions()
     panel.ownSecret:SetEnabled(secret ~= "")
     panel.selectKey:SetEnabled(secret ~= "")
 
-    -- Status events must preserve the group key and trail-length text being edited.
+    -- Status events must preserve the group key being edited.
     local editable = not self.savedDataReadOnly
     panel.secret:SetEnabled(editable)
     RefreshKeyAction(panel)
@@ -556,7 +508,6 @@ function addon:RefreshOptions()
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
     panel.positionTrails:SetEnabled(editable)
-    panel.positionTrailLength:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup)
     panel.leave:SetEnabled(self.ready and hasGroup)
     if not editable then
@@ -574,7 +525,6 @@ function addon:OpenOptions(category)
         return
     end
 
-    if self.contentPanel then self.contentPanel:Hide() end
     if not self.optionsPanel then
         self.optionsPanel = CreateOptionsPanel()
     end
@@ -584,8 +534,7 @@ function addon:OpenOptions(category)
 end
 
 local function CreateContentPanel()
-    local panel = UI:Window("LockInToolsContent", 720, 550)
-    panel.TitleText:SetText("LockInTools")
+    local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
     panel.selectedTab = "overview"
     addon:CreateOverviewPage(panel)
@@ -605,18 +554,14 @@ local function CreateContentPanel()
     panel.options:SetScript("OnClick", function() addon:OpenOptions() end)
 
     panel:SetScript("OnShow", function()
-        UI:Fit(panel)
         SetFeedback(panel)
         addon:RefreshContent()
         panel.overviewPage:Activate()
     end)
     panel:SetScript("OnHide", function()
         panel.overviewPage:Deactivate()
-        panel:StopMovingOrSizing()
     end)
-    tinsert(UISpecialFrames, "LockInToolsContent")
-    TrackWindowPosition(panel)
-    UI:Finish(panel)
+    UI:Finish(addon.mainPanel)
     return panel
 end
 
@@ -637,7 +582,6 @@ function addon:OpenContent()
         return
     end
 
-    if self.optionsPanel then self.optionsPanel:Hide() end
     local problem
     if not self:HasGroup() and not self.invalidGroupSecret and not self.savedDataReadOnly then
         local key

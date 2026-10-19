@@ -111,7 +111,6 @@ function addon:InitializePositions()
     if type(settings.keepLastKnown) ~= "boolean" then settings.keepLastKnown = true end
     if type(settings.showPlayerIcons) ~= "boolean" then settings.showPlayerIcons = true end
     if type(settings.showTrails) ~= "boolean" then settings.showTrails = true end
-    if not Number(settings.trailLength, 1, 30, true) then settings.trailLength = 10 end
     if type(settings.peers) ~= "table" then settings.peers = {} end
     local fingerprint = self:GetGroupFingerprint()
     if settings.groupFingerprint ~= fingerprint or not settings.keepLastKnown then settings.peers = {} end
@@ -201,20 +200,17 @@ function addon:SetShowPlayerIcons(enabled)
     return true
 end
 
-function addon:GetPositionTrailSettings()
+function addon:GetShowPositionTrails()
     local settings = type(self.db) == "table" and self.db.position
-    if type(settings) ~= "table" then return true, 10 end
-    local length = Number(settings.trailLength, 1, 30, true) and settings.trailLength or 10
-    local enabled = IsSecret(settings.showTrails) or type(settings.showTrails) ~= "boolean" or settings.showTrails
-    return enabled, length
+    if type(settings) ~= "table" then return true end
+    return IsSecret(settings.showTrails) or type(settings.showTrails) ~= "boolean" or settings.showTrails
 end
 
-function addon:SetPositionTrailSettings(enabled, length)
+function addon:SetShowPositionTrails(enabled)
     local allowed, message = CanChange(self, enabled)
     if not allowed then return false, message end
     if IsSecret(enabled) then return false, "Choose on or off." end
-    if not Number(length, 1, 30, true) then return false, "Choose a whole trail length from 1 to 30 seconds." end
-    self.db.position.showTrails, self.db.position.trailLength = enabled, length
+    self.db.position.showTrails = enabled
     Refresh(self)
     return true
 end
