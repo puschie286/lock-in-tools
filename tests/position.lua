@@ -29,7 +29,7 @@ end
 
 local function newAddon(saved, readOnly)
     local world = {
-        now = 0, epoch = 2000000000, timers = {}, messages = {},
+        now = 0, epoch = 2000000000, timers = {}, messages = {}, name = "Self",
         map = 37, x = 0.25, y = 0.75, samples = 0, refreshes = 0, sent = {},
     }
     local function timer(delay, callback, repeating)
@@ -48,8 +48,8 @@ local function newAddon(saved, readOnly)
         },
         GetTime = function() return world.now end,
         GetServerTime = function() return world.epoch + math.floor(world.now) end,
-        UnitFullName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
-        UnitName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
+        UnitFullName = function(unit) assert(unit == "player"); return world.name, "Test Realm" end,
+        UnitName = function(unit) assert(unit == "player"); return world.name, "Test Realm" end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         GetRealmName = function() return "Test Realm" end,
         IsLoggedIn = function() return true end,
@@ -126,8 +126,8 @@ local function newAddon(saved, readOnly)
     function world:connect()
         addon:SetDataTransport(function(prefix, wire)
             assert(prefix == addon:GetDataPrefix())
-            local payload = assert(wire:match("^1|position|(.*)$"), "Positions use the shared data envelope")
-            self.sent[#self.sent + 1] = { at = self.now, payload = payload }
+            local payload = wire:match("^1|position|(.*)$")
+            self.sent[#self.sent + 1] = { at = self.now, wire = wire, payload = payload }
             return true
         end)
     end
@@ -518,6 +518,338 @@ do
     assert(regional:ReceivePosition("Another", clock:position(37, 0.6, 0.4)),
         "An unreadable native name must safely fall back to legacy self detection")
     assert(not regional:ReceivePosition("Dar-Mara", clock:position(37, 0.3, 0.7)))
+end
+
+local function classPacket(clock, class, stamp)
+    return "1|C|" .. tostring(stamp or clock.epoch + math.floor(clock.now)) .. "|" .. class
+end
+
+local function classRequest(wire)
+    local id, payload = wire:match("^1|Q|position%-class|([^|]+)|(.*)$")
+    return payload, id
+end
+
+-- Class discovery requests run once per connection or sharing session, without a heartbeat.
+do
+    local classes, clock = newAddon()
+    clock.environment.UnitClass = function(unit) assert(unit == "player"); return "Localized mage", "MAGE" end
+    clock:login()
+    clock:connect()
+    classes:SetPositionSharing(true)
+    local class = fields(assert(classRequest(clock.sent[1].wire)))
+    assert(#clock.sent == 1 and #class == 4 and class[1] == "1" and class[2] == "C"
+        and class[4] == "MAGE", "Enabling sharing immediately requests classes and supplies our own class")
+    clock:advance(2)
+    local position = fields(clock.sent[2].payload)
+    assert(#clock.sent == 2 and #position == 6 and position[2] == "P",
+        "Class requests leave the legacy position packet unchanged")
+    clock:advance(15)
+    assert(#clock.sent == 2)
+    clock:advance(1)
+    assert(#clock.sent == 3 and clock.sent[3].at - clock.sent[2].at == 16
+        and fields(clock.sent[3].payload)[2] == "P", "Only position data has an idle heartbeat")
+    for _ = 1, 8 do
+        clock.x = clock.x + 0.01
+        clock:advance(2)
+    end
+    local requests = 0
+    for _, sent in ipairs(clock.sent) do
+        if classRequest(sent.wire) then requests = requests + 1
+        else assert(fields(sent.payload)[2] ~= "C", "No periodic standalone class broadcasts") end
+    end
+    assert(requests == 1, "Movement and idle time never repeat an accepted class request")
+    for _, reset in ipairs({
+        function() clock:connect() end,
+        function() classes:SetPositionSharing(false); classes:SetPositionSharing(true) end,
+        function() classes:SetGroupSecret("class-tests-next-group"); clock:connect() end,
+    }) do
+        local before = #clock.sent
+        reset()
+        assert(#clock.sent == before + 1 and classRequest(clock.sent[#clock.sent].wire),
+            "Connection, sharing and group resets immediately begin a fresh discovery")
+        clock:advance(2)
+        assert(#clock.sent == before + 2 and fields(clock.sent[#clock.sent].payload)[2] == "P")
+    end
+    local savedClasses = copy(classes.db)
+    local reloaded, reloadClock = newAddon(savedClasses)
+    reloadClock.environment.UnitClass = function() return "Localized mage", "MAGE" end
+    reloadClock:connect()
+    assert(#reloadClock.sent == 0, "A connected transport cannot request classes before login")
+    reloadClock:login()
+    assert(#reloadClock.sent == 1 and classRequest(reloadClock.sent[1].wire),
+        "Login requests classes when sharing and a connection were already restored")
+end
+
+-- Failed native requests retry briefly and independently of successful position delivery.
+do
+    local classes, clock = newAddon()
+    local acceptClass, attempts = false, {}
+    clock.environment.UnitClass = function() return "Localized class", "MAGE" end
+    classes:SetDataTransport(function(_, wire)
+        attempts[#attempts + 1] = wire
+        return not classRequest(wire) or acceptClass
+    end)
+    clock:login()
+    classes:SetPositionSharing(true)
+    assert(#attempts == 1 and classRequest(attempts[1]))
+    acceptClass = true
+    clock:advance(2)
+    assert(#attempts == 3 and attempts[2]:match("^1|position|1|P|")
+        and classRequest(attempts[3]), "Failed requests retry on the next two-second tick")
+    assert(not classes:GetPositionStatusText():find("unavailable", 1, true),
+        "An optional class request failure does not report position delivery as failed")
+    clock:advance(14)
+    assert(#attempts == 3, "An accepted request stops retrying")
+    clock:advance(2)
+    assert(#attempts == 4 and attempts[4]:match("^1|position|1|P|"))
+
+    acceptClass = false
+    classes:SetPositionSharing(false)
+    classes:SetPositionSharing(true)
+    local before = #attempts
+    clock:advance(4)
+    local requestCount = 1
+    for index = before + 1, #attempts do
+        if classRequest(attempts[index]) then requestCount = requestCount + 1 end
+    end
+    assert(requestCount == 3, "A rejected class request gets at most three native attempts per session")
+    before = #attempts
+    clock:advance(12)
+    assert(#attempts == before, "Exhausted class requests do not retry periodically")
+end
+
+-- Unknown, missing or unreadable classes preserve ordinary unavailable-position updates.
+do
+    for _, token in ipairs({ false, "UNKNOWN", "mage", "DEATHKNIGHT" }) do
+        local classes, clock = newAddon()
+        clock.environment.UnitClass = token and function() return "Localized", token end or false
+        clock.map = nil
+        clock:login()
+        clock:connect()
+        classes:SetPositionSharing(true)
+        clock:advance(2)
+        assert(#clock.sent == 1 and fields(clock.sent[1].payload)[2] == "U")
+    end
+    local classes, clock = newAddon()
+    local secret = setmetatable({}, { __tostring = function() error("Do not inspect secret classes") end })
+    clock.environment.UnitClass = function() return "Localized", secret end
+    clock.environment.issecretvalue = function(value) return value == secret end
+    clock:login()
+    clock:connect()
+    classes:SetPositionSharing(true)
+    clock:advance(2)
+    assert(#clock.sent == 1, "Secret class tokens must not be formatted or sent")
+    clock.environment.UnitClass = function() return "Localized", "WARRIOR" end
+    clock.map = nil
+    clock:advance(2)
+    assert(#clock.sent == 3 and fields(clock.sent[2].payload)[2] == "U"
+        and fields(assert(classRequest(clock.sent[3].wire)))[4] == "WARRIOR",
+        "Unavailable coordinates can still request classes once our class becomes readable")
+end
+
+-- Real data frames exchange every peer's immutable class, including simultaneous timestamps.
+do
+    local bus = { now = 0, peers = {}, queue = {}, sent = {} }
+    function bus:flush()
+        local delivered = 0
+        while #self.queue > 0 do
+            local packet = table.remove(self.queue, 1)
+            delivered = delivered + 1
+            assert(delivered < 100, "Class requests and responses must not form a loop")
+            for _, peer in ipairs(self.peers) do
+                if peer.addon:IsDataConnected() then peer.addon:ReceiveData(packet.sender, packet.wire) end
+            end
+        end
+    end
+    function bus:peer(name, class, sharing)
+        local instance, clock = newAddon()
+        clock.name, clock.now = name, self.now
+        clock.environment.UnitClass = function() return "Localized class", class end
+        clock:login()
+        instance:SetPositionSharing(sharing ~= false)
+        local peer = { addon = instance, clock = clock }
+        self.peers[#self.peers + 1] = peer
+        instance:SetDataTransport(function(prefix, wire)
+            assert(prefix == instance:GetDataPrefix())
+            local packet = { sender = name .. "-Test Realm", wire = wire, at = clock.now }
+            self.sent[#self.sent + 1], self.queue[#self.queue + 1] = packet, packet
+            return true
+        end)
+        self:flush()
+        return instance, clock
+    end
+    function bus:advance(seconds)
+        for _, peer in ipairs(self.peers) do peer.clock:advance(seconds) end
+        self.now = self.now + seconds
+        self:flush()
+    end
+    function bus:metadataCount()
+        local count = 0
+        for _, packet in ipairs(self.sent) do
+            if packet.wire:match("^1|[QR]|position%-class|") then count = count + 1
+            else
+                local payload = assert(packet.wire:match("^1|position|(.*)$"))
+                assert(fields(payload)[2] ~= "C", "Class discovery never adds a standalone metadata heartbeat")
+            end
+        end
+        return count
+    end
+
+    local alice, aliceClock = bus:peer("Alice", "MAGE")
+    bus:advance(2)
+    local bob, bobClock = bus:peer("Bob", "DRUID")
+    assert(alice.positionState.classes["bob-testrealm"].class == "DRUID"
+        and bob.positionState.classes["alice-testrealm"].class == "MAGE",
+        "The incumbent learns a newcomer from the request and the newcomer learns the incumbent from its reply")
+    assert(next(bob:GetSharedPositions()) == nil,
+        "Class replies do not invent positions for a client who joined after the last coordinates")
+    assert(alice:SendData("position", aliceClock:position(37, 0.3, 0.7)))
+    bus:flush()
+    assert(bob:GetSharedPositions()["alice-testrealm"].class == "MAGE",
+        "A position with the class reply's timestamp remains accepted and keeps its class")
+
+    local cara = bus:peer("Cara", "PRIEST")
+    assert(cara.positionState.classes["alice-testrealm"].class == "MAGE"
+        and cara.positionState.classes["bob-testrealm"].class == "DRUID"
+        and alice.positionState.classes["cara-testrealm"].class == "PRIEST"
+        and bob.positionState.classes["cara-testrealm"].class == "PRIEST",
+        "One late-join request collects replies from all connected sharing peers")
+    for _, peer in ipairs(bus.peers) do
+        local own = peer.clock.name:lower() .. "-testrealm"
+        assert(peer.addon.positionState.classes[own] == nil, "Channel echoes never cache our own class")
+    end
+
+    local before = #bus.sent
+    assert(bob:RequestData("position-class", classPacket(bobClock, "DRUID")))
+    bus:flush()
+    assert(#bus.sent == before + 3,
+        "A fresh request gets every reply even when its class timestamp was already cached")
+
+    local disabled = bus:peer("Disabled", "ROGUE", false)
+    before = #bus.sent
+    assert(alice:RequestData("position-class", classPacket(aliceClock, "MAGE")))
+    bus:flush()
+    assert(#bus.sent == before + 3 and next(disabled.positionState.classes) == nil
+        and alice.positionState.classes["disabled-testrealm"] == nil,
+        "Disabled sharing neither consumes discovery requests nor reveals a class in a response")
+
+    before = #bus.sent
+    local accepted, invalidRequest = alice:RequestData("position-class", aliceClock:position(37, 0.9, 0.1))
+    assert(accepted)
+    bus:flush()
+    assert(#bus.sent == before + 1 and bob:GetSharedPositions()["alice-testrealm"].x == 0.3,
+        "The class request handler rejects coordinate payloads instead of changing map positions")
+    assert(not alice:ReceiveData("Bob-Test Realm", "1|R|position-class|" .. invalidRequest
+        .. "|alice-testrealm|" .. bobClock:position(37, 0.9, 0.1))
+        and alice:GetSharedPositions()["bob-testrealm"] == nil,
+        "The class response handler also rejects coordinate payloads")
+
+    local metadata = bus:metadataCount()
+    bus:advance(2)
+    assert(alice:GetSharedPositions()["bob-testrealm"].class == "DRUID"
+        and alice:GetSharedPositions()["cara-testrealm"].class == "PRIEST")
+    for _ = 1, 8 do
+        for _, peer in ipairs(bus.peers) do peer.clock.x = peer.clock.x + 0.01 end
+        bus:advance(2)
+    end
+    bus:advance(16)
+    assert(bus:metadataCount() == metadata,
+        "Actual multi-client movement and idle heartbeats never repeat accepted class discovery")
+end
+
+-- Metadata accepts either packet order without changing position freshness or presence.
+do
+    local classes, clock = newAddon()
+    clock:login()
+    clock:connect()
+    classes:SetPositionSharing(true)
+    local refreshed = clock.refreshes
+    assert(classes:ReceiveData("Friend", "1|position|" .. classPacket(clock, "MAGE")))
+    assert(next(classes:GetSharedPositions()) == nil and next(classes.db.position.peers) == nil
+        and clock.refreshes == refreshed, "Metadata alone must not create a location or refresh pins")
+    assert(classes:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
+    local peer = assert(classes:GetSharedPositions()["friend-testrealm"])
+    assert(peer.class == "MAGE", "Metadata can arrive before a position with the same timestamp")
+    assert(classes:ReceivePosition("Friend", clock:position(37, 0.4, 0.6, clock.epoch + 1)))
+    peer = classes:GetSharedPositions()["friend-testrealm"]
+    assert(peer.class == "MAGE", "Legacy position replacements retain known class metadata")
+    local latestPosition, received = peer.stamp, peer.lastReceived
+    refreshed = clock.refreshes
+    for _, malformed in ipairs({
+        classPacket(clock, "DRUID"), classPacket(clock, "DRUID", clock.epoch - 1),
+        "1|C|bad|DRUID", "1|C|2000000002|UNKNOWN", "1|C|2000000002|mage",
+        "1|C|2000000002|DEATHKNIGHT", "1|C|2000000002", "1|C|2000000002|DRUID|extra",
+        "2|C|2000000002|DRUID",
+    }) do
+        assert(not classes:ReceivePosition("Friend", malformed))
+    end
+    assert(peer.class == "MAGE" and clock.refreshes == refreshed)
+    assert(classes:ReceivePosition("Friend", classPacket(clock, "MAGE", clock.epoch + 1)))
+    assert(clock.refreshes == refreshed, "Newer unchanged class metadata needs no map refresh")
+    assert(classes:ReceivePosition("Friend", classPacket(clock, "DRUID", clock.epoch + 2)))
+    assert(peer.class == "DRUID" and peer.stamp == latestPosition and peer.lastReceived == received
+        and peer.online == true and clock.refreshes == refreshed + 1,
+        "Changed metadata refreshes only the icon and preserves position timing and presence")
+    assert(classes:ReceivePosition("Friend", clock:unavailable(clock.epoch + 2)))
+    assert(peer.class == "DRUID", "Metadata cannot block a same-timestamp unavailable heartbeat")
+    assert(classes:ReceivePosition("After", clock:position(37, 0.5, 0.5)))
+    assert(classes:ReceivePosition("After", classPacket(clock, "PRIEST")))
+    assert(classes:GetSharedPositions()["after-testrealm"].class == "PRIEST",
+        "Metadata can also arrive after a position with the same timestamp")
+    for _, sender in ipairs({ "Self", "Self-Test Realm" }) do
+        assert(not classes:ReceivePosition(sender, classPacket(clock, "ROGUE")))
+    end
+    classes:SetPositionSharing(false)
+    assert(not classes:ReceivePosition("Ignored", classPacket(clock, "ROGUE")))
+    classes:SetPositionSharing(true)
+    classes:SetGroupSecret("class-isolation-group")
+    assert(next(classes.positionState.classes) == nil and next(classes.db.position.peers) == nil)
+    assert(classes:ReceivePosition("Friend", clock:position(37, 0.2, 0.8)))
+    assert(classes:GetSharedPositions()["friend-testrealm"].class == nil,
+        "A group switch cannot reuse the previous group's class metadata")
+end
+
+-- Retained class is optional saved data, and metadata never extends position lifetime.
+do
+    local classes, clock = newAddon()
+    clock:login()
+    classes:SetPositionSharing(true)
+    assert(classes:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
+    clock:advance(30)
+    assert(classes:ReceivePosition("Friend", classPacket(clock, "SHAMAN")))
+    clock:advance(30)
+    local peer = classes:GetSharedPositions()["friend-testrealm"]
+    assert(peer.online == false, "Class metadata does not delay the 60-second offline timeout")
+    assert(classes:ReceivePosition("Friend", classPacket(clock, "HUNTER")))
+    assert(peer.online == false and peer.lastReceived == 0 and peer.stamp == clock.epoch,
+        "Class metadata cannot revive an offline retained position")
+    local snapshot = copy(classes.db)
+    local restored, restoredClock = newAddon(copy(snapshot))
+    restoredClock:login()
+    peer = restored:GetSharedPositions()["friend-testrealm"]
+    assert(peer.class == "HUNTER" and peer.online == false and restored.db.schemaVersion == snapshot.schemaVersion,
+        "Class icons survive reload without a schema migration or stale online state")
+    for _, invalidClass in ipairs({ false, "UNKNOWN", 4 }) do
+        local old = copy(snapshot)
+        old.position.peers["friend-testrealm"].class = invalidClass or nil
+        local legacy, legacyClock = newAddon(old)
+        legacyClock:login()
+        peer = legacy:GetSharedPositions()["friend-testrealm"]
+        assert(peer.x == 0.3 and peer.class == nil,
+            "Missing or invalid optional saved classes never discard valid legacy coordinates")
+    end
+    local readOnly, readOnlyClock = newAddon(copy(snapshot), true)
+    readOnlyClock:login()
+    assert(not readOnly:ReceivePosition("Friend", classPacket(readOnlyClock, "MAGE", clock.epoch + 61)))
+    assert(equal(readOnly.db, snapshot), "Class metadata preserves newer-schema read-only settings")
+    classes:SetPositionRetention(false)
+    assert(next(classes:GetSharedPositions()) == nil)
+    assert(classes:ReceivePosition("Friend", clock:position(37, 0.4, 0.6)))
+    clock:advance(30)
+    assert(classes:ReceivePosition("Friend", classPacket(clock, "MAGE")))
+    clock:advance(30)
+    assert(next(classes:GetSharedPositions()) == nil,
+        "Class-only updates cannot keep live-only coordinates past their expiry")
 end
 
 print("Position tests passed.")

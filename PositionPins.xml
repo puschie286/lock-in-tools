@@ -1,6 +1,6 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Frame name="LockInToolsPositionPinTemplate" mixin="LockInToolsPositionPinMixin" virtual="true">
-        <Size x="10" y="10"/>
+        <Size x="16" y="16"/>
         <Layers>
             <Layer level="ARTWORK">
                 <Texture parentKey="Icon">

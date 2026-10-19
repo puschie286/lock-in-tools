@@ -23,13 +23,18 @@ local function LoadMap()
     function addon:GetSharedPositions() return self.positions end
     local world = {
         frames = {}, added = 0, created = 0, released = 0, rectangles = {},
-        bounds = {}, secretValues = {}, worldConversions = 0, mapConversions = 0,
+        bounds = {}, secretValues = {}, worldConversions = 0, mapConversions = 0, now = 0,
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
         Mixin = Mixin,
         CreateVector2D = Vector,
+        GetTime = function() return world.now end,
         issecretvalue = function(value) return world.secretValues[value] == true end,
+        CLASS_ICON_TCOORDS = {
+            WARRIOR = { 0, 0.25, 0, 0.25 },
+            MAGE = { 0.25, 0.5, 0, 0.25 },
+        },
         C_Map = { GetMapRectOnMap = function(source, target)
             local rectangle = world.rectangles[source .. ":" .. target]
             if rectangle then return unpack(rectangle) end
@@ -100,6 +105,7 @@ local function LoadMap()
                 pin:OnReleased()
                 assert(pin.playerName == nil and pin.online == nil and pin.Label.text == "",
                     "release clears player state before returning the pin to the native pool")
+                assert(pin:GetScript("OnUpdate") == nil, "released pins stop their animation callbacks")
                 self.pool[#self.pool + 1] = pin
             end
             self.pins = {}
@@ -111,11 +117,21 @@ local function LoadMap()
             local pin = table.remove(self.pool)
             if not pin then
                 pin = Mix(world.templateMixin)
+                pin.scripts = {}
+                function pin:SetScript(script, callback) self.scripts[script] = callback end
+                function pin:GetScript(script) return self.scripts[script] end
                 pin.Label = {
                     SetText = function(self, text) self.text = text end,
                     SetTextColor = function(self, ...) self.color = { ... } end,
                 }
-                pin.Icon = { SetColorTexture = function(self, ...) self.color = { ... } end }
+                pin.Icon = {
+                    SetColorTexture = function(self, ...) self.color, self.texture = { ... }, nil end,
+                    SetTexture = function(self, texture) self.texture, self.color = texture, nil end,
+                    SetTexCoord = function(self, ...) self.coordinates = { ... } end,
+                    SetVertexColor = function(self, ...) self.vertexColor = { ... } end,
+                    SetDesaturated = function(self, value) self.desaturated = value end,
+                    SetAlpha = function(self, alpha) self.alpha = alpha end,
+                }
                 pin:OnLoad()
                 world.created = world.created + 1
             end
@@ -139,6 +155,15 @@ local function LoadMap()
     function world:fire(event, name)
         for _, frame in ipairs(self.frames) do
             if frame.events[event] then frame.callback(frame, event, name) end
+        end
+    end
+    function world:advance(seconds)
+        self.now = self.now + seconds
+        if self.map and self.map:IsShown() then
+            for _, pin in ipairs(self.map.pins) do
+                local update = pin:GetScript("OnUpdate")
+                if update then update(pin, seconds) end
+            end
         end
     end
     return addon, world
@@ -249,6 +274,77 @@ presence:RefreshPositionPins()
 assert(#presenceWorld.map.pins == 0 and presenceWorld.released == 4)
 assert(presencePin.playerName == nil and presencePin.online == nil and presencePin.Label.text == "")
 
+local classes, classWorld = LoadMap()
+classWorld:loadNativeMap(true)
+classes.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true, class = "WARRIOR" }
+classes:InitializePositionMap()
+local classPin = classWorld.map.pins[1]
+local classTexture = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES"
+local function CheckClassIcon(class, online)
+    assert(classWorld.map.pins[1] == classPin and classWorld.created == 1,
+        "class and presence updates reuse a native pooled pin")
+    assert(classPin.Icon.texture == classTexture and classPin.Icon.color == nil,
+        "a known class uses the native class icon texture")
+    for index = 1, 4 do
+        Near(classPin.Icon.coordinates[index], classWorld.environment.CLASS_ICON_TCOORDS[class][index])
+    end
+    assert(classPin.Icon.desaturated == not online)
+    Near(classPin.Icon.alpha, online and 1 or 0.6)
+    for index = 1, 3 do Near(classPin.Icon.vertexColor[index], online and 1 or 0.6) end
+end
+local function CheckFallback(online)
+    assert(classPin.Icon.texture == nil and classPin.Icon.color,
+        "unknown classes retain the position square")
+    local color = online and { 0.1, 0.8, 1, 1 } or { 0.5, 0.5, 0.5, 0.6 }
+    for index = 1, 4 do Near(classPin.Icon.color[index], color[index]) end
+    for index, value in ipairs({ 0, 1, 0, 1 }) do Near(classPin.Icon.coordinates[index], value) end
+    assert(classPin.Icon.desaturated == false, "fallback squares do not retain class desaturation")
+    Near(classPin.Icon.alpha, 1)
+    for index = 1, 3 do Near(classPin.Icon.vertexColor[index], 1) end
+end
+CheckClassIcon("WARRIOR", true)
+assert(classPin.Label.text == "Alice-Realm")
+
+classes.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5, online = false, class = "MAGE" } }
+classes:RefreshPositionPins()
+CheckClassIcon("MAGE", false)
+assert(classPin.Label.text == "Bob-Realm (Offline)" and classPin:GetDisplayName() == "Bob-Realm",
+    "a pooled pin replaces its class and name while retaining offline labels")
+classes.positions.bob.online = true
+classes:RefreshPositionPins()
+CheckClassIcon("MAGE", true)
+assert(classPin.Label.text == "Bob-Realm", "online class icons restore the normal label")
+
+classes.positions.bob.online = false
+classes:RefreshPositionPins()
+CheckClassIcon("MAGE", false)
+classes.positions.bob.class = nil
+classes:RefreshPositionPins()
+CheckFallback(false)
+classes.positions.bob.online = true
+classes:RefreshPositionPins()
+CheckFallback(true)
+
+local secretClass = {}
+classWorld.secretValues[secretClass] = true
+classWorld.secretValues.MAGE = true
+for _, class in ipairs({ "UNKNOWN", "warrior", 1, false, {}, secretClass, "MAGE" }) do
+    classes.positions.bob.class = class
+    classes:RefreshPositionPins()
+    CheckFallback(true)
+end
+classWorld.secretValues.MAGE = nil
+classes.positions.bob.class = "MAGE"
+classes:RefreshPositionPins()
+CheckClassIcon("MAGE", true)
+local nativeCoordinates = classWorld.environment.CLASS_ICON_TCOORDS
+classWorld.environment.CLASS_ICON_TCOORDS = nil
+classes:RefreshPositionPins()
+CheckFallback(true)
+classWorld.environment.CLASS_ICON_TCOORDS = nativeCoordinates
+classes:RefreshPositionPins()
+CheckClassIcon("MAGE", true)
+
 local projection, projectionWorld = LoadMap()
 -- Synthetic geometry for Thunder Bluff, Mulgore, Kalimdor and a different continent.
 projectionWorld.bounds[1456] = { 1000, 1400, 4000, 4600, continent = 1 }
@@ -257,7 +353,7 @@ projectionWorld.bounds[1414] = { -5000, 5000, -4000, 8000, continent = 1 }
 projectionWorld.bounds[13] = { -5000, 5000, -4000, 8000, continent = 2 }
 projectionWorld:loadNativeMap(true)
 projectionWorld.map.id = 1456
-local shared = { name = "Alice-Realm", map = 1456, x = 0.25, y = 0.5 }
+local shared = { name = "Alice-Realm", map = 1456, x = 0.25, y = 0.5, online = true, class = "MAGE" }
 projection.positions.alice = shared
 projection:InitializePositionMap()
 Near(projectionWorld.map.pins[1].x, 0.25)
@@ -266,6 +362,8 @@ assert(projectionWorld.worldConversions == 0, "own-map positions need no convers
 
 projectionWorld.map:changeMap(1412)
 assert(#projectionWorld.map.pins == 1, "city coordinates appear on the overlapping region without a direct rectangle")
+assert(projectionWorld.map.pins[1].Icon.texture == classTexture,
+    "class icons remain available when projecting city positions onto the region")
 Near(projectionWorld.map.pins[1].x, 0.3)
 Near(projectionWorld.map.pins[1].y, 0.575)
 assert(projectionWorld.worldConversions == 1 and projectionWorld.mapConversions == 1)
@@ -371,4 +469,207 @@ assert(#projectionWorld.map.pins == 1, "world continent ID zero is valid")
 Near(projectionWorld.map.pins[1].x, 0.3)
 Near(projectionWorld.map.pins[1].y, 0.575)
 
-print("PASS: native map attachment, presence labels/colors, parent/overlapping-map projection and pooled pin lifecycle")
+local function FindPin(testWorld, name)
+    for _, candidate in ipairs(testWorld.map.pins) do
+        if candidate:GetDisplayName() == name then return candidate end
+    end
+    error("missing map pin for " .. name)
+end
+
+local smooth, smoothWorld = LoadMap()
+smoothWorld:loadNativeMap(true)
+local moving = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
+smooth.positions.alice = moving
+smooth:InitializePositionMap()
+local movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.2)
+Near(movingPin.y, 0.4)
+assert(movingPin:GetScript("OnUpdate") == nil, "a first sample appears immediately without animation")
+
+moving.x, moving.y = 0.24, 0.46
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.2)
+Near(movingPin.y, 0.4)
+assert(movingPin:GetScript("OnUpdate"), "ordinary online movement installs an animation callback")
+smoothWorld:advance(1)
+Near(movingPin.x, 0.22)
+Near(movingPin.y, 0.43)
+Near(moving.x, 0.24)
+Near(moving.y, 0.46)
+
+moving.class = "MAGE"
+smooth.positions.bob = { name = "Bob-Realm", map = 101, x = 0.8, y = 0.8, online = true }
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.22)
+Near(movingPin.y, 0.43)
+assert(movingPin.Icon.texture == classTexture, "class changes update visuals during motion")
+smoothWorld:advance(0.5)
+Near(movingPin.x, 0.23)
+Near(movingPin.y, 0.445)
+assert(smoothWorld.created == 2, "refreshes reuse pooled pins while preserving each player's motion")
+
+moving.x, moving.y = 0.28, 0.46
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.23)
+Near(movingPin.y, 0.445)
+smoothWorld:advance(1)
+Near(movingPin.x, 0.255)
+Near(movingPin.y, 0.4525)
+smoothWorld:advance(3)
+Near(movingPin.x, 0.28)
+Near(movingPin.y, 0.46)
+assert(movingPin:GetScript("OnUpdate") == nil, "a long frame clamps to the new target and stops updating")
+
+moving.x, moving.y = 0.32, 0.5
+smooth:RefreshPositionPins()
+smoothWorld:advance(0.5)
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.29)
+Near(movingPin.y, 0.47)
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+smoothWorld:advance(1.5)
+Near(movingPin.x, 0.32)
+Near(movingPin.y, 0.5)
+assert(movingPin:GetScript("OnUpdate") == nil, "unchanged targets do not restart the original two-second transition")
+
+moving.x = 0.36
+smooth:RefreshPositionPins()
+smoothWorld.now = smoothWorld.now + 0.5
+moving.x = 0.4
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.33)
+smoothWorld:advance(1)
+Near(movingPin.x, 0.365)
+assert(movingPin:GetScript("OnUpdate"), "retargeting uses absolute elapsed time even between rendered frames")
+
+moving.x, moving.online = 0.44, false
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.44)
+assert(movingPin:GetScript("OnUpdate") == nil, "offline changes stop movement at the retained coordinates")
+moving.x, moving.online = 0.48, true
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.48)
+assert(movingPin:GetScript("OnUpdate") == nil, "reconnecting snaps to the fresh online position")
+
+moving.x = 0.7
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.7)
+assert(movingPin:GetScript("OnUpdate") == nil, "large same-map jumps do not sweep across the map")
+moving.x, moving.y = 0.78, 0.58
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.78)
+Near(movingPin.y, 0.58)
+assert(movingPin:GetScript("OnUpdate") == nil, "jump detection measures diagonal source-coordinate distance")
+
+moving.x, moving.y = 0.8, 0.6
+smooth:RefreshPositionPins()
+smoothWorld:advance(1)
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.79)
+Near(movingPin.y, 0.59)
+smoothWorld.rectangles["102:101"] = { 0, 1, 0, 1 }
+moving.map, moving.x, moving.y = 102, 0.82, 0.62
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.82)
+Near(movingPin.y, 0.62)
+assert(movingPin:GetScript("OnUpdate") == nil, "source-map changes snap even on the same displayed map")
+
+moving.x, moving.y = 0.84, 0.64
+smooth:RefreshPositionPins()
+smoothWorld:advance(0.5)
+smoothWorld.rectangles["102:100"] = { 0, 1, 0, 1 }
+smoothWorld.map:changeMap(100)
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.84)
+Near(movingPin.y, 0.64)
+assert(movingPin:GetScript("OnUpdate") == nil, "displayed-map changes discard the previous projected transition")
+
+moving.x, moving.y = 0.86, 0.66
+smooth:RefreshPositionPins()
+smoothWorld.map.shown = false
+smoothWorld:advance(0.5)
+moving.x, moving.y = 0.88, 0.68
+local createdBeforeHidden = smoothWorld.created
+smooth:RefreshPositionPins()
+assert(#smoothWorld.map.pins == 0 and smoothWorld.created == createdBeforeHidden,
+    "hidden refreshes release motion without allocating new pins")
+smoothWorld.map:show()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.88)
+Near(movingPin.y, 0.68)
+assert(movingPin:GetScript("OnUpdate") == nil, "reopening displays the latest hidden sample immediately")
+
+moving.x, moving.y = 0.9, 0.7
+smooth:RefreshPositionPins()
+smoothWorld:advance(0.5)
+smoothWorld.map.shown = false
+smoothWorld:advance(0.5)
+smoothWorld.map:show()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.9)
+Near(movingPin.y, 0.7)
+assert(movingPin:GetScript("OnUpdate") == nil, "map-show refreshes snap even without an intervening hidden update")
+
+moving.x, moving.y = 0.92, 0.72
+smooth:RefreshPositionPins()
+smoothWorld:advance(0.5)
+smooth.positionMapProvider:RemoveAllData()
+assert(#smoothWorld.map.pins == 0, "removing the provider's data releases every animated pin")
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.92)
+Near(movingPin.y, 0.72)
+assert(movingPin:GetScript("OnUpdate") == nil, "explicit data removal also clears cached motion")
+
+moving.x, moving.y = 0.94, 0.74
+smooth:RefreshPositionPins()
+smooth.positions = { carol = { name = "Carol-Realm", map = 100, x = 0.1, y = 0.2, online = true } }
+smooth:RefreshPositionPins()
+local carolPin = FindPin(smoothWorld, "Carol-Realm")
+Near(carolPin.x, 0.1)
+Near(carolPin.y, 0.2)
+assert(carolPin:GetScript("OnUpdate") == nil, "a pooled frame cannot transfer another player's movement")
+smooth.positions = {}
+smooth:RefreshPositionPins()
+assert(#smoothWorld.map.pins == 0, "an empty model removes animated data after sharing or group changes")
+smooth.positions.alice = moving
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
+Near(movingPin.x, 0.94)
+Near(movingPin.y, 0.74)
+assert(movingPin:GetScript("OnUpdate") == nil, "removed players return with a fresh position")
+
+local projectedSmooth, projectedSmoothWorld = LoadMap()
+projectedSmoothWorld:loadNativeMap(true)
+projectedSmoothWorld.map.id = 100
+projectedSmoothWorld.rectangles["101:100"] = { 0.1, 0.5, 0.2, 0.6 }
+local projectedMoving = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true }
+projectedSmooth.positions.alice = projectedMoving
+projectedSmooth:InitializePositionMap()
+projectedMoving.x, projectedMoving.y = 0.29, 0.56
+projectedSmooth:RefreshPositionPins()
+local projectedPin = FindPin(projectedSmoothWorld, projectedMoving.name)
+Near(projectedPin.x, 0.2)
+Near(projectedPin.y, 0.4)
+projectedSmoothWorld:advance(1)
+Near(projectedPin.x, 0.208)
+Near(projectedPin.y, 0.412)
+projectedSmoothWorld:advance(1)
+Near(projectedPin.x, 0.216)
+Near(projectedPin.y, 0.424)
+Near(projectedMoving.x, 0.29)
+Near(projectedMoving.y, 0.56)
+assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
+    "projected movement ends at native map coordinates without changing the shared source data")
+
+print("PASS: native map attachment, class icons/fallbacks, presence labels/colors, projection, smooth movement and pooled pin lifecycle")

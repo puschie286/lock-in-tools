@@ -1,5 +1,10 @@
 local _, addon = ...
 local INTERVAL, HEARTBEAT_INTERVAL, PEER_TIMEOUT = 2, 15, 60
+local CLASS_REQUEST_LIMIT = 3
+local CLASSES = {
+    WARRIOR = true, PALADIN = true, HUNTER = true, ROGUE = true, PRIEST = true,
+    SHAMAN = true, MAGE = true, WARLOCK = true, DRUID = true,
+}
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
@@ -8,6 +13,10 @@ end
 local function Number(value, minimum, maximum, integer)
     return not IsSecret(value) and type(value) == "number" and value >= minimum and value <= maximum
         and (not integer or value == math.floor(value))
+end
+
+local function ClassToken(value)
+    if not IsSecret(value) and type(value) == "string" and CLASSES[value] then return value end
 end
 
 local function SenderName(name)
@@ -29,6 +38,30 @@ local function Active(self)
         and self.db.position.sharing and not self.savedDataReadOnly
 end
 
+local function ClassPayload()
+    if not UnitClass then return nil end
+    local _, class = UnitClass("player")
+    class = ClassToken(class)
+    if class then return string.format("1|C|%d|%s", GetServerTime(), class) end
+end
+
+local function IsClassMessage(payload)
+    if IsSecret(payload) or type(payload) ~= "string" then return false end
+    local stamp, class = payload:match("^1|C|(%d+)|([A-Z]+)$")
+    return Number(tonumber(stamp), 0, 9999999999, true) and ClassToken(class) ~= nil
+end
+
+local function RequestClasses(self)
+    local state = self.positionState
+    if not Active(self) or not self:IsDataConnected() or not state.classRequestPending then return end
+    local payload = ClassPayload()
+    if not payload then return end
+    state.classRequestAttempts = state.classRequestAttempts + 1
+    if self:RequestData("position-class", payload) or state.classRequestAttempts >= CLASS_REQUEST_LIMIT then
+        state.classRequestPending = false
+    end
+end
+
 local function Refresh(self)
     if self.RefreshPositionPins then self:RefreshPositionPins() end
     if self.RefreshOptions then self:RefreshOptions() end
@@ -39,7 +72,7 @@ local function SavePeer(self, sender)
     local peer = self.positionState.peers[sender]
     if self.db.position.keepLastKnown and peer then
         self.db.position.peers[sender] = {
-            name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp,
+            name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp, class = peer.class,
         }
     else
         self.db.position.peers[sender] = nil
@@ -66,6 +99,7 @@ end
 local function ResetSendState(self)
     local state = self.positionState
     state.lastSentSample, state.lastSentAt, state.lastSendSucceeded = nil, nil, nil
+    state.classRequestPending, state.classRequestAttempts = true, 0
 end
 
 function addon:InitializePositions()
@@ -77,24 +111,36 @@ function addon:InitializePositions()
     local fingerprint = self:GetGroupFingerprint()
     if settings.groupFingerprint ~= fingerprint or not settings.keepLastKnown then settings.peers = {} end
     settings.groupFingerprint = fingerprint
-    self.positionState = { peers = {}, latest = {}, generation = 0 }
+    self.positionState = { peers = {}, latest = {}, classes = {}, generation = 0 }
     for sender, peer in pairs(settings.peers) do
         if type(peer) == "table" and SenderName(peer.name) == sender
             and Number(peer.map, 1, 1000000, true) and Number(peer.x, 0, 1) and Number(peer.y, 0, 1)
             and Number(peer.stamp, 0, 9999999999, true) then
             self.positionState.peers[sender] = {
                 name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp,
-                online = false,
+                online = false, class = ClassToken(peer.class),
             }
             self.positionState.latest[sender] = peer.stamp
+            if ClassToken(peer.class) then
+                self.positionState.classes[sender] = { class = peer.class, stamp = peer.stamp }
+            end
         else
             settings.peers[sender] = nil
         end
     end
+    self:RegisterDataRequest("position-class", function(sender, payload)
+        if not Active(self) or not IsClassMessage(payload) then return nil end
+        -- The request teaches existing peers the newcomer's class too.
+        self:ReceivePosition(sender, payload)
+        return ClassPayload()
+    end, function(sender, payload)
+        return IsClassMessage(payload) and self:ReceivePosition(sender, payload)
+    end)
     self:RegisterDataFeature("position", function(sender, payload)
         return self:ReceivePosition(sender, payload)
-    end, function()
+    end, function(connected)
         ResetSendState(self)
+        if connected then RequestClasses(self) end
         Refresh(self)
     end)
     if self.InitializePositionMap then self:InitializePositionMap() end
@@ -124,6 +170,7 @@ end
 
 function addon:OnPositionLogin()
     self:UpdatePositionTimer()
+    RequestClasses(self)
     Refresh(self)
 end
 
@@ -139,7 +186,10 @@ function addon:SetPositionSharing(enabled)
     if not allowed then return false, message end
     if self.db.position.sharing ~= enabled then ResetSendState(self) end
     self.db.position.sharing = enabled
-    if enabled then ExpirePeers(self) end
+    if enabled then
+        ExpirePeers(self)
+        RequestClasses(self)
+    end
     self:UpdatePositionTimer()
     Refresh(self)
     return true
@@ -160,7 +210,7 @@ end
 
 function addon:OnPositionGroupChanged()
     if not self.positionState then return end
-    self.positionState.peers, self.positionState.latest = {}, {}
+    self.positionState.peers, self.positionState.latest, self.positionState.classes = {}, {}, {}
     ResetSendState(self)
     self.db.position.peers = {}
     self.db.position.groupFingerprint = self:GetGroupFingerprint()
@@ -199,6 +249,7 @@ function addon:PositionTick()
             state.lastSendSucceeded = succeeded
             if succeeded then state.lastSentSample, state.lastSentAt = sample, now end
         end
+        RequestClasses(self)
     end
     if changed then Refresh(self) end
 end
@@ -214,16 +265,32 @@ function addon:ReceivePosition(sender, payload)
     for value in (payload .. "|"):gmatch("([^|]*)|") do fields[#fields + 1] = value end
     local kind, stamp = fields[2], tonumber(fields[3])
     local map, x, y = tonumber(fields[4]), tonumber(fields[5]), tonumber(fields[6])
+    local class = ClassToken(fields[4])
     if fields[1] ~= "1" or not Number(stamp, 0, 9999999999, true)
         or not ((kind == "P" and #fields == 6 and Number(map, 1, 1000000, true)
-            and Number(x, 0, 1) and Number(y, 0, 1)) or (kind == "U" and #fields == 3)) then return false end
+            and Number(x, 0, 1) and Number(y, 0, 1)) or (kind == "U" and #fields == 3)
+            or (kind == "C" and #fields == 4 and class)) then return false end
     local state = self.positionState
+    if kind == "C" then
+        local previous = state.classes[canonical]
+        if previous and stamp <= previous.stamp then return false end
+        state.classes[canonical] = { class = class, stamp = stamp }
+        local peer = state.peers[canonical]
+        if peer then
+            local changed = peer.class ~= class
+            peer.class = class
+            SavePeer(self, canonical)
+            if changed then Refresh(self) end
+        end
+        return true
+    end
     if state.latest[canonical] and stamp <= state.latest[canonical] then return false end
     state.latest[canonical] = stamp
     local wasOnline = state.peers[canonical] and state.peers[canonical].online
     if kind == "P" then
         state.peers[canonical] = {
             name = sender, map = map, x = x, y = y, stamp = stamp, lastReceived = GetTime(), online = true,
+            class = state.classes[canonical] and state.classes[canonical].class,
         }
     elseif self.db.position.keepLastKnown then
         local peer = state.peers[canonical]

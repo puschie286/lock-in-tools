@@ -1,5 +1,6 @@
 local _, addon = ...
 local PREFIX, MAX_MESSAGE_BYTES = "LockInToolsData", 255
+local REQUEST_WINDOW, MAX_REQUEST_SEQUENCE = 10, 999999999
 local RETRY_DELAYS = { 2, 4, 8, 8, 30 }
 local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
 local LEAVE_CACHE_CHECK_LIMIT = 5
@@ -19,7 +20,67 @@ local function IsSecret(value)
 end
 
 local function ValidFeature(feature)
-    return type(feature) == "string" and #feature <= 32 and feature:match("^[a-z][a-z0-9_-]*$")
+    return not IsSecret(feature) and type(feature) == "string" and #feature <= 32
+        and feature:match("^[a-z][a-z0-9_-]*$")
+end
+
+local function SenderName(name)
+    if IsSecret(name) or type(name) ~= "string" or name == "" or #name > 128
+        or name:find("[|%z]") then return nil end
+    local character, realm = name:match("^([^%-]+)%-(.+)$")
+    if not character then character, realm = name, GetNormalizedRealmName() end
+    if IsSecret(realm) or type(realm) ~= "string" or realm == "" then return nil end
+    return (character .. "-" .. realm:gsub("%s", "")):lower()
+end
+
+local function SelfNames()
+    local names = {}
+    if type(UnitFullName) == "function" then
+        local ok, name, realm = pcall(UnitFullName, "player")
+        if ok and not IsSecret(name) and type(name) == "string" and name ~= ""
+            and not IsSecret(realm) then
+            if type(realm) == "string" and realm ~= "" then name = name .. "-" .. realm end
+            local normalized = SenderName(name)
+            if normalized then names[normalized] = true end
+        end
+    end
+    if NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" then
+        local ok, name = pcall(NameUtil.GetUnmodifiedUnitFullName, "player")
+        local normalized = ok and SenderName(name)
+        if normalized then names[normalized] = true end
+    end
+    return names
+end
+
+local function ResetRequests(state)
+    state.requestEpoch = (state.requestEpoch or 0) + 1
+    state.pendingRequests, state.repliedRequests = {}, {}
+end
+
+local function PruneRequests(state)
+    local now = GetTime()
+    for id, request in pairs(state.pendingRequests) do
+        if request.expires <= now then state.pendingRequests[id] = nil end
+    end
+    for key, expires in pairs(state.repliedRequests) do
+        if expires <= now then state.repliedRequests[key] = nil end
+    end
+    return now
+end
+
+local function SendFrame(self, message)
+    if not self:IsDataConnected() then return false, "Group data is disconnected." end
+    if #message > MAX_MESSAGE_BYTES or message:find("\000", 1, true) then
+        return false, "Data message exceeds the supported format."
+    end
+    -- No queue or automatic retry: each feature decides when its data is current.
+    local ok, accepted = pcall(self.dataState.send, PREFIX, message)
+    if not ok or accepted ~= true then return false, "Data message was not accepted." end
+    return true
+end
+
+local function ValidRequestID(id)
+    return type(id) == "string" and #id <= 32 and id:match("^[a-zA-Z0-9_-]+$")
 end
 
 local function SameChannel(first, second)
@@ -55,8 +116,10 @@ end
 function addon:InitializeData()
     if self.dataState then return end
     self:InitializeGroupChannelCleanup()
-    self.dataState = { features = {}, phase = "idle", attempts = 0, generation = 0,
-        channelName = self:GetGroupDataChannelName() }
+    self.dataState = { features = {}, requests = {}, phase = "idle", attempts = 0, generation = 0,
+        channelName = self:GetGroupDataChannelName(), nextRequestID = 0,
+        requestSession = string.format("%x-%x", GetServerTime(), math.floor(GetTime() * 1000) % 2147483647) }
+    ResetRequests(self.dataState)
     self.dataFrame = CreateFrame("Frame")
     for _, event in ipairs({ "CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE",
         "CHANNEL_LEFT", "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_PASSWORD_REQUEST", "PLAYER_LOGOUT" }) do
@@ -91,6 +154,45 @@ function addon:RegisterDataFeature(name, receive, connectionChanged)
     return true
 end
 
+-- A snapshot request fans out once; each peer may return one payload of its own.
+function addon:RegisterDataRequest(name, onRequest, onResponse)
+    local state = self.dataState
+    if not state then return false, "Group data is still loading." end
+    if not ValidFeature(name) or type(onRequest) ~= "function" or type(onResponse) ~= "function" then
+        return false, "Invalid data request registration."
+    end
+    if state.requests[name] then return false, "Data request already registered." end
+    state.requests[name] = { onRequest = onRequest, onResponse = onResponse }
+    return true
+end
+
+function addon:IsDataSelf(sender)
+    local normalized = SenderName(sender)
+    return normalized ~= nil and SelfNames()[normalized] == true
+end
+
+function addon:RequestData(feature, payload)
+    if not self:IsDataConnected() then return false, "Group data is disconnected." end
+    local state = self.dataState
+    if not ValidFeature(feature) or not state.requests[feature] then return false, "Unknown data request." end
+    if IsSecret(payload) or type(payload) ~= "string" then return false, "Invalid data payload." end
+    local targets = SelfNames()
+    if not next(targets) then return false, "The local player name is unavailable." end
+    if state.nextRequestID >= MAX_REQUEST_SEQUENCE then return false, "Data request identifiers exhausted." end
+    PruneRequests(state)
+    state.nextRequestID = state.nextRequestID + 1
+    local id = state.requestSession .. "-" .. string.format("%d", state.nextRequestID)
+    local request = { feature = feature, targets = targets, expires = GetTime() + REQUEST_WINDOW, responders = {} }
+    -- Install before sending so an immediate transport response can already correlate.
+    state.pendingRequests[id] = request
+    local accepted, problem = SendFrame(self, "1|Q|" .. feature .. "|" .. id .. "|" .. payload)
+    if not accepted then
+        if state.pendingRequests[id] == request then state.pendingRequests[id] = nil end
+        return false, problem
+    end
+    return true, id
+end
+
 -- Features share this transport boundary; native acceptance is not a peer receipt.
 function addon:SetDataTransport(send)
     local state = self.dataState
@@ -99,8 +201,10 @@ function addon:SetDataTransport(send)
     if send and (self.savedDataReadOnly or not self:HasGroup()) then
         return false, "A writable group configuration is required."
     end
+    local fingerprint = send and self:GetGroupFingerprint() or nil
+    if state.send ~= send or state.groupFingerprint ~= fingerprint then ResetRequests(state) end
     state.send = send
-    state.groupFingerprint = send and self:GetGroupFingerprint() or nil
+    state.groupFingerprint = fingerprint
     NotifyConnection(self)
     return true
 end
@@ -119,6 +223,7 @@ function addon:OnDataGroupChanged()
     if not state then return end
     self:CancelDataTimer()
     Disconnect(self)
+    ResetRequests(state)
     local previous = state.channelName
     state.channelName = self:GetGroupDataChannelName()
     state.nativeSend = nil
@@ -279,6 +384,7 @@ function addon:OnDataEvent(event, ...)
         self:CancelDataTimer()
         state.stopped, state.wanted = true, false
         Disconnect(self)
+        ResetRequests(state)
         return
     end
     if state.stopped or not self.ready or self.savedDataReadOnly or not self:HasGroup()
@@ -342,14 +448,41 @@ function addon:SendData(feature, payload)
         return false, "Unknown data feature."
     end
     if IsSecret(payload) or type(payload) ~= "string" then return false, "Invalid data payload." end
-    local message = "1|" .. feature .. "|" .. payload
-    if #message > MAX_MESSAGE_BYTES or message:find("\000", 1, true) then
-        return false, "Data message exceeds the supported format."
+    return SendFrame(self, "1|" .. feature .. "|" .. payload)
+end
+
+local function ReceiveRequest(self, sender, message)
+    local state = self.dataState
+    local feature, id, payload = message:match("^1|Q|([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
+    local normalized = SenderName(sender)
+    if not ValidFeature(feature) or not ValidRequestID(id) or not normalized or self:IsDataSelf(sender) then return false end
+    local registration = state.requests[feature]
+    if not registration then return false end
+    local now = PruneRequests(state)
+    local key = normalized .. "|" .. feature .. "|" .. id
+    if state.repliedRequests[key] then return false end
+    state.repliedRequests[key] = now + REQUEST_WINDOW
+    local epoch = state.requestEpoch
+    local ok, response = pcall(registration.onRequest, sender, payload)
+    if not ok or IsSecret(response) or type(response) ~= "string" or state.requestEpoch ~= epoch then return false end
+    return SendFrame(self, "1|R|" .. feature .. "|" .. id .. "|" .. normalized .. "|" .. response)
+end
+
+local function ReceiveResponse(self, sender, message)
+    local feature, id, target, payload = message:match("^1|R|([a-z][a-z0-9_-]*)|([^|]+)|([^|]+)|(.*)$")
+    local normalized = SenderName(sender)
+    if not ValidFeature(feature) or not ValidRequestID(id) or not normalized or self:IsDataSelf(sender) then return false end
+    local state = self.dataState
+    PruneRequests(state)
+    local request = state.pendingRequests[id]
+    if not request or request.feature ~= feature or not request.targets[target] or request.responders[normalized] then
+        return false
     end
-    -- No queue or automatic retry: each feature decides when its data is current.
-    local ok, accepted = pcall(self.dataState.send, PREFIX, message)
-    if not ok or accepted ~= true then return false, "Data message was not accepted." end
-    return true
+    local registration = state.requests[feature]
+    if not registration then return false end
+    request.responders[normalized] = true
+    local ok, accepted = pcall(registration.onResponse, sender, payload)
+    return ok and accepted ~= false
 end
 
 -- The backend supplies WoW's sender after matching our prefix and current group route.
@@ -357,6 +490,8 @@ function addon:ReceiveData(sender, message)
     if not self:IsDataConnected() or IsSecret(sender) or type(sender) ~= "string" or sender == ""
         or IsSecret(message) or type(message) ~= "string" or #message > MAX_MESSAGE_BYTES
         or message:find("\000", 1, true) then return false end
+    if message:sub(1, 4) == "1|Q|" then return ReceiveRequest(self, sender, message) end
+    if message:sub(1, 4) == "1|R|" then return ReceiveResponse(self, sender, message) end
     local feature, payload = message:match("^1|([a-z][a-z0-9_-]*)|(.*)$")
     if not feature or not ValidFeature(feature) then return false end
     local registration = self.dataState.features[feature]
