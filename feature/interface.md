@@ -2,7 +2,7 @@
 
 The welcome and settings windows use a shared native style: dark panels, simple borders, clear labels and consistent buttons, fields and checkboxes. Windows remain draggable and scale down to fit smaller screens when opened. LockInTools works without a separate UI addon.
 
-The AddOns list uses the interlocking steel links with a blue glow as the addon icon. `Media/Icon.png` preserves the original artwork; `Media/Icon.tga` is the 256×256 uncompressed 32-bit texture referenced by `LockInTools.toc`.
+The AddOns list, minimap button and welcome/settings window headers use the interlocking steel links with a blue glow as the addon icon. Window headers show a 32×32 icon beside the title. `Media/Icon.png` preserves the original artwork; `Media/Icon.tga` is the 256×256 uncompressed 32-bit texture referenced by `LockInTools.toc`.
 
 Use `/reload` after editing existing Lua files. Restart WoW after adding files to the manifest.
 
@@ -30,6 +30,7 @@ EllesmereUI integration depends on its supported skin API. Missing or unsupporte
 
 - Check welcome and settings with EllesmereUI absent, installed with the LockInTools skin disabled, and enabled. With the skin enabled, change its accent and fonts while a window is visible, then open the other window for the first time. Disable the skin, reload and check both windows again.
 - After restarting WoW, check that the AddOns list shows the chain-link icon for LockInTools, upright and recognizable at its displayed size.
+- Open welcome and settings and check that the title icon is visible without overlapping the title or close button. Repeat with the optional skin enabled, live font/accent changes and smaller UI scales.
 - Check the minimap button with login welcome disabled and on an unconfigured profile. Hover for its controls; left-click must open settings and right-click must open welcome with only one window visible. Drag around the minimap at different UI/minimap scales, then reload and switch characters to check its saved position. Check a square minimap if available and confirm dragging does not open a window. With a disposable newer-schema fixture, confirm movement works for the session and saved data remains unchanged.
 - Open settings for the first time and confirm **Group** is selected. Switch through all three tabs and check only the selected category is visible. Change chat and position preferences, check immediate effects, then reopen settings, reload and switch characters to confirm persistence. Each choice must leave unrelated preferences unchanged. Prepare a key change/confirmation in **Group**, leave the tab and return; the draft must be cleared/masked and confirmation cancelled.
 - Move between **More options** and **Back to welcome** repeatedly; only one window may be visible. Repeat `/lit options` on each tab and check the same settings window and selected tab remain. Open welcome through `/lit` or `/lit welcome` while settings is visible and check settings hides with key cleanup.
