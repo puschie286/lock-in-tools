@@ -45,3 +45,6 @@ exclude.lst
 
 # Project-local Lua runtime and downloaded archive
 /tools/lua/
+
+# Standalone in-game diagnostic package, assembled from the current sources
+/tools/position-probe/package/

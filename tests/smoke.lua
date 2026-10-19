@@ -864,6 +864,7 @@ assert(not contains(friendlyMessages, "otter-4827") and not contains(friendlyMes
 -- Exercise the real options callbacks against strict native-widget stubs.
 local function loadOptions(uiAddon, uiEnvironment)
     local createEventFrame = uiEnvironment.CreateFrame
+    uiEnvironment.namedFrameCreations = {}
     local methods = {}
     local function makeWidget()
         return setmetatable({ scripts = {}, handlers = {}, hooks = {}, enabled = true, shown = true }, { __index = methods })
@@ -964,6 +965,9 @@ local function loadOptions(uiAddon, uiEnvironment)
         return texture
     end
     function methods:IsShown() return self.shown end
+    function methods:IsVisible()
+        return self.shown and (not self.parent or not self.parent.IsVisible or self.parent:IsVisible())
+    end
     function methods:Hide()
         local wasShown = self.shown
         self.shown = false
@@ -979,6 +983,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     end
     function methods:UserInput(text)
         assert(self.enabled, "disabled fields do not accept user input")
+        assert(self:IsVisible(), "hidden fields do not accept user input")
         self.text = text
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
     end
@@ -991,7 +996,10 @@ local function loadOptions(uiAddon, uiEnvironment)
         local widget = makeWidget()
         widget.frameType, widget.name, widget.parent, widget.template = frameType, name, parent, template
         if template == "BasicFrameTemplateWithInset" then widget.TitleText = makeWidget() end
-        if name then uiEnvironment[name] = widget end
+        if name then
+            uiEnvironment[name] = widget
+            uiEnvironment.namedFrameCreations[name] = (uiEnvironment.namedFrameCreations[name] or 0) + 1
+        end
         return widget
     end
     uiEnvironment.UIParent, uiEnvironment.UISpecialFrames = makeWidget(), {}
@@ -1052,21 +1060,27 @@ assert(panel.secret:GetText() == SECRET and not panel.secret.password
     and panel.secret.focused and panel.secret.highlighted, "reveal only after explicit click for copying")
 panel.toggleSecret:Click()
 assert(panel.secret.password, "hide masks the revealed secret")
+panel.tabs.position:Click()
 panel.positionSharing:SetChecked(true)
 panel.positionRetention:SetChecked(false)
+panel.tabs.chat:Click()
 panel.autoJoin:SetChecked(true)
 panel.save:Click()
 assert(uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1)
 assert(not uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown,
     "saving chat does not apply position preference drafts")
+panel.tabs.position:Click()
 panel.savePosition:Click()
 assert(uiAddon.db.position.sharing and not uiAddon.db.position.keepLastKnown
     and uiAddon.db.chat.autoJoin and #uiWorld.joinCalls == 1,
     "position settings save independently of chat and do not request a chat join")
-panel.secret:SetText(OTHER_SECRET)
+panel.tabs.chat:Click()
 panel.autoJoin:SetChecked(false)
+panel.tabs.position:Click()
 panel.positionSharing:SetChecked(false)
 panel.positionRetention:SetChecked(true)
+panel.tabs.group:Click()
+panel.secret:SetText(OTHER_SECRET)
 uiWorld:completeJoin(room, 9)
 assert(panel.secret:GetText() == OTHER_SECRET and panel.autoJoin:GetChecked() == false,
     "asynchronous status updates preserve form edits")
@@ -1083,10 +1097,14 @@ assert(uiAddon:GetGroupSecret() == SECRET and uiAddon.db.chat.autoJoin,
     "invalid input preserves group and feature preferences")
 assert(panel.feedback:GetText() ~= "" and panel.feedback.color[1] == 1)
 panel.secret:SetText(OTHER_SECRET)
+panel.tabs.chat:Click()
 panel.join:Click()
-assert(uiWorld.joinCalls[#uiWorld.joinCalls] == room, "Join uses saved group, ignoring draft secret")
+assert(uiWorld.joinCalls[#uiWorld.joinCalls] == room and panel.secret:GetText() == "",
+    "Join uses the saved group after navigating away clears the key draft")
 panel.leave:Click()
 assert(uiWorld.leaveCalls[#uiWorld.leaveCalls] == room and uiAddon:HasGroup(), "chat leave retains group")
+panel.tabs.group:Click()
+panel.secret:SetText(OTHER_SECRET)
 panel.applyGroup:Click()
 assert(uiAddon:GetGroupSecret() == SECRET and panel.applyGroup:GetText() == "Confirm switch")
 panel.applyGroup:Click()
@@ -1100,8 +1118,10 @@ uiAddon:OpenOptions()
 assert(uiAddon.optionsPanel == panel and panel.secret:GetText() == "" and panel.secret.password)
 assert(panel.positionSharing:GetChecked() == true and panel.positionRetention:GetChecked() == false,
     "reopening options restores saved position preferences")
-panel.secret:SetText(SECRET)
+panel.tabs.chat:Click()
 panel.autoJoin:SetChecked(false)
+panel.tabs.group:Click()
+panel.secret:SetText(SECRET)
 panel.secret.scripts.OnEnterPressed(panel.secret)
 assert(uiAddon:GetGroupSecret() == OTHER_SECRET, "Enter also requires switch confirmation")
 panel.secret:SetText(OTHER_SECRET)
@@ -1137,6 +1157,87 @@ assert(not readOnly.optionsPanel.secret:IsEnabled()
     and not readOnly.optionsPanel.positionRetention:IsEnabled()
     and not readOnly.optionsPanel.savePosition:IsEnabled(), "read-only settings disable editing and saving")
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true))
+readOnly.optionsPanel.tabs.chat:Click()
+assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true)
+    and not readOnly.optionsPanel.autoJoin:IsEnabled(), "category changes retain the read-only notice and disabled edits")
+
+-- Options use one category window and navigate back to the same welcome window.
+do
+    local navigation, navigationEnvironment, _, _, navigationWorld = loadAddon(settings(SECRET, false), false)
+    navigationWorld:initialize()
+    loadOptions(navigation, navigationEnvironment)
+    local command = navigationEnvironment.SlashCmdList.LOCKINTOOLS
+    command("options")
+    local options = navigation.optionsPanel
+    assert(options.selectedTab == "group" and options.tabs.group.themeTab.selected
+        and not options.tabs.chat.themeTab.selected and options.pages.group:IsVisible()
+        and not options.pages.chat:IsVisible() and not options.pages.position:IsVisible(),
+        "options initially show only the group category")
+    assert(options.welcome:GetText() == "Back to welcome", "options provide an explicit return to welcome")
+    options.secret:UserInput(OTHER_SECRET)
+    options.secret:SetFocus()
+    options.applyGroup:Click()
+    command("options")
+    options.tabs.group:Click()
+    assert(navigation.optionsPanel == options and options.secret:GetText() == OTHER_SECRET
+        and options.applyGroup:GetText() == "Confirm switch" and options.secret.focused,
+        "reopening visible options or choosing the current category preserves pending group edits")
+    options.tabs.chat:Click()
+    assert(options.selectedTab == "chat" and options.pages.chat:IsVisible()
+        and not options.pages.group:IsVisible() and not options.pages.position:IsVisible()
+        and options.secret:GetText() == "" and options.secret.password and options.secret.focusCleared
+        and options.applyGroup:GetText() == "Use key" and options.leaveGroup:GetText() == "Leave group"
+        and options.feedback:GetText() == "",
+        "leaving group hides its page and clears key drafts, focus and confirmation")
+    options.autoJoin:SetChecked(true)
+    navigationWorld:completeJoin(navigation:GetGroupChannelName(), 9)
+    assert(options.secret:GetText() == "" and options.autoJoin:GetChecked() and not navigation.db.chat.autoJoin,
+        "status updates on another category cannot restore keys or apply preference drafts")
+    options.tabs.position:Click()
+    options.positionSharing:SetChecked(true)
+    options.positionRetention:SetChecked(false)
+    options.tabs.chat:Click()
+    assert(options.autoJoin:GetChecked() and not navigation.db.chat.autoJoin,
+        "chat preferences remain drafts while visiting another category")
+    options.tabs.position:Click()
+    command("options")
+    assert(options.selectedTab == "position" and options.pages.position:IsVisible()
+        and not options.pages.group:IsVisible() and not options.pages.chat:IsVisible()
+        and options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
+        and not navigation.db.position.sharing and navigation.db.position.keepLastKnown
+        and navigationEnvironment.namedFrameCreations.LockInToolsOptions == 1,
+        "repeated options commands reuse the same category window and preserve its unsaved preferences")
+    options.welcome:Click()
+    local welcome = navigation.welcomePanel
+    assert(welcome and welcome:IsVisible() and not options:IsVisible()
+        and welcome.ownSecret:GetText() == SECRET and navigation:GetGroupSecret() == SECRET,
+        "Back to welcome opens the saved key and closes options")
+    welcome.friendSecret:UserInput(OTHER_SECRET)
+    welcome.joinGroup:Click()
+    welcome.options:Click()
+    assert(options:IsVisible() and not welcome:IsVisible() and options.selectedTab == "position"
+        and not options.positionSharing:GetChecked() and options.positionRetention:GetChecked()
+        and welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == ""
+        and welcome.joinGroup:GetText() == "Join friend",
+        "welcome navigation closes and cleans its form while reusing the selected options category")
+    options.tabs.group:Click()
+    options.leaveGroup:Click()
+    assert(options.leaveGroup:GetText() == "Confirm leave", "leaving a group still requires confirmation")
+    options.toggleSecret:Click()
+    command("welcome")
+    assert(welcome:IsVisible() and not options:IsVisible() and options.secret:GetText() == ""
+        and options.secret.password and options.leaveGroup:GetText() == "Leave group"
+        and navigation:GetGroupSecret() == SECRET,
+        "the welcome command clears options secrets and confirmations while enforcing window exclusivity")
+    command("options")
+    assert(options:IsVisible() and not welcome:IsVisible() and welcome.ownSecret:GetText() == "",
+        "the options command also closes and cleans an existing welcome window")
+    command("")
+    assert(welcome:IsVisible() and not options:IsVisible()
+        and navigationEnvironment.namedFrameCreations.LockInToolsOptions == 1
+        and navigationEnvironment.namedFrameCreations.LockInToolsWelcome == 1,
+        "all navigation paths keep one instance of each window")
+end
 
 -- Welcome creates one persisted key and keeps copying separate from joining a friend.
 do
@@ -1342,7 +1443,7 @@ end
 
 -- Optional skins must preserve lazy creation and the forms' existing behavior.
 local function skinFixture()
-    local state = { font = "SkinFont-A.ttf", accent = { 0.2, 0.8, 0.4 }, looks = {}, shells = 0 }
+    local state = { font = "SkinFont-A.ttf", accent = { 0.2, 0.8, 0.4 }, looks = {}, shells = 0, tabs = 0 }
     local skin = {}
     function skin.Shell(window)
         state.shells = state.shells + 1
@@ -1356,6 +1457,11 @@ local function skinFixture()
         region:SetFont(state.font, size, flags)
     end
     function skin.GetAccentColor() return unpack(state.accent) end
+    function skin.Tab(button)
+        state.tabs = state.tabs + 1
+        button.skinTabApplied = true
+    end
+    function skin.SetTabSelection(button, selected) button.skinTabSelected = selected end
     function skin.OnLooksChanged(callback) state.looks[#state.looks + 1] = callback end
     return skin, state
 end
@@ -1392,6 +1498,7 @@ do
         and disabled.optionsPanel:GetHeight() * disabled.optionsPanel.scale <= disabledEnvironment.UIParent:GetHeight()
         and disabled.welcomePanel:GetHeight() * disabled.welcomePanel.scale <= disabledEnvironment.UIParent:GetHeight(),
         "both native windows fit a viewport smaller than their preferred size")
+    disabled:OpenOptions()
     disabled.optionsPanel.secret:UserInput(OTHER_SECRET)
     disabled.optionsPanel.applyGroup:Click()
     disabled.optionsPanel.CloseButton:Click()
@@ -1431,11 +1538,25 @@ do
         and options.positionSharing:GetCheckedTexture().vertexColor[1] == appearance.accent[1]
         and appearance.shells == 2,
         "a later-created settings window uses the current font and accent")
+    options.tabs.position:Click()
+    assert(options.tabs.position.skinTabApplied and options.tabs.position.skinTabSelected
+        and not options.tabs.group.skinTabSelected and not options.tabs.chat.skinTabSelected,
+        "the optional skin selects exactly the active category tab")
+    options.tabs.position.scripts.OnEnter(options.tabs.position)
+    options.tabs.position.scripts.OnLeave(options.tabs.position)
+    assert(options.tabs.position:GetFontString().alpha == 0,
+        "selecting and hovering a skinned tab keeps its replaced native label hidden")
     appearance.accent = { 0.4, 0.6, 1 }
     for _, callback in ipairs(appearance.looks) do callback() end
     assert(options.positionSharing:GetCheckedTexture().vertexColor[1] == appearance.accent[1]
-        and options.positionSharing:GetCheckedTexture().vertexColor[3] == appearance.accent[3],
-        "an existing checkbox follows later accent changes")
+        and options.positionSharing:GetCheckedTexture().vertexColor[3] == appearance.accent[3]
+        and options.selectedTab == "position" and options.pages.position:IsVisible()
+        and options.tabs.position.skinTabSelected and not options.tabs.group.skinTabSelected
+        and options.tabs.position:GetFontString().alpha == 0,
+        "appearance updates refresh accents while retaining the active category and its skin selection")
+    early:OpenWelcome()
+    welcome.friendSecret:UserInput(OTHER_SECRET)
+    welcome.joinGroup:Click()
     welcome.CloseButton:Click()
     assert(not welcome:IsShown() and welcome.ownSecret:GetText() == "" and welcome.friendSecret:GetText() == "",
         "the styled title-bar close button keeps hidden-key cleanup")
@@ -1455,9 +1576,11 @@ do
     local late, _, _, lateWorld = loadSkinnedOptions(function(_, callback) registration = callback end)
     late:OpenOptions()
     local options = late.optionsPanel
+    options.tabs.chat:Click()
+    options.autoJoin:SetChecked(true)
+    options.tabs.group:Click()
     options.secret:UserInput(OTHER_SECRET)
     options.applyGroup:Click()
-    options.autoJoin:SetChecked(true)
     local skin, appearance = skinFixture()
     registration(skin)
     assert(options.skinApplied and options.TitleText.font[1] == appearance.font
@@ -1468,6 +1591,21 @@ do
     assert(late:GetGroupSecret() == OTHER_SECRET and options.secret:GetText() == ""
         and options.secret.password and #lateWorld.joinCalls == 0,
         "confirmation and hidden-key rules still work after skinning an open form")
+end
+
+do
+    local skin, appearance = skinFixture()
+    skin.SetTabSelection = nil
+    local partial = loadSkinnedOptions(function(_, callback) callback(skin) end)
+    partial:OpenOptions()
+    local options = partial.optionsPanel
+    options.tabs.chat:Click()
+    for _, callback in ipairs(appearance.looks) do callback() end
+    assert(appearance.tabs == 0 and not options.tabs.chat.skinTabApplied
+        and options.selectedTab == "chat" and options.pages.chat:IsVisible()
+        and not options.pages.group:IsVisible() and options.tabs.chat.themeTab.selected
+        and options.tabs.chat:GetFontString().alpha ~= 0,
+        "a skin without tab-selection support leaves native category navigation usable")
 end
 
 do

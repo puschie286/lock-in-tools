@@ -69,21 +69,26 @@ local function RefreshSkin(entry, skin)
         if ok and type(red) == "number" and type(green) == "number" and type(blue) == "number" then
             entry.widget:GetCheckedTexture():SetVertexColor(red, green, blue)
         end
+    elseif entry.kind == "tab" and entry.skinned then
+        Try(skin, "SetTabSelection", entry.widget, entry.selected == true)
     end
 end
 
 local skinMethods = { window = "Shell", section = "Panel", button = "Button",
-    close = "CloseButton", edit = "EditBox", checkbox = "Checkbox" }
+    close = "CloseButton", edit = "EditBox", checkbox = "Checkbox", tab = "Tab" }
 
 local function SkinWindow(panel, skin)
     for _, entry in ipairs(panel.themeElements) do
         if not entry.skinned then
             local method = skinMethods[entry.kind]
+            -- Older EUI skins cannot select custom tabs; keep our native indicator.
+            if entry.kind == "tab" and type(skin.SetTabSelection) ~= "function" then method = nil end
             if method then entry.skinned = Try(skin, method, entry.widget) end
             if entry.kind == "button" and entry.skinned then
                 entry.widget:GetFontString():SetAlpha(1)
                 Try(skin, "StateButtonLabel", entry.widget)
-            elseif entry.kind == "close" and entry.skinned then
+            elseif (entry.kind == "close" or entry.kind == "tab") and entry.skinned then
+                -- These primitives supply their own glyph/label.
                 entry.widget:GetFontString():SetAlpha(0)
             end
         end
@@ -104,20 +109,22 @@ end
 
 function Theme:Button(parent, text, style)
     local button = CreateFrame("Button", nil, parent)
-    local entry = Track(parent, "button", button)
+    local entry = Track(parent, style == "tab" and "tab" or "button", button)
+    if style == "tab" then button.themeTab = entry end
     local fill, edges = Surface(button, colors.surface)
     local label = self:Label(button, "", 13)
     label:SetPoint("CENTER", button, "CENTER")
     button:SetFontString(label)
     button:SetText(text or "")
     local function Paint()
+        if entry.kind == "tab" and entry.skinned then return end
         local enabled = button:IsEnabled()
         local color = not enabled and colors.muted
             or (not entry.skinned and style == "danger" and { 1, 0.47, 0.47 } or colors.text)
         label:SetTextColor(unpack(color))
         label:SetAlpha((enabled or entry.skinned) and 1 or 0.5)
         if entry.skinned then return end
-        local primary = style == "primary"
+        local primary = style == "primary" or entry.selected
         local hover = enabled and entry.hover
         local light = hover and 0.04 or 0
         fill:SetColorTexture(0.10 + light, (primary and 0.26 or 0.12) + light,
@@ -128,8 +135,16 @@ function Theme:Button(parent, text, style)
     button:HookScript("OnLeave", function() entry.hover = false; Paint() end)
     button:HookScript("OnEnable", Paint)
     button:HookScript("OnDisable", Paint)
+    entry.paint = Paint
     Paint()
     return button
+end
+
+function Theme:SetTabSelected(button, selected)
+    local entry = button.themeTab
+    entry.selected = selected == true
+    entry.paint()
+    if self.skin then RefreshSkin(entry, self.skin) end
 end
 
 function Theme:EditBox(parent)

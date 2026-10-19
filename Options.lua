@@ -85,17 +85,19 @@ local function SavePositionSettings(panel)
 end
 
 local function CreateOptionsPanel()
-    local panel = UI:Window("LockInToolsOptions", 860, 700)
-    local group = UI:Section(panel, 20, 66, 820, 250, "Your group")
+    local panel = UI:Window("LockInToolsOptions", 720, 550)
+    panel.tabs, panel.pages = {}, {}
+    local group = UI:Section(panel, 20, 116, 680, 300, "Your group")
+    panel.pages.group = group
 
     panel.groupStatus = UI:Label(group, "", 13, "muted")
     panel.groupStatus:SetPoint("TOPLEFT", 16, -46)
-    panel.groupStatus:SetWidth(788)
+    panel.groupStatus:SetWidth(648)
 
     local introduction = UI:Label(group,
         "Use the same key as your friends. Your group applies to every LockInTools feature.", 14)
     introduction:SetPoint("TOPLEFT", 16, -76)
-    introduction:SetWidth(788)
+    introduction:SetWidth(648)
 
     local secretLabel = UI:Label(group, "Group key", 13, "muted")
     secretLabel:SetPoint("TOPLEFT", 16, -109)
@@ -198,13 +200,14 @@ local function CreateOptionsPanel()
 
     local privacyHint = UI:Label(group, "Share the same key with your friends.", 12, "muted")
     privacyHint:SetPoint("TOPLEFT", 16, -224)
-    privacyHint:SetWidth(788)
+    privacyHint:SetWidth(648)
 
-    local chat = UI:Section(panel, 20, 332, 400, 292, "Shared chat")
+    local chat = UI:Section(panel, 20, 116, 680, 300, "Shared chat")
+    panel.pages.chat = chat
     local chatIntroduction = UI:Label(chat,
         "Your group selects its shared channel automatically. Friends must be on the same realm and faction.", 13, "muted")
     chatIntroduction:SetPoint("TOPLEFT", 16, -50)
-    chatIntroduction:SetWidth(368)
+    chatIntroduction:SetWidth(648)
 
     panel.autoJoin = UI:Checkbox(chat)
     panel.autoJoin:SetPoint("TOPLEFT", 12, -102)
@@ -214,7 +217,7 @@ local function CreateOptionsPanel()
 
     panel.status = UI:Label(chat, "", 12, "muted")
     panel.status:SetPoint("TOPLEFT", 16, -148)
-    panel.status:SetWidth(368)
+    panel.status:SetWidth(648)
 
     panel.save = UI:Button(chat, "Save chat settings", "primary")
     panel.save:SetSize(148, 32)
@@ -244,13 +247,14 @@ local function CreateOptionsPanel()
     local chatHint = UI:Label(chat,
         "Use /lit chat to write. Leaving chat keeps your LockInTools group.", 12, "muted")
     chatHint:SetPoint("TOPLEFT", 16, -254)
-    chatHint:SetWidth(368)
+    chatHint:SetWidth(648)
 
-    local position = UI:Section(panel, 440, 332, 400, 292, "Shared positions")
+    local position = UI:Section(panel, 20, 116, 680, 300, "Shared positions")
+    panel.pages.position = position
     local positionIntroduction = UI:Label(position,
         "See your friends on the world map. Keep their last-known positions when they go offline.", 13, "muted")
     positionIntroduction:SetPoint("TOPLEFT", 16, -50)
-    positionIntroduction:SetWidth(368)
+    positionIntroduction:SetWidth(648)
 
     panel.positionSharing = UI:Checkbox(position)
     panel.positionSharing:SetPoint("TOPLEFT", 12, -102)
@@ -266,7 +270,7 @@ local function CreateOptionsPanel()
 
     panel.positionStatus = UI:Label(position, "", 12, "muted")
     panel.positionStatus:SetPoint("TOPLEFT", 16, -180)
-    panel.positionStatus:SetWidth(368)
+    panel.positionStatus:SetWidth(648)
 
     panel.savePosition = UI:Button(position, "Save position settings", "primary")
     panel.savePosition:SetSize(184, 32)
@@ -276,8 +280,41 @@ local function CreateOptionsPanel()
     end)
 
     panel.feedback = UI:Label(panel, "", 13)
-    panel.feedback:SetPoint("TOPLEFT", 24, -644)
-    panel.feedback:SetWidth(812)
+    panel.feedback:SetPoint("TOPLEFT", 24, -434)
+    panel.feedback:SetWidth(672)
+
+    local function SelectTab(name)
+        if panel.selectedTab == name then return end
+        if panel.selectedTab == "group" then
+            HideSecret(panel, true)
+            ResetConfirmation(panel)
+        end
+        panel.selectedTab = name
+        for category, page in pairs(panel.pages) do
+            if category == name then page:Show() else page:Hide() end
+            UI:SetTabSelected(panel.tabs[category], category == name)
+        end
+        SetFeedback(panel)
+        addon:RefreshOptions()
+    end
+    local categories = { { "group", "Group", 134 }, { "chat", "Shared chat", 152 },
+        { "position", "Shared positions", 172 } }
+    local tabX = 20
+    for _, category in ipairs(categories) do
+        local name = category[1]
+        local tab = UI:Button(panel, category[2], "tab")
+        tab:SetPoint("TOPLEFT", tabX, -66)
+        tab:SetSize(category[3], 34)
+        tab:SetScript("OnClick", function() SelectTab(name) end)
+        panel.tabs[name] = tab
+        tabX = tabX + category[3] + 10
+    end
+    SelectTab("group")
+
+    panel.welcome = UI:Button(panel, "Back to welcome")
+    panel.welcome:SetPoint("TOPLEFT", 24, -492)
+    panel.welcome:SetSize(160, 34)
+    panel.welcome:SetScript("OnClick", function() addon:OpenWelcome() end)
 
     panel:SetScript("OnShow", function()
         UI:Fit(panel)
@@ -338,6 +375,7 @@ function addon:OpenOptions()
         return
     end
 
+    if self.welcomePanel then self.welcomePanel:Hide() end
     if not self.optionsPanel then
         self.optionsPanel = CreateOptionsPanel()
     end
@@ -466,7 +504,6 @@ local function CreateWelcomePanel()
     panel.options:SetPoint("TOPLEFT", 24, -492)
     panel.options:SetSize(148, 34)
     panel.options:SetScript("OnClick", function()
-        panel:Hide()
         addon:OpenOptions()
     end)
 
@@ -530,6 +567,7 @@ function addon:OpenWelcome()
         return
     end
 
+    if self.optionsPanel then self.optionsPanel:Hide() end
     local problem
     if not self:HasGroup() and not self.invalidGroupSecret and not self.savedDataReadOnly then
         local key
