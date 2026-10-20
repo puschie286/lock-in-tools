@@ -367,7 +367,7 @@ world:advance(2)
 assert(#world.sent == 1, "An unchanged position has no separate heartbeat")
 world.x = 0.4
 world:advance(2)
-assert(#world.sent == 2 and world.sent[2].message:find("|0.40000|", 1, true))
+assert(#world.sent == 2 and world.sent[2].message:find("|40000|", 1, true))
 assert(addon:ReceiveData("Friend-TestRealm", "1|position|2|P|2000000022|37|30000|70000"))
 assert(addon:GetSharedPositions()["friend-testrealm"].x == 0.3)
 local positionSends = #world.sent
@@ -1232,6 +1232,54 @@ do
         and clock.sent[4].message:find("9=P,37,65000,75000", 1, true))
 end
 
+-- Status captures server time once for both the envelope and the coordinate
+-- sample. Integer wire values decode to normalized Lua coordinates.
+do
+    local values = { level = 24 }
+    local current, clock = positionStatusFixture(values)
+    clock:advance(4)
+    clock.x, clock.y, values.level = 0.123456, 0.999996, 25
+    local reads = 0
+    clock.environment.GetServerTime = function()
+        reads = reads + 1
+        return 2000000004 + reads
+    end
+    clock:advance(1)
+    local packet = clock.sent[#clock.sent].message
+    assert(reads == 1 and packet:match("^1|status|5|F|[^|]+|2000000005|2|")
+        and packet:find("9=P,37,12346,100000", 1, true),
+        "A second clock read must not give the attachment a different timestamp")
+    assert(receive(current, "Friend", full("peer", 2000000005, 1, "1=25|9=P,37,12346,100000")))
+    local peer = assert(current:GetSharedPositions()["friend-testrealm"])
+    assert(peer.x == 0.12346 and peer.y == 1 and peer.stamp == 2000000005
+        and peer.positionStamp == 2000000005)
+end
+
+-- The status clock cannot move backwards. Omitting a sample rather than
+-- assigning it a future timestamp also leaves movement broadcasting enabled.
+do
+    local values = { level = 24 }
+    local current, clock = positionStatusFixture(values)
+    clock:advance(4)
+    clock.epoch, clock.x, values.level = clock.epoch - 10, 0.6, 25
+    clock:advance(1)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000000|2|1=25$")
+        and not clock.sent[2].message:find("|9=", 1, true),
+        "A sample from before the clamped envelope time must be omitted")
+    clock:advance(1)
+    assert(#clock.sent == 3 and clock.sent[3].message == "1|position|2|P|1999999996|37|60000|75000",
+        "An omitted attachment must not suppress the changed movement sample")
+end
+
+-- Wire savings come from the coordinate decimals and the removed duplicate
+-- timestamp; standalone movement retains its own ordering timestamp.
+do
+    assert(#"9=P,2000000000,1429,0.12345,0.67890" - #"9=P,1429,12345,67890" == 15)
+    assert(#"9=U,2000000000" - #"9=U" == 11)
+    assert(#"1|position|1|P|2000000000|1429|0.12345|0.67890"
+        - #"1|position|2|P|2000000000|1429|12345|67890" == 4)
+end
+
 -- All idle peers remain online beyond the position timeout using only status
 -- refreshes. A stationary late join discovers positions in its initial exchange.
 do
@@ -1364,6 +1412,25 @@ do
     assert(receive(current, "Friend", full("peer", 2000000014, 1, "1=25")))
     assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6,
         "An omitted attachment is not an unavailable-position report")
+end
+
+-- Both routes share one position ordering clock. Equal-second duplicates and
+-- conflicting samples cannot replace whichever route was accepted first.
+do
+    local current = positionStatusFixture({ level = 24 })
+    assert(current:ReceiveData("Friend", "1|position|2|P|2000000000|37|30000|70000"))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|9=P,37,90000,70000")))
+    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.3,
+        "An equal-second attachment must not overwrite accepted movement")
+    assert(receive(current, "Friend", full("peer", 2000000001, 1, "1=25|9=P,37,60000,70000")))
+    assert(not current:ReceiveData("Friend", "1|position|2|P|2000000001|37|90000|70000"))
+    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6,
+        "An equal-second movement must not overwrite an accepted attachment")
+    assert(receive(current, "Friend", full("peer", 2000000002, 1,
+        "1=25|9=P,2000000002,37,0.90000,0.70000")))
+    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6
+        and current:GetSharedPositions()["friend-testrealm"].positionStamp == 2000000001,
+        "Legacy attachment coordinates cannot refresh retained positions")
 end
 
 -- Sharing remains opt-in in both directions. Unavailable attachments keep the

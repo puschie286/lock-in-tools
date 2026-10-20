@@ -140,7 +140,7 @@ local function UnescapeStatus(value)
 end
 
 local function DecodeStatus(payload)
-    local session, stampText, revisionText, body = payload:match("^4|F|([^|]+)|(%d+)|(%d+)|(.*)$")
+    local session, stampText, revisionText, body = payload:match("^5|F|([^|]+)|(%d+)|(%d+)|(.*)$")
     local stamp = StatusInteger(stampText, MAX_STATUS_STAMP, 0)
     local revision = StatusInteger(revisionText, MAX_STATUS_REVISION, 1)
     if not ValidStatusSession(session) or not stamp or not revision then return nil end
@@ -243,6 +243,7 @@ local function EncodeStatus(self, fields, revision, budget)
     local stamp = GetServerTime()
     if IsSecret(stamp) or type(stamp) ~= "number" or stamp ~= stamp or stamp < 0
         or stamp > MAX_STATUS_STAMP or stamp % 1 ~= 0 then return nil end
+    local sampleStamp = stamp
     stamp = math.max(stamp, status.lastStamp or 0)
     status.lastStamp = stamp
     local encoded = {}
@@ -250,10 +251,17 @@ local function EncodeStatus(self, fields, revision, budget)
         local value = fields[id]
         if value ~= nil then encoded[#encoded + 1] = id .. "=" .. EscapeStatus(value) end
     end
-    local payload = "4|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
+    local payload = "5|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
     -- Sample only when a status packet is already due. Movement must not make
     -- player status dirty or change the contents associated with its revision.
-    local position = self.GetPositionSnapshot and self:GetPositionSnapshot()
+    local position
+    if self.GetPositionSnapshot and sampleStamp == stamp then
+        local positionStamp
+        position, positionStamp = self:GetPositionSnapshot(sampleStamp)
+        -- Attachments inherit this envelope's timestamp. An older sample must
+        -- never acquire a newer time, including during server-clock rollback.
+        if positionStamp ~= stamp then position = nil end
+    end
     if position then
         local attachment = (#encoded > 0 and "|" or "") .. POSITION_FIELD_ID .. "=" .. EscapeStatus(position)
         if #payload + #attachment <= (budget or MAX_STATUS_PAYLOAD) then
@@ -300,7 +308,7 @@ local function ProcessStatus(self, sender, message, requested)
         pcall(provider.receive, sender, NamedStatus(message.fields), message.stamp, message.revision, CopyStatus(metadata))
     end
     if message.position and self.ReceivePositionSnapshot then
-        self:ReceivePositionSnapshot(sender, message.position)
+        self:ReceivePositionSnapshot(sender, message.position, message.stamp)
     end
     return true
 end

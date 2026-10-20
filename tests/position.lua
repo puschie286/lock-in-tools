@@ -295,7 +295,15 @@ for _, malformed in ipairs({
     "2|P|2000000031|37|90000|10000|extra", "2|P|2000000031|37|90000",
     "2|P|2000000031|37|100001|10000", "2|P|2000000031|37|-1|10000",
     "2|P|2000000031|0|90000|10000", "2|P|2000000031|37|unknown|10000",
-    "2|U|not-a-time", "2|X|2000000031", "2|C|2000000031|MAGE",
+    "2|U|not-a-time", "2|U|2000000031|extra", "2|X|2000000031", "2|C|2000000031|MAGE",
+    "2|P|02000000031|37|90000|10000", "2|P|2000000031.0|37|90000|10000",
+    "2|P|+2000000031|37|90000|10000", "2|P|2e9|37|90000|10000",
+    "2|P|10000000000|37|90000|10000", "2|P|2000000031|037|90000|10000",
+    "2|P|2000000031|37.0|90000|10000", "2|P|2000000031|1000001|90000|10000",
+    "2|P|2000000031|37|090000|10000", "2|P|2000000031|37|90000.0|10000",
+    "2|P|2000000031|37|9e4|10000", "2|P|2000000031|37|+90000|10000",
+    "2|P|2000000031|37|90000|-1", "2|P|2000000031|37|90000|100001",
+    "2|U|02000000031", "2|U|-1", "2|U|2000000031.0",
     world:position(37, 0.9, 0.1, incomingStamp),
     world:position(37, 0.9, 0.1, incomingStamp - 1),
 }) do
@@ -556,6 +564,38 @@ do
     clock:connect()
     clock:advance(2)
     assert(#clock.sent == 6, "A replacement connection must not inherit suppression from the old one")
+end
+
+-- Integer wire coordinates retain normalized Lua/saved values at the scale boundaries.
+do
+    local scaled, clock = newAddon()
+    clock:login()
+    clock:connect()
+    scaled:SetPositionSharing(true)
+    clock.map, clock.x, clock.y = 1000000, 0, 1
+    clock:advance(2)
+    assert(clock.sent[1].payload == "2|P|2000000002|1000000|0|100000",
+        "Coordinate endpoints and the largest supported map use canonical integer values")
+    assert(scaled:ReceivePosition("Friend", clock.sent[1].payload))
+    local peer = assert(scaled:GetSharedPositions()["friend-testrealm"])
+    assert(peer.x == 0 and peer.y == 1 and scaled.db.position.peers["friend-testrealm"].y == 1,
+        "Wire scaling never leaks into Lua consumers or persisted locations")
+    clock.map, clock.x, clock.y = 1, 0.000005, 0.1234549
+    clock:advance(2)
+    assert(clock.sent[2].payload == "2|P|2000000004|1|1|12345",
+        "Coordinates round to the nearest 1/100000, including a half-step upwards")
+    assert(scaled:ReceivePosition("Friend", clock.sent[2].payload))
+    peer = scaled:GetSharedPositions()["friend-testrealm"]
+    local stored = scaled.db.position.peers["friend-testrealm"]
+    assert(peer.x == 0.00001 and peer.y == 0.12345 and stored.x == peer.x and stored.y == peer.y)
+    local restored, restoredClock = newAddon(copy(scaled.db))
+    restoredClock:login()
+    peer = restored:GetSharedPositions()["friend-testrealm"]
+    assert(peer.x == 0.00001 and peer.y == 0.12345,
+        "A reload preserves normalized values without scaling the saved data a second time")
+    clock.x, clock.y = 0.0000051, 0.1234548
+    clock:advance(2)
+    assert(#clock.sent == 2, "Changes inside the same quantized coordinate remain suppressed")
 end
 
 -- Unavailable data is also deduplicated; recovery sends at the next sample.
@@ -971,30 +1011,30 @@ do
     assert(shared:GetPositionSnapshot() == nil and clock.samples == 0,
         "Status never samples coordinates before sharing is enabled")
     shared:SetPositionSharing(true)
-    local snapshot = shared:GetPositionSnapshot()
-    assert(snapshot == "P,2000000000,37,0.25000,0.75000" and clock.samples == 1)
+    local snapshot, stamp = shared:GetPositionSnapshot(clock.epoch)
+    assert(snapshot == "P,37,25000,75000" and stamp == clock.epoch and clock.samples == 1)
     clock.x = 0.6
     assert(shared:GetPositionSnapshot() == snapshot and clock.samples == 1,
         "Two packets with the same timestamp must contain the same coordinate sample")
     shared:PositionTick()
     assert(#clock.sent == 1 and clock.samples == 1
-        and clock.sent[1].payload == "1|" .. snapshot:gsub(",", "|"),
+        and clock.sent[1].payload == "2|P|2000000000|37|25000|75000",
         "The movement path reuses a status sample from the same server second")
     clock:advance(1)
-    local fresh = shared:GetPositionSnapshot()
-    assert(fresh == "P,2000000001,37,0.60000,0.75000" and clock.samples == 2,
+    local fresh, freshStamp = shared:GetPositionSnapshot(clock.epoch + 1)
+    assert(fresh == "P,37,60000,75000" and freshStamp == clock.epoch + 1 and clock.samples == 2,
         "The next server second samples current coordinates instead of repeating an old stamp")
     shared:PositionSnapshotSent(fresh)
     clock:advance(1)
     assert(#clock.sent == 1, "An accepted public status snapshot suppresses a redundant movement packet")
     clock:advance(28)
-    local idle = shared:GetPositionSnapshot()
-    assert(idle == "P,2000000030,37,0.60000,0.75000" and #clock.sent == 1,
+    local idle, idleStamp = shared:GetPositionSnapshot()
+    assert(idle == "P,37,60000,75000" and idleStamp == clock.epoch + 30 and #clock.sent == 1,
         "An idle status refresh has fresh coordinates and time without a separate position heartbeat")
     clock.map = nil
     clock:advance(1)
-    local unavailable = shared:GetPositionSnapshot()
-    assert(unavailable == "U,2000000031")
+    local unavailable, unavailableStamp = shared:GetPositionSnapshot()
+    assert(unavailable == "U" and unavailableStamp == clock.epoch + 31)
     shared:PositionSnapshotSent(unavailable)
     clock:advance(1)
     assert(#clock.sent == 1, "A public unavailable attachment also suppresses duplicate movement data")
@@ -1002,7 +1042,7 @@ do
     assert(shared:GetPositionSnapshot() == nil)
     shared:SetPositionSharing(true)
     clock.map = 38
-    assert(shared:GetPositionSnapshot() == "P,2000000032,38,0.60000,0.75000",
+    assert(shared:GetPositionSnapshot() == "P,38,60000,75000",
         "Sharing lifecycle resets discard the cached sample even within the same server second")
 
     local replyOnly, replyClock = newAddon()
@@ -1015,38 +1055,74 @@ do
         "Collecting a targeted or failed snapshot does not mark its position as publicly sent")
 end
 
+-- Timestamp reuse cannot freeze the sampling cache when the server clock moves backwards.
+do
+    local shared, clock = newAddon()
+    clock:login()
+    clock:connect()
+    shared:SetPositionSharing(true)
+    local first, stamp = shared:GetPositionSnapshot(clock.epoch)
+    assert(first == "P,37,25000,75000" and stamp == clock.epoch)
+    clock.epoch, clock.x = clock.epoch - 10, 0.6
+    local rolledBack, rollbackStamp = shared:GetPositionSnapshot(clock.epoch)
+    assert(rolledBack == "P,37,60000,75000" and rollbackStamp == clock.epoch and clock.samples == 2,
+        "Sampling follows the actual raw server second rather than a clamped status timestamp")
+    clock.x = 0.9
+    shared:PositionTick()
+    assert(clock.sent[1].payload == "2|P|1999999990|37|60000|75000" and clock.samples == 2,
+        "Movement and an attachment reuse the identical sample even after clock rollback")
+    clock:advance(1)
+    local recovered, recoveredStamp = shared:GetPositionSnapshot()
+    assert(recovered == "P,37,90000,75000" and recoveredStamp == clock.epoch + 1 and clock.samples == 3,
+        "The next raw server second refreshes coordinates without waiting for the old clock value")
+    local samples = clock.samples
+    for _, invalid in ipairs({ -1, 0.5, 10000000000, math.huge, 0 / 0, "1999999991", false }) do
+        local invalidSnapshot, invalidStamp = shared:GetPositionSnapshot(invalid)
+        assert(invalidSnapshot == nil and invalidStamp == nil and clock.samples == samples,
+            "Invalid inherited sample timestamps cannot be formatted or refresh the coordinate cache")
+    end
+end
+
 -- Compact status positions use the existing movement ordering, availability and opt-in rules.
 do
     local shared, clock = newAddon()
     clock:login()
     shared:SetPositionSharing(true)
-    assert(shared:ReceivePositionSnapshot("Friend", "P,2000000000,37,0.30000,0.70000"))
+    assert(shared:ReceivePositionSnapshot("Friend", "P,37,30000,70000", clock.epoch))
     assert(shared:ReceivePosition("Friend", clock:position(37, 0.4, 0.6, clock.epoch + 2)))
     local peer = assert(shared:GetSharedPositions()["friend-testrealm"])
-    assert(not shared:ReceivePositionSnapshot("Friend", "P,2000000001,37,0.10000,0.90000")
-        and not shared:ReceivePositionSnapshot("Friend", "P,2000000002,37,0.10000,0.90000")
+    assert(not shared:ReceivePositionSnapshot("Friend", "P,37,10000,90000", clock.epoch + 1)
+        and not shared:ReceivePositionSnapshot("Friend", "P,37,10000,90000", clock.epoch + 2)
         and peer.x == 0.4, "A delayed or duplicate status attachment cannot overwrite newer movement")
-    assert(shared:ReceivePositionSnapshot("Friend", "U,2000000003"))
+    assert(shared:ReceivePositionSnapshot("Friend", "U", clock.epoch + 3))
     assert(peer.x == 0.4 and peer.positionStamp == clock.epoch + 2 and not peer.positionAvailable,
         "An unavailable attachment preserves the last known coordinates and their acquisition time")
     assert(not shared:ReceivePosition("Friend", clock:position(37, 0.8, 0.2, clock.epoch + 2)),
         "A status attachment also advances the ordering used by separate movement packets")
     for _, malformed in ipairs({
-        "C,2000000004,MAGE", "P,2000000004,37,0.3", "P,2000000004,37,1.1,0.7",
-        "P,2000000004|37|0.3|0.7", "P,2000000004,37,0.3,0.7,extra", "U,2000000004,extra", "U,bad",
+        "C,MAGE", "P,37,30000", "P,37,100001,70000", "P,37,-1,70000",
+        "P,37,0.3,0.7", "P,37,30000,70000,extra", "U,extra",
+        "P|37|30000|70000", "P,2000000004,37,0.30000,0.70000", "U,2000000004",
+        "P,037,30000,70000", "P,37,030000,70000", "P,37,+30000,70000",
+        "P,37,3e4,70000", "P,37,30000,70000.0", "P,1000001,30000,70000",
     }) do
-        assert(not shared:ReceivePositionSnapshot("Friend", malformed))
+        assert(not shared:ReceivePositionSnapshot("Friend", malformed, clock.epoch + 4))
     end
-    assert(not shared:ReceivePositionSnapshot("Friend", nil))
-    assert(not shared:ReceivePositionSnapshot("Self", "P,2000000004,37,0.3,0.7"))
+    assert(not shared:ReceivePositionSnapshot("Friend", nil, clock.epoch + 4))
+    for _, badStamp in ipairs({ -1, 1.5, 10000000000, math.huge, 0 / 0, "2000000004", false }) do
+        assert(not shared:ReceivePositionSnapshot("Friend", "P,37,30000,70000", badStamp),
+            "An attachment cannot supply or coerce its own status timestamp")
+    end
+    assert(not shared:ReceivePositionSnapshot("Friend", "P,37,30000,70000"))
+    assert(not shared:ReceivePositionSnapshot("Self", "P,37,30000,70000", clock.epoch + 4))
     shared:SetPositionSharing(false)
-    assert(not shared:ReceivePositionSnapshot("Friend", "P,2000000004,37,0.3,0.7")
+    assert(not shared:ReceivePositionSnapshot("Friend", "P,37,30000,70000", clock.epoch + 4)
         and shared.positionState.peers["friend-testrealm"] == peer,
         "Status attachments cannot bypass opt-in reception")
     shared:SetPositionSharing(true)
     shared.savedDataReadOnly = true
     assert(shared:GetPositionSnapshot() == nil
-        and not shared:ReceivePositionSnapshot("Friend", "P,2000000004,37,0.3,0.7"),
+        and not shared:ReceivePositionSnapshot("Friend", "P,37,30000,70000", clock.epoch + 4),
         "Status attachments preserve newer-schema read-only behavior")
 end
 

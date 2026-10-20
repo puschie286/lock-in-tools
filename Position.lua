@@ -1,5 +1,6 @@
 local _, addon = ...
 local INTERVAL, PEER_TIMEOUT = 2, 60
+local COORDINATE_SCALE, MAX_POSITION_STAMP = 100000, 9999999999
 local CLASSES = {
     WARRIOR = true, PALADIN = true, HUNTER = true, ROGUE = true, PRIEST = true,
     SHAMAN = true, MAGE = true, WARLOCK = true, DRUID = true,
@@ -12,6 +13,13 @@ end
 local function Number(value, minimum, maximum, integer)
     return not IsSecret(value) and type(value) == "number" and value >= minimum and value <= maximum
         and (not integer or value == math.floor(value))
+end
+
+local function WireInteger(value, minimum, maximum)
+    if type(value) ~= "string" or #value > 10 or not value:match("^[0-9]+$")
+        or (#value > 1 and value:sub(1, 1) == "0") then return nil end
+    local number = tonumber(value)
+    if number >= minimum and number <= maximum then return number end
 end
 
 local function ClassToken(value)
@@ -244,38 +252,49 @@ local function Sample()
     return map, x, y
 end
 
-local function CurrentSample(self)
-    local state, stamp = self.positionState, GetServerTime()
+local function CurrentSample(self, stamp)
+    if stamp == nil then stamp = GetServerTime() end
+    if not Number(stamp, 0, MAX_POSITION_STAMP, true) then return nil end
+    local state = self.positionState
     if not state.sample or state.sample.stamp ~= stamp then
         local map, x, y = Sample()
+        if map then
+            x = math.floor(x * COORDINATE_SCALE + 0.5)
+            y = math.floor(y * COORDINATE_SCALE + 0.5)
+        end
+        local snapshot = map and string.format("P,%d,%d,%d", map, x, y) or "U"
         state.sample = {
             stamp = stamp,
-            value = map and string.format("P|%d|%.5f|%.5f", map, x, y) or "U",
-            snapshot = map and string.format("P,%d,%d,%.5f,%.5f", stamp, map, x, y)
-                or string.format("U,%d", stamp),
+            value = snapshot:gsub(",", "|"),
+            snapshot = snapshot,
         }
     end
     return state.sample
 end
 
-function addon:GetPositionSnapshot()
+function addon:GetPositionSnapshot(stamp)
     if not Active(self) then return nil end
-    return CurrentSample(self).snapshot
+    -- Status supplies its captured server time. Cache by the actual sample
+    -- time, never by a status timestamp clamped ahead after clock rollback.
+    local sample = CurrentSample(self, stamp)
+    if sample then return sample.snapshot, sample.stamp end
 end
 
 function addon:PositionSnapshotSent(snapshot)
     if not Active(self) then return end
-    local kind, fields = snapshot:match("^([PU]),%d+(.*)$")
     local state = self.positionState
     local changed = state.lastSendSucceeded ~= true
-    state.lastSentSample, state.lastSendSucceeded = kind .. fields:gsub(",", "|"), true
+    state.lastSentSample, state.lastSendSucceeded = snapshot:gsub(",", "|"), true
     if changed then Refresh(self) end
 end
 
-function addon:ReceivePositionSnapshot(sender, snapshot)
+function addon:ReceivePositionSnapshot(sender, snapshot, stamp)
     if IsSecret(snapshot) or type(snapshot) ~= "string" or snapshot:find("|", 1, true)
-        or (snapshot:sub(1, 2) ~= "P," and snapshot:sub(1, 2) ~= "U,") then return false end
-    return self:ReceivePosition(sender, "1|" .. snapshot:gsub(",", "|"))
+        or not Number(stamp, 0, MAX_POSITION_STAMP, true) then return false end
+    local stampText = string.format("%.0f", stamp)
+    if snapshot == "U" then return self:ReceivePosition(sender, "2|U|" .. stampText) end
+    if snapshot:sub(1, 2) ~= "P," then return false end
+    return self:ReceivePosition(sender, "2|P|" .. stampText .. "|" .. snapshot:sub(3):gsub(",", "|"))
 end
 
 function addon:PositionTick()
@@ -285,8 +304,9 @@ function addon:PositionTick()
     if self:IsDataConnected() then
         local sample = CurrentSample(self)
         -- Compare serialized coordinates without the ever-changing timestamp.
-        if state.lastSendSucceeded == false or sample.value ~= state.lastSentSample then
-            local payload = "1|" .. sample.snapshot:gsub(",", "|")
+        if sample and (state.lastSendSucceeded == false or sample.value ~= state.lastSentSample) then
+            local kind, fields = sample.value:match("^([PU])(.*)$")
+            local payload = "2|" .. kind .. "|" .. string.format("%.0f", sample.stamp) .. fields
             -- Keep only this sample: failed sends retry current data, never a backlog.
             local succeeded = self:SendData("position", payload)
             if state.lastSendSucceeded ~= succeeded then changed = true end
@@ -306,18 +326,20 @@ function addon:ReceivePosition(sender, payload)
     if not canonical or canonical == own or canonical == NativeSelfName() then return false end
     local fields = {}
     for value in (payload .. "|"):gmatch("([^|]*)|") do fields[#fields + 1] = value end
-    local kind, stamp = fields[2], tonumber(fields[3])
-    local map, x, y = tonumber(fields[4]), tonumber(fields[5]), tonumber(fields[6])
-    if fields[1] ~= "1" or not Number(stamp, 0, 9999999999, true)
-        or not ((kind == "P" and #fields == 6 and Number(map, 1, 1000000, true)
-            and Number(x, 0, 1) and Number(y, 0, 1)) or (kind == "U" and #fields == 3)) then return false end
+    local kind, stamp = fields[2], WireInteger(fields[3], 0, MAX_POSITION_STAMP)
+    local map = WireInteger(fields[4], 1, 1000000)
+    local x, y = WireInteger(fields[5], 0, COORDINATE_SCALE), WireInteger(fields[6], 0, COORDINATE_SCALE)
+    if fields[1] ~= "2" or not stamp
+        or not ((kind == "P" and #fields == 6 and map and x and y)
+            or (kind == "U" and #fields == 3)) then return false end
     local state = self.positionState
     if state.latest[canonical] and stamp <= state.latest[canonical] then return false end
     state.latest[canonical] = stamp
     local wasOnline = state.peers[canonical] and state.peers[canonical].online
     if kind == "P" then
         state.peers[canonical] = {
-            name = sender, map = map, x = x, y = y, stamp = stamp, lastReceived = GetTime(), online = true,
+            name = sender, map = map, x = x / COORDINATE_SCALE, y = y / COORDINATE_SCALE,
+            stamp = stamp, lastReceived = GetTime(), online = true,
             class = state.classes[canonical],
             positionStamp = stamp, positionAvailable = true,
         }
