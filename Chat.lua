@@ -80,7 +80,6 @@ end
 
 function addon:CancelChatTimer()
     local state = self.chatState
-    state.generation = state.generation + 1
     if state.timer then
         state.timer:Cancel()
         state.timer = nil
@@ -94,6 +93,7 @@ function addon:SetChatPhase(phase, detail)
 end
 
 function addon:GetChatStatusText(concise)
+    if self:IsGroupSwitching() then return "Leaving previous group..." end
     local state = self.chatState
     local name = self:GetGroupChannelName()
     if not name then
@@ -117,7 +117,7 @@ end
 function addon:ConfirmChatMembership()
     local state = self.chatState
     local configuredName = self:GetGroupChannelName()
-    if not configuredName or state.paused or state.failed then
+    if state.stopped or self:IsGroupSwitching() or not configuredName or state.paused or state.failed then
         return false
     end
     local channelID, canonicalName = GetChannelName(configuredName)
@@ -148,7 +148,7 @@ end
 function addon:RefreshChatPassword()
     local state = self.chatState
     local name = self:GetGroupChannelName()
-    if not name or state.phase ~= "joined" or state.passwordSet then
+    if state.stopped or self:IsGroupSwitching() or not name or state.phase ~= "joined" or state.passwordSet then
         return
     end
     local playerGUID = UnitGUID("player")
@@ -177,11 +177,9 @@ end
 function addon:ScheduleChatCheck(delay)
     self:CancelChatTimer()
     local state = self.chatState
-    local generation = state.generation
-    state.timer = C_Timer.NewTimer(delay, function()
-        if state.generation ~= generation then
-            return
-        end
+    local timer
+    timer = C_Timer.NewTimer(delay, function()
+        if state.timer ~= timer then return end
         state.timer = nil
         if not state.wanted or state.paused or state.failed then
             return
@@ -190,6 +188,7 @@ function addon:ScheduleChatCheck(delay)
             self:JoinChatChannel(false)
         end
     end)
+    state.timer = timer
 end
 
 function addon:FailChatJoin(message)
@@ -206,6 +205,7 @@ function addon:JoinChatChannel(manual)
         self:Print("Still loading. Please try again after login.")
         return false
     end
+    if self.chatState.stopped or self:IsGroupSwitching() then return false end
 
     local state = self.chatState
     if manual then
@@ -298,22 +298,24 @@ function addon:SetChatAutoJoin(autoJoin)
     return true
 end
 
-function addon:OnGroupChanged(previousChannelName)
+function addon:ResetChatForGroupSwitch()
     if not self.chatState then
         return
     end
-    -- Retain old labels for asynchronous leave notices after a group switch.
-    self:RememberGroupChannelLabels()
     self:CancelChatTimer()
-    -- Leaving/changing the addon group disconnects its transport, even if WoW
-    -- restored membership independently. Unrelated custom channels are retained.
-    if previousChannelName then
-        self:LeaveGroupChannel(previousChannelName)
-    end
-    self:CleanupGroupChannels()
     local state = self.chatState
     state.attempts, state.pending, state.paused, state.failed = 0, false, false, false
     state.ownedName, state.passwordSet = nil, false
+    state.wanted = false
+    self:SetChatPhase("idle")
+end
+
+function addon:ResumeChatAfterGroupSwitch()
+    if not self.chatState then return end
+    -- Retain old labels for asynchronous leave notices after a group switch.
+    self:RememberGroupChannelLabels()
+    self:CleanupGroupChannels()
+    local state = self.chatState
     state.wanted = self:HasGroup() and self.db.chat.autoJoin
     self:SetChatPhase("idle")
     if state.wanted and self.ready then
@@ -321,9 +323,19 @@ function addon:OnGroupChanged(previousChannelName)
     end
 end
 
+function addon:OnGroupChanged(previousChannelName)
+    self:ResetChatForGroupSwitch()
+    if previousChannelName then self:LeaveGroupChannel(previousChannelName) end
+    self:ResumeChatAfterGroupSwitch()
+end
+
 function addon:OpenChatInput()
     if not self.ready then
         self:Print("Still loading. Please try again after login.")
+        return
+    end
+    if self:IsGroupSwitching() then
+        self:Print("Wait for the group change to finish before writing to chat.")
         return
     end
     local state = self.chatState
@@ -335,7 +347,7 @@ function addon:OpenChatInput()
 
     -- Blizzard clears the slash-command input after our handler returns.
     C_Timer.NewTimer(0, function()
-        if name ~= self:GetGroupChannelName() or state.paused or state.failed then
+        if state.stopped or self:IsGroupSwitching() or name ~= self:GetGroupChannelName() or state.paused or state.failed then
             return
         end
         local channelID = GetChannelName(name)
@@ -363,7 +375,7 @@ function addon:OnChatLogin()
 end
 
 function addon:InitializeChat()
-    self.chatState = { phase = "idle", attempts = 0, generation = 0 }
+    self.chatState = { phase = "idle", attempts = 0 }
     self:InitializeChatDisplay()
     self:InitializeGroupChannelCleanup()
     self.chatEvents = self:RegisterGameEvents({ "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE", "CHANNEL_LEFT",
@@ -371,7 +383,7 @@ function addon:InitializeChat()
         "PLAYER_REGEN_ENABLED" }, function(self, event, ...)
         local state = self.chatState
         local configuredName = self:GetGroupChannelName()
-        if not self.ready or not configuredName then
+        if state.stopped or self:IsGroupSwitching() or not self.ready or not configuredName then
             return
         end
         if event == "CHANNEL_LEFT" then

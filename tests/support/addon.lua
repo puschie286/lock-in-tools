@@ -268,7 +268,8 @@ local function loadAddon(savedVariables, loggedIn)
         LeaveChannelByName = function(name)
             local calls = name:lower():match("^litdata") and world.dataLeaveCalls or world.leaveCalls
             calls[#calls + 1] = name
-            world.channels[name:lower()] = nil
+            if world.leaveThrows then error("Native leave unavailable") end
+            if not world.holdLeaves then world.channels[name:lower()] = nil end
         end,
         strlenutf8 = function(text)
             -- Count UTF-8 leading bytes without requiring Lua 5.3's utf8 module.

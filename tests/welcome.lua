@@ -93,11 +93,13 @@ do
     assert(initial:GetGroupSecret() == "other-friend" and initial.db.group.secret == "other-friend"
         and options.ownSecret:GetText() == "other-friend" and options.secret:GetText() == "",
         "a confirmed friend key becomes the saved copy field and clears the import draft")
+    initialWorld:advance(0)
     assert(initialWorld.leaveCalls[1] == initialRoom
         and initialWorld.joinCalls[2] == initial:GetGroupChannelName(),
         "Group friend import uses the existing channel lifecycle")
     assert(initial:SetGroupSecret(SECRET))
     assert(options.ownSecret:GetText() == SECRET, "the saved copy field follows external group changes")
+    initialWorld:advance(0)
     local previousLeaves = #initialWorld.leaveCalls
     options.secret:UserInput("  " .. SECRET:lower() .. "  ")
     options.applyGroup:Click()

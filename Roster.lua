@@ -42,6 +42,7 @@ end
 
 local function Active(self)
     return self.initialized and self.ready and self.rosterState and not self.rosterState.stopped
+        and not (self.IsGroupSwitching and self:IsGroupSwitching())
         and not self.savedDataReadOnly and self:HasGroup()
 end
 
@@ -238,6 +239,7 @@ end
 
 function addon:GetOverviewPlayers()
     if not self.initialized or not self:HasGroup() or not self.rosterState then return {} end
+    if self.IsGroupSwitching and self:IsGroupSwitching() then return {} end
     local rows, byID = {}, {}
     local function Add(id, peer, isSelf)
         local row = { id = id, name = peer.name, level = peer.level, seenAt = peer.seenAt, isSelf = isSelf,

@@ -38,6 +38,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         bit = false, bit32 = false, C_ChatInfo = false,
         GetTime = function() return world.now end,
         GetServerTime = function() return world.epoch + math.floor(world.now) end,
+        GetChannelName = function() return 0, nil end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         UnitFullName = function(unit) assert(unit == "player"); return native and native.playerName or "Self", "Test Realm" end,
         CreateFrame = function(kind)
@@ -64,6 +65,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         },
     }, { __index = _G })
     environment._G = environment
+    environment.C_Timer.After = environment.C_Timer.NewTimer
     if native then
         environment.Enum = {
             RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1, InvalidPrefix = 2 },
@@ -86,7 +88,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         environment.LeaveChannelByName = function(name)
             world.leaves[#world.leaves + 1] = name
             if world.leaveThrows then error("Native leave unavailable") end
-            world.channels[name:lower()] = nil
+            if not world.holdLeaves then world.channels[name:lower()] = nil end
         end
         environment.C_ChatInfo = {
             RegisterAddonMessagePrefix = function(prefix)
@@ -303,12 +305,16 @@ addon.OnPositionGroupChanged = function(self)
     lifecycle[#lifecycle + 1] = "position"
 end
 assert(addon:SetGroupSecret("different-group"))
+assert(addon:IsGroupSwitching() and not addon:IsDataConnected()
+    and addon:GetGroupFingerprint() == oldFingerprint, "Block traffic before the current callback returns")
+world:advance(0)
 assert(#lifecycle == 2 and not addon:IsDataConnected() and notified[#notified] == false)
 assert(addon:GetGroupFingerprint() ~= oldFingerprint and addon:GetGroupDataChannelName() ~= channel)
 assert(not addon:SendData("echo", "old connection"))
 world:connect()
 assert(addon:ReceiveData("Friend", "1|echo|handler retained"), "Features survive a group change and can use the new connection")
 addon:LeaveGroup()
+world:advance(0)
 assert(not addon:IsDataConnected() and addon:GetGroupDataChannelName() == nil and addon:GetGroupDataChannelPassword() == nil)
 world:connect()
 assert(not addon:IsDataConnected() and not addon:SendData("echo", "no group"))
@@ -505,111 +511,72 @@ do
     assert(#clock.joins == 9 and clock:activeTimers() == 1, "Healthy membership does not issue join requests")
 end
 
--- A group switch cancels the old pending check; logout also cancels pending recovery.
+-- A pending join is retired before the next group is joined on a later callback turn.
 do
     local pending, clock = newAddon(nil, false, false, {})
     clock:login()
-    pending:SetGroupSecret("changed-while-joining")
-    clock:advance(2)
-    assert(#clock.joins == 2 and clock.joins[2].at == 1
-        and clock.joins[2].name == pending:GetGroupDataChannelName(), "The old group's two-second check must not survive its replacement")
+    local oldName = pending:GetGroupDataChannelName()
+    assert(pending:SetGroupSecret("changed-while-joining"))
+    assert(pending:IsGroupSwitching() and pending:GetGroupDataChannelName() == oldName and #clock.joins == 1)
+    clock:advance(0)
+    assert(not pending:IsGroupSwitching() and #clock.joins == 2 and clock.joins[2].at == 0
+        and clock.joins[2].name == pending:GetGroupDataChannelName(),
+        "Switching waits for the callback, rather than an arbitrary connection delay")
     clock:fire("PLAYER_LOGOUT")
     clock:advance(60)
-    assert(#clock.joins == 2)
+    assert(#clock.joins == 2 and not pending:IsDataConnected())
 end
 
--- Switching groups replaces every recovery/watchdog state without inheriting old timers or credentials.
-local switchStates = {
-    { "pending first join", function() end },
-    { "capped join retry", function(_, clock) clock:advance(22) end },
-    { "rejected join cooldown", function(_, clock) clock:notice("THROTTLED"); clock:advance(7) end },
-    { "healthy membership watchdog", function(_, clock) clock:member(7); clock:advance(3) end },
-    { "stale leave cache", function(_, clock) clock:member(7); clock:notice("YOU_LEFT"); clock:advance(2) end },
-    { "failed leave cooldown", function(current, clock)
-        clock:member(7)
-        clock.leaveThrows = true
-        current:LeaveDataChannel()
-        clock:advance(5)
-        clock.leaveThrows = false
-    end },
-}
-for _, scenario in ipairs(switchStates) do
+-- Departure is confirmed before activation; failed leaves stay disconnected and retry.
+do
     local switching, clock = newAddon(nil, false, false, {})
-    local deliveries = 0
-    switching:RegisterDataFeature("echo", function() deliveries = deliveries + 1 end)
+    switching:RegisterDataFeature("echo", function() end)
+    switching:RegisterDataRequest("snapshot", function() return "own" end, function() end)
     clock:login()
-    scenario[2](switching, clock)
-    local state = switching.dataState
-    local oldName, oldTimer, oldGeneration = switching:GetGroupDataChannelName(), state.timer, state.generation
-    local oldSend, requests, leaves, switchedAt = state.nativeSend, #clock.joins, #clock.leaves, clock.now
-    assert(oldTimer and not oldTimer.cancelled and clock:activeTimers() == 1, scenario[1])
+    clock:member(7)
+    local oldName, oldFingerprint = switching:GetGroupDataChannelName(), switching:GetGroupFingerprint()
+    local _, oldID = switching:RequestData("snapshot", "old")
+    clock.holdLeaves = true
     assert(switching:SetGroupSecret("switch-target"))
-    local name, password, timer = switching:GetGroupDataChannelName(), switching:GetGroupDataChannelPassword(), state.timer
-    assert(name ~= oldName and oldTimer.cancelled and state.generation > oldGeneration, scenario[1])
-    assert(#clock.leaves == leaves + 1 and clock.leaves[#clock.leaves] == oldName
-        and not clock.channels[oldName:lower()], "Leave exactly the previous channel: " .. scenario[1])
-    assert(state.channelName == name and state.phase == "idle" and state.detail == nil
-        and state.attempts == 0 and not state.pending and not state.failed and not state.awaitingLeave
-        and state.leaveChecks == 0 and state.send == nil and state.nativeSend == nil
-        and state.groupFingerprint == nil and state.wanted, "Reset prior connection state: " .. scenario[1])
-    assert(timer and timer ~= oldTimer and timer.at == switchedAt + 1 and clock:activeTimers() == 1, scenario[1])
-    assert(not switching:IsDataConnected() and not switching:SendData("echo", "between groups"), scenario[1])
-    local generation = state.generation
-    oldTimer.callback(oldTimer)
-    assert(state.timer == timer and state.generation == generation and #clock.joins == requests,
-        "A canceled callback cannot clear the new timer or reconnect the previous group: " .. scenario[1])
-    clock:advance(60)
-    assert(#clock.joins > requests and clock.joins[requests + 1].at == switchedAt + 1, scenario[1])
-    for index = requests + 1, #clock.joins do
-        assert(clock.joins[index].name == name and clock.joins[index].password == password,
-            "Only the new group credentials may be retried: " .. scenario[1])
-    end
+    assert(not switching:IsDataConnected() and not switching:SendData("echo", "between groups"))
+    clock:advance(0)
+    assert(switching:IsGroupSwitching() and switching:GetGroupFingerprint() == oldFingerprint
+        and clock.channels[oldName:lower()] and #clock.joins == 1
+        and next(switching.dataState.pendingRequests) == nil,
+        "Keep old membership separate from the destination while clearing outstanding requests")
+    assert(switching:SetGroupSecret("latest-switch-target"))
+    clock.leaveThrows, clock.holdLeaves = true, false
+    clock:advance(6)
+    assert(switching:IsGroupSwitching() and #clock.joins == 1 and not switching:IsDataConnected(),
+        "A failed departure cannot fall through to joining the destination")
+    clock.leaveThrows = false
+    clock:advance(5)
+    assert(not switching:IsGroupSwitching() and not clock.channels[oldName:lower()] and #clock.joins == 2
+        and clock.joins[2].name == switching:GetGroupDataChannelName()
+        and switching:GetGroupSecret() == "latest-switch-target", "The latest destination is the only new join")
     clock:member(12)
     assert(switching:IsDataConnected() and switching:SendData("echo", "new group")
-        and clock.nativeSends[#clock.nativeSends].target == "12", scenario[1])
-    clock.channels[oldName:lower()] = { id = 7, name = oldName }
-    if oldSend then
-        local calls = clock.sendCalls
-        assert(not oldSend("LockInToolsData", "1|echo|stale") and clock.sendCalls == calls, scenario[1])
-    end
-    clock:incoming("1|echo|old route", "Oldfriend", { id = 7, name = oldName })
-    clock:incoming("1|echo|old name", "Oldfriend", { name = oldName })
-    assert(deliveries == 2, "After reconnection, reception ignores old channel metadata: " .. scenario[1])
-    clock:incoming("1|echo|new route", "Newfriend", { id = 12 })
-    assert(deliveries == 3, scenario[1])
-    local watchdog, joined = state.timer, #clock.joins
-    assert(switching:LeaveGroup() and watchdog.cancelled and state.timer == nil, scenario[1])
-    watchdog.callback(watchdog)
-    clock:advance(60)
-    assert(#clock.joins == joined and clock:activeTimers() == 0 and not switching:IsDataConnected(), scenario[1])
+        and clock.nativeSends[#clock.nativeSends].target == "12")
+    assert(not switching:ReceiveData("Friend", "1|R|snapshot|" .. oldID .. "|self-testrealm|stale"),
+        "The new connection has no request target for an old reply")
 end
 
--- Rapid consecutive switches discard even the intermediate group's scheduled first join.
+-- Logout stops a departure that is still waiting for native membership to disappear.
 do
     local switching, clock = newAddon(nil, false, false, {})
     clock:login()
-    local firstName, firstTimer = switching:GetGroupDataChannelName(), switching.dataState.timer
-    assert(switching:SetGroupSecret("intermediate-group"))
-    local middleName, middleTimer = switching:GetGroupDataChannelName(), switching.dataState.timer
-    assert(switching:SetGroupSecret("final-group"))
-    local name, password, timer = switching:GetGroupDataChannelName(), switching:GetGroupDataChannelPassword(), switching.dataState.timer
-    assert(firstTimer.cancelled and middleTimer.cancelled and timer.at == 1 and clock:activeTimers() == 1)
-    assert(#clock.leaves == 2 and clock.leaves[1] == firstName and clock.leaves[2] == middleName)
-    firstTimer.callback(firstTimer)
-    middleTimer.callback(middleTimer)
-    assert(switching.dataState.timer == timer and #clock.joins == 1)
+    clock:member(7)
+    clock.holdLeaves = true
+    assert(switching:SetGroupSecret("logout-while-leaving"))
+    clock:advance(0)
+    assert(switching:IsGroupSwitching())
+    clock:fire("PLAYER_LOGOUT")
+    clock.channels = {}
+    clock:fire("CHANNEL_UI_UPDATE")
     clock:advance(60)
-    assert(clock.joins[2].at == 1)
-    for index = 2, #clock.joins do
-        assert(clock.joins[index].name == name and clock.joins[index].password == password)
-    end
-    local pending, requests = switching.dataState.timer, #clock.joins
-    assert(switching:LeaveGroup() and pending.cancelled)
-    pending.callback(pending)
-    clock:advance(60)
-    assert(#clock.joins == requests and switching.dataState.timer == nil and clock:activeTimers() == 0)
+    assert(#clock.joins == 1 and not switching:IsDataConnected() and clock:activeTimers() == 0,
+        "A completed departure after logout cannot activate the pending connection")
 end
-
 -- Native leave notices recover automatically and coalesce duplicate events before retrying.
 for _, event in ipairs({ "YOU_LEFT", "CHANNEL_LEFT" }) do
     local recovering, clock = newAddon(nil, false, false, {})
@@ -773,7 +740,8 @@ do
     local oldSend = switching.dataState.send
     clock.channels.unrelated = { id = 50, name = "Unrelated" }
     switching:SetGroupSecret("different-native-group")
-    assert(not switching:IsDataConnected() and #clock.leaves == 1 and clock.leaves[1] == oldName and clock.channels.unrelated)
+    clock:advance(0)
+    assert(not switching:IsDataConnected() and #clock.leaves == 2 and clock.leaves[2] == oldName and clock.channels.unrelated)
     clock.channels[oldName:lower()] = { id = 4, name = oldName }
     local calls = clock.sendCalls
     assert(not oldSend("LockInToolsData", "1|echo|stale") and clock.sendCalls == calls,
@@ -1134,7 +1102,7 @@ for _, action in ipairs({ "replace", "disconnect", "switch", "logout" }) do
         "Reconfirming the same transport preserves an outstanding snapshot")
     if action == "replace" then clock:connect()
     elseif action == "disconnect" then current:SetDataTransport(nil)
-    elseif action == "switch" then current:SetGroupSecret("snapshot-other-group")
+    elseif action == "switch" then current:SetGroupSecret("snapshot-other-group"); clock:advance(0)
     else clock:fire("PLAYER_LOGOUT") end
     assert(next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil, action)
     if action ~= "logout" then
@@ -1468,23 +1436,29 @@ do
         "Queued snapshots preserve the baseline used by later removals and comparisons")
 end
 
--- A route change during delivery discards queued old samples while accepting
--- newly queued samples from the replacement transport.
+-- A group switch requested during delivery blocks new work immediately while
+-- allowing the current callback set to finish before resetting its state.
 do
     local current, clock, samples = statusFixture({ level = 24 })
-    local switched = false
+    local switched, finished = false, false
+    local oldName = current:GetGroupDataChannelName()
     assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
         function(sender)
             if switched then return end
             switched = true
-            assert(receive(current, sender, full("old-peer", 2000000001, 2, "1=stale")))
-            current:SetDataTransport(nil)
-            clock:connect()
-            assert(receive(current, sender, full("new-peer", 2000000002, 1, "1=27")))
+            assert(current:SetGroupSecret("switch-after-delivery"))
+            assert(current:IsGroupSwitching() and current:GetGroupDataChannelName() == oldName)
+            assert(not receive(current, sender, full("old-peer", 2000000001, 2, "1=stale")))
+            assert(not current:RequestData("status", "3|S") and #clock.sent == 1)
+            finished = true
         end))
-    assert(not receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
-    assert(#samples == 1 and samples[1].fields.level == "27" and samples[1].metadata.session == "new-peer",
-        "A queued decoded sample must remain bound to the connection that received it")
+    assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
+    assert(finished and #samples == 1 and samples[1].fields.level == "25"
+        and current:GetGroupDataChannelName() == oldName and current:IsGroupSwitching(),
+        "No new group is activated inside the old group's callback")
+    clock:advance(0)
+    assert(not current:IsGroupSwitching() and current:GetGroupDataChannelName() ~= oldName
+        and next(current.dataState.status.received) == nil, "Deferred cleanup discards old peer baselines")
 end
 
 -- Logically targeted replies do not postpone the public heartbeat needed by
@@ -1657,6 +1631,25 @@ do
     local sent = #clock.sent
     clock:advance(60)
     assert(#clock.sent == sent and clock:activeTimers() == 0)
+end
+
+-- Reconnecting after a coordinated switch starts a distinct full status session.
+do
+    local values = { level = 24, xp = 10 }
+    local current, clock = statusFixture(values, nil, {})
+    local oldSession = assert(clock.nativeSends[1].message:match("|3|F|([^|]+)|"))
+    assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
+    values.xp = 20
+    clock:advance(5)
+    assert(clock.nativeSends[2].message:match("|3|D|"))
+    assert(current:SetGroupSecret("fresh-status-group"))
+    clock:advance(0)
+    assert(next(current.dataState.status.received) == nil and not current:IsDataConnected())
+    clock:member(12)
+    local snapshot = clock.nativeSends[#clock.nativeSends].message
+    local session = assert(snapshot:match("|3|F|([^|]+)|%d+|1|"))
+    assert(session ~= oldSession and snapshot:find("1=24|2=20", 1, true),
+        "New group revisions restart only under a fresh session and complete snapshot")
 end
 
 -- Real multi-client fan-out converges with synchronous delivery as well as a

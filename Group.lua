@@ -55,18 +55,22 @@ local function CanChange(self)
     return true
 end
 
-local function NotifyChanged(self, previousChannel)
-    -- Lifecycle order is deliberate; views observe the completed transition.
+local function BatchChanges(self, apply)
     self:BeginNotificationBatch()
-    local ok, problem = pcall(function()
+    local ok, problem = pcall(apply)
+    self:EndNotificationBatch(not ok)
+    if not ok then error(problem, 0) end
+end
+
+local function NotifyChanged(self, previousChannel)
+    -- Before login there is no active processing or membership to drain.
+    BatchChanges(self, function()
         if self.OnDataGroupChanged then self:OnDataGroupChanged() end
         if self.OnGroupChanged then self:OnGroupChanged(previousChannel) end
         if self.OnPositionGroupChanged then self:OnPositionGroupChanged() end
         if self.OnRosterGroupChanged then self:OnRosterGroupChanged() end
         self:Notify("GROUP_CHANGED")
     end)
-    self:EndNotificationBatch(not ok)
-    if not ok then error(problem, 0) end
 end
 
 function addon:GenerateGroupKey()
@@ -92,6 +96,7 @@ end
 
 function addon:InitializeGroup()
     self.groupState = nil
+    self.groupSwitch = nil
     self.invalidGroupSecret = false
     if type(self.db.group) ~= "table" then self.db.group = { secret = "" } end
     local stored = self.db.group.secret
@@ -109,6 +114,94 @@ function addon:InitializeGroup()
     if not self.savedDataReadOnly then self.db.group.secret = code end
 end
 
+function addon:IsGroupSwitching()
+    return self.groupSwitch ~= nil
+end
+
+function addon:ScheduleGroupSwitchCheck(delay)
+    local transition = self.groupSwitch
+    if not transition then return end
+    if transition.timer then transition.timer:Cancel() end
+    local timer
+    timer = C_Timer.NewTimer(delay, function()
+        if self.groupSwitch ~= transition or transition.timer ~= timer then return end
+        transition.timer = nil
+        self:ContinueGroupSwitch()
+    end)
+    transition.timer = timer
+end
+
+function addon:ContinueGroupSwitch()
+    local transition = self.groupSwitch
+    if not transition then return end
+    if not transition.started then
+        -- Run on the next event-loop turn: the callback that requested the
+        -- change finishes before its transport and queued work are discarded.
+        transition.started = true
+        BatchChanges(self, function()
+            if self.ResetDataForGroupSwitch then self:ResetDataForGroupSwitch() end
+            if self.ResetChatForGroupSwitch then self:ResetChatForGroupSwitch() end
+            if self.UpdatePositionTimer then self:UpdatePositionTimer() end
+            if transition.chat then self:LeaveGroupChannel(transition.chat) end
+            if transition.data then self:LeaveGroupChannel(transition.data) end
+            transition.nextLeaveAt = GetTime() + 5
+        end)
+    end
+
+    local function joined(name)
+        if not name or not GetChannelName then return false end
+        local id = GetChannelName(name)
+        return id and id > 0
+    end
+    local chatJoined, dataJoined = joined(transition.chat), joined(transition.data)
+    if chatJoined or dataJoined then
+        -- Notices can precede cache removal. Poll membership and repeat a failed
+        -- leave at a low rate; never join a replacement while either remains.
+        if GetTime() >= transition.nextLeaveAt then
+            transition.nextLeaveAt = GetTime() + 5
+            if chatJoined then self:LeaveGroupChannel(transition.chat) end
+            if dataJoined then self:LeaveGroupChannel(transition.data) end
+        end
+        self:ScheduleGroupSwitchCheck(1)
+        return
+    end
+
+    if transition.timer then transition.timer:Cancel() end
+    self.groupState = transition.target
+    self.groupSwitch = nil
+    BatchChanges(self, function()
+        if self.OnPositionGroupChanged then self:OnPositionGroupChanged() end
+        if self.OnRosterGroupChanged then self:OnRosterGroupChanged() end
+        if self.ResumeDataAfterGroupSwitch then self:ResumeDataAfterGroupSwitch()
+        elseif self.OnDataGroupChanged then self:OnDataGroupChanged() end
+        if self.ResumeChatAfterGroupSwitch then self:ResumeChatAfterGroupSwitch()
+        elseif self.OnGroupChanged then self:OnGroupChanged(transition.chat) end
+        self:Notify("GROUP_CHANGED")
+    end)
+end
+
+local function RequestGroup(self, target)
+    self.invalidGroupSecret = false
+    if not self.ready or (not self.groupState and not self.groupSwitch) then
+        local previousChannel = self:GetGroupChannelName()
+        self.groupState = target
+        NotifyChanged(self, previousChannel)
+    elseif self.groupSwitch then
+        -- Changes are rare. One pending destination is enough: the latest
+        -- request wins while the original memberships finish leaving.
+        self.groupSwitch.target = target
+        self:Notify("GROUP_CHANGED")
+    else
+        if not self.groupChannelCleanupEvents and self.RegisterGameEvents then
+            self:InitializeGroupChannelCleanup()
+        end
+        self.groupSwitch = { target = target, chat = self:GetGroupChannelName(),
+            data = self:GetGroupDataChannelName() }
+        self:ScheduleGroupSwitchCheck(0)
+        self:Notify("GROUP_CHANGED")
+    end
+end
+
 function addon:SetGroupSecret(input)
     local allowed, problem = CanChange(self)
     if not allowed then return false, problem end
@@ -116,32 +209,29 @@ function addon:SetGroupSecret(input)
     if not code then
         return false, "Enter a group key with 3 to 40 letters, digits or single hyphens; start and end with a letter or digit."
     end
-    if self.groupState and self.groupState.code == code then return true end
-    local previousChannel = self:GetGroupChannelName()
+    if self:GetGroupSecret() == code then return true end
     local derived = DeriveGroup(code, secret)
     self.db.group = type(self.db.group) == "table" and self.db.group or {}
     self.db.group.secret = code
-    self.groupState = derived
-    self.invalidGroupSecret = false
-    NotifyChanged(self, previousChannel)
+    RequestGroup(self, derived)
     return true
 end
 
 function addon:LeaveGroup()
     local allowed, problem = CanChange(self)
     if not allowed then return false, problem end
-    if not self.groupState and not self.invalidGroupSecret then return true end
-    local previousChannel = self:GetGroupChannelName()
+    if not self.groupSwitch and not self.groupState and not self.invalidGroupSecret then return true end
     self.db.group = type(self.db.group) == "table" and self.db.group or {}
     self.db.group.secret = ""
-    self.groupState = nil
-    self.invalidGroupSecret = false
-    NotifyChanged(self, previousChannel)
+    RequestGroup(self, nil)
     return true
 end
 
 function addon:HasGroup() return self.groupState ~= nil end
-function addon:GetGroupSecret() return self.groupState and self.groupState.code or "" end
+function addon:GetGroupSecret()
+    if self.groupSwitch then return self.groupSwitch.target and self.groupSwitch.target.code or "" end
+    return self.groupState and self.groupState.code or ""
+end
 function addon:GetGroupFingerprint() return self.groupState and self.groupState.fingerprint end
 function addon:GetGroupChannelName() return self.groupState and self.groupState.channelName end
 function addon:GetGroupChannelPassword() return self.groupState and self.groupState.channelPassword end
@@ -165,6 +255,7 @@ function addon:IsObsoleteGroupChannel(name)
     local normalized = name:lower()
     -- Match the complete generated namespace, never arbitrary LIT-prefixed rooms.
     if not normalized:match("^lit%x+$") and not normalized:match("^litdata%x+$") then return false end
+    if self.groupSwitch and self.groupSwitch.started then return true end
     local chat, data = self:GetGroupChannelName(), self:GetGroupDataChannelName()
     return (not chat or normalized ~= chat:lower()) and (not data or normalized ~= data:lower())
 end
@@ -199,9 +290,29 @@ end
 
 function addon:InitializeGroupChannelCleanup()
     if self.groupChannelCleanupEvents then return end
-    self.groupChannelCleanupEvents = self:RegisterGameEvents({ "CHAT_MSG_CHANNEL_NOTICE",
-        "PLAYER_ENTERING_WORLD", "UPDATE_CHAT_WINDOWS" }, function(self, event, ...)
+    self.groupChannelCleanupEvents = self:RegisterGameEvents({ "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_LEFT",
+        "CHANNEL_UI_UPDATE", "PLAYER_ENTERING_WORLD", "UPDATE_CHAT_WINDOWS", "PLAYER_LOGOUT" }, function(self, event, ...)
+        if event == "PLAYER_LOGOUT" then
+            local transition = self.groupSwitch
+            if transition and transition.timer then transition.timer:Cancel() end
+            self.groupSwitch = nil
+            if self.chatState then self.chatState.stopped = true end
+            if self.ResetChatForGroupSwitch then self:ResetChatForGroupSwitch() end
+            return
+        end
         if not self.ready or self.savedDataReadOnly then return end
+        local transition = self.groupSwitch
+        if transition then
+            -- Native leave events can run before their membership cache changes.
+            -- Recheck on a later turn, after the native event finishes processing.
+            local name = event == "CHANNEL_LEFT" and select(2, ...) or select(9, ...)
+            if event == "CHANNEL_UI_UPDATE" or event == "PLAYER_ENTERING_WORLD"
+                or (not IsSecret(name) and type(name) == "string"
+                    and ((transition.chat and name:lower() == transition.chat:lower())
+                        or (transition.data and name:lower() == transition.data:lower()))) then
+                self:ScheduleGroupSwitchCheck(0)
+            end
+        end
         if event == "CHAT_MSG_CHANNEL_NOTICE" then
             local reason, name = ..., select(9, ...)
             if not IsSecret(reason) and (reason == "YOU_JOINED" or reason == "YOU_CHANGED")
@@ -216,13 +327,14 @@ function addon:InitializeGroupChannelCleanup()
                 self.groupChannelCleanupScheduled = nil
                 self:CleanupGroupChannels()
             end)
-        else
+        elseif event == "PLAYER_ENTERING_WORLD" then
             self:CleanupGroupChannels()
         end
     end)
 end
 
 function addon:GetGroupStatusText()
+    if self:IsGroupSwitching() then return "Leaving previous group..." end
     if self.groupState then return self.groupState.fingerprint end
     if self.invalidGroupSecret then return "Stored group key is invalid. Enter a valid group key." end
     return "No group configured. Enter the same group key as your friends."

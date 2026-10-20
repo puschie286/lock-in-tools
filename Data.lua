@@ -61,7 +61,6 @@ local function IsSelfName(self, normalized)
 end
 
 local function ResetRequests(state)
-    state.requestEpoch = (state.requestEpoch or 0) + 1
     state.pendingRequests, state.repliedRequests = {}, {}
 end
 
@@ -104,12 +103,13 @@ end
 
 local function CanUseData(self)
     return self.initialized == true and self.ready == true and not self.savedDataReadOnly and self:HasGroup()
+        and not self:IsGroupSwitching() and not self.dataState.stopped
 end
 
 local function Wanted(self)
     local state = self.dataState
     return CanUseData(self)
-        and state.wanted and not state.stopped
+        and state.wanted
         and (not state.send or state.send == state.nativeSend)
 end
 
@@ -130,7 +130,7 @@ function addon:InitializeData()
     self:InitializeGroupChannelCleanup()
     local prefixResults = Enum and Enum.RegisterAddonMessagePrefixResult
     local sendResults = Enum and Enum.SendAddonMessageResult
-    self.dataState = { features = {}, requests = {}, phase = "idle", attempts = 0, generation = 0,
+    self.dataState = { features = {}, requests = {}, phase = "idle", attempts = 0,
         channelName = self:GetGroupDataChannelName(), nextRequestID = 0,
         -- Native capabilities are stable for this UI session; retry connection
         -- failures without probing API availability again.
@@ -150,7 +150,6 @@ end
 function addon:IsDataConnected()
     local state = self.dataState
     return state ~= nil and CanUseData(self) and state.send ~= nil
-        and state.groupFingerprint == self:GetGroupFingerprint()
 end
 
 local function NotifyConnection(self)
@@ -320,9 +319,8 @@ end
 
 local function CurrentStatus(self)
     local status = self.dataState.status
-    local generation = status.generation
     local fields = CollectStatus(self)
-    if not fields or generation ~= status.generation then return nil end
+    if not fields then return nil end
     if not SameStatus(fields, status.current) then
         if status.revision >= MAX_REQUEST_SEQUENCE then return nil end
         status.revision, status.current = status.revision + 1, fields
@@ -351,7 +349,7 @@ local function EncodeStatus(self, kind, fields, revision, base)
 end
 
 local function ContactStatus(self, sender, message, peer)
-    local status, generation = self.dataState.status, self.dataState.status.generation
+    local status = self.dataState.status
     local synchronized = peer.fields ~= nil and not peer.unsynchronized
     local metadata = { kind = ({ F = "full", D = "delta", H = "heartbeat" })[message.kind],
         session = message.session, revision = message.revision, hasBaseline = peer.fields ~= nil,
@@ -359,7 +357,6 @@ local function ContactStatus(self, sender, message, peer)
     for _, name in ipairs(StatusNames(status.providers)) do
         local provider = status.providers[name]
         if provider.contact then pcall(provider.contact, sender, message.stamp, CopyStatus(metadata)) end
-        if status.generation ~= generation then return false end
     end
     return metadata
 end
@@ -367,7 +364,7 @@ end
 local function ProcessStatus(self, sender, message, requested)
     local status, normalized = self.dataState.status, SenderName(self, sender)
     if not normalized or IsSelfName(self, normalized) then return false end
-    local peer, generation = status.received[normalized], status.generation
+    local peer = status.received[normalized]
     if not peer then
         peer = { retired = {}, revision = 0, advertised = 0 }
         status.received[normalized] = peer
@@ -407,13 +404,11 @@ local function ProcessStatus(self, sender, message, requested)
     peer.revision, peer.advertised, peer.stamp = message.revision, message.revision, message.stamp
     peer.contactStamp, peer.unsynchronized = message.stamp, false
     local metadata = ContactStatus(self, sender, message, peer)
-    if not metadata or generation ~= status.generation then return false end
     for _, name in ipairs(StatusNames(status.providers)) do
         -- Each callback owns its copies. Central revision ordering keeps one
         -- coherent baseline even if a consumer throws or rejects the sample.
         local provider = status.providers[name]
         pcall(provider.receive, sender, NamedStatus(peer.fields), message.stamp, message.revision, CopyStatus(metadata))
-        if status.generation ~= generation then return false end
     end
     return true
 end
@@ -446,34 +441,33 @@ end
 local function ScheduleStatus(self)
     local status = self.dataState.status
     if status.timer or not status.connected or not self:IsDataConnected() then return end
-    local generation = status.generation
-    status.timer = C_Timer.NewTimer(STATUS_INTERVAL, function()
-        if status.generation ~= generation then return end
+    local timer
+    timer = C_Timer.NewTimer(STATUS_INTERVAL, function()
+        if status.timer ~= timer then return end
         status.timer = nil
         self:DataStatusTick()
     end)
+    status.timer = timer
 end
 
 local function StatusConnectionChanged(self, connected)
     local state, status = self.dataState, self.dataState.status
     -- Another feature callback may have changed the route reentrantly.
     connected = self:IsDataConnected()
-    local send, fingerprint = connected and state.send or nil, connected and state.groupFingerprint or nil
-    if status.connected == connected and status.send == send and status.fingerprint == fingerprint then return end
+    local send = connected and state.send or nil
+    if status.connected == connected and status.send == send then return end
     status.generation = status.generation + 1
     if status.timer then status.timer:Cancel(); status.timer = nil end
-    status.connected, status.send, status.fingerprint = connected, send, fingerprint
+    status.connected, status.send = connected, send
     status.received, status.lastBroadcast, status.lastAttemptAt = {}, nil, nil
     status.receiveQueue = {}
     status.current, status.revision, status.broadcastRevision = nil, 0, 0
     status.forceFull, status.resyncNeeded, status.lastResyncAttemptAt, status.lastTrafficAt = false, false, nil, nil
     status.session = state.requestSession .. "-" .. status.generation
     status.requestNeeded = connected
-    local generation = status.generation
     for _, name in ipairs(StatusNames(status.providers)) do
         local callback = status.providers[name].connectionChanged
         if callback then pcall(callback, connected) end
-        if status.generation ~= generation then return end
     end
     if connected then ScheduleStatus(self); self:DataStatusTick() end
 end
@@ -504,7 +498,6 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
                 if not message or message.kind ~= "F" then return nil end
                 ReceiveStatus(self, sender, message, true)
             end
-            if status.generation ~= generation then return nil end
             local fields, revision = CurrentStatus(self)
             if fields == nil or status.generation ~= generation then return nil end
             local response = EncodeStatus(self, "F", fields, revision)
@@ -528,7 +521,7 @@ end
 function addon:DataStatusTick()
     local state = self.dataState
     local status = state and state.status
-    if not status or status.ticking then return false end
+    if not status or status.ticking or self:IsGroupSwitching() then return false end
     if not self:IsDataConnected() then
         StatusConnectionChanged(self, false)
         return false
@@ -563,15 +556,17 @@ function addon:DataStatusTick()
             end
             if request then sent = self:RequestData("status", payload)
             else sent = self:SendData("status", payload) end
-            if generation == status.generation and sent then
-                if broadcast then
-                    status.requestNeeded, status.lastBroadcast, status.broadcastRevision = false, fields, revision
-                    -- Synchronous callbacks can collect newer local state.
-                    status.forceFull = status.revision ~= revision
+            if generation == status.generation then
+                if sent then
+                    if broadcast then
+                        status.requestNeeded, status.lastBroadcast, status.broadcastRevision = false, fields, revision
+                        -- Synchronous callbacks can collect newer local state.
+                        status.forceFull = status.revision ~= revision
+                    end
+                    if payload ~= "3|S" then status.lastTrafficAt = now end
+                elseif payload == "3|S" then
+                    status.resyncNeeded = true
                 end
-                if payload ~= "3|S" then status.lastTrafficAt = now end
-            elseif generation == status.generation and payload == "3|S" then
-                status.resyncNeeded = true
             end
         end
     end
@@ -637,13 +632,11 @@ function addon:SetDataTransport(send)
     local state = self.dataState
     if not state then return false, "Group data is still loading." end
     if send ~= nil and type(send) ~= "function" then return false, "Invalid data connection." end
-    if send and (self.savedDataReadOnly or not self:HasGroup()) then
+    if send and (self.savedDataReadOnly or not self:HasGroup() or self:IsGroupSwitching() or state.stopped) then
         return false, "A writable group configuration is required."
     end
-    local fingerprint = send and self:GetGroupFingerprint() or nil
-    if state.send ~= send or state.groupFingerprint ~= fingerprint then ResetRequests(state) end
+    if state.send ~= send then ResetRequests(state) end
     state.send = send
-    state.groupFingerprint = fingerprint
     NotifyConnection(self)
     return true
 end
@@ -651,46 +644,53 @@ end
 function addon:OnDataLogin()
     local state = self.dataState
     NotifyConnection(self)
-    if self.savedDataReadOnly then return end
     state.nativeStarted = true
     state.wanted = self:HasGroup()
     if state.wanted then self:JoinDataChannel(false) end
 end
 
-function addon:OnDataGroupChanged()
+function addon:ResetDataForGroupSwitch()
     local state = self.dataState
     if not state then return end
     self:CancelDataTimer()
     Disconnect(self)
-    ResetRequests(state)
-    local previous = state.channelName
-    state.channelName = self:GetGroupDataChannelName()
+    state.channelName = nil
     state.nativeSend = nil
     state.phase, state.detail = "idle", nil
     state.attempts, state.pending, state.failed, state.awaitingLeave = 0, false, false, false
     state.leaveChecks = 0
-    state.wanted = self:HasGroup() and not self.savedDataReadOnly
-    if previous then self:LeaveGroupChannel(previous) end
-    -- Group.lua must finish clearing old feature data before a new connection can dispatch.
-    if state.nativeStarted and Wanted(self) then self:ScheduleDataCheck(1) end
+    state.wanted = false
     Refresh(self)
+end
+
+function addon:ResumeDataAfterGroupSwitch()
+    local state = self.dataState
+    if not state then return end
+    state.channelName, state.wanted = self:GetGroupDataChannelName(), self:HasGroup()
+    if state.nativeStarted and Wanted(self) then self:JoinDataChannel(false) end
+    Refresh(self)
+end
+
+function addon:OnDataGroupChanged()
+    self:ResetDataForGroupSwitch()
+    self:ResumeDataAfterGroupSwitch()
 end
 
 function addon:CancelDataTimer()
     local state = self.dataState
-    state.generation = state.generation + 1
     if state.timer then state.timer:Cancel(); state.timer = nil end
 end
 
 function addon:ScheduleDataCheck(delay)
     self:CancelDataTimer()
     local state = self.dataState
-    local generation = state.generation
-    state.timer = C_Timer.NewTimer(delay, function()
-        if state.generation ~= generation then return end
+    local timer
+    timer = C_Timer.NewTimer(delay, function()
+        if state.timer ~= timer then return end
         state.timer = nil
         if Wanted(self) then self:JoinDataChannel(false) end
     end)
+    state.timer = timer
 end
 
 function addon:FailDataJoin(detail)
@@ -718,11 +718,9 @@ function addon:ConfirmDataMembership()
     state.channelName = name
     state.attempts, state.pending, state.failed = 0, false, false
     state.phase, state.detail = "joined", nil
-    local fingerprint = self:GetGroupFingerprint()
     local send
     send = function(prefix, message)
-        if not Wanted(self) or state.send ~= send or self:GetGroupFingerprint() ~= fingerprint
-            or self:GetGroupDataChannelName() ~= name then return false end
+        if not Wanted(self) or state.send ~= send then return false end
         local id = ChannelID(name)
         if not id then
             Disconnect(self)
@@ -745,6 +743,7 @@ end
 function addon:JoinDataChannel(manual)
     local state = self.dataState
     if not state or not self.ready then return false, "Still loading. Please try again after login." end
+    if self:IsGroupSwitching() then return false, "Waiting to leave the previous group." end
     if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
     if not self:HasGroup() then return false, "Join a LockInTools group first." end
     state.nativeStarted = true
@@ -799,6 +798,7 @@ end
 function addon:LeaveDataChannel()
     local state = self.dataState
     if not state or not self.ready then return false, "Still loading. Please try again after login." end
+    if self:IsGroupSwitching() then return false, "Waiting to leave the previous group." end
     if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
     self:CancelDataTimer()
     state.wanted = self:HasGroup()
@@ -824,7 +824,7 @@ function addon:OnDataEvent(event, ...)
         ResetRequests(state)
         return
     end
-    if state.stopped or not self.ready or self.savedDataReadOnly or not self:HasGroup()
+    if not CanUseData(self)
         or (state.send and state.send ~= state.nativeSend) then return end
     local name = self:GetGroupDataChannelName()
     if event == "CHAT_MSG_ADDON" then
@@ -894,10 +894,10 @@ local function ReceiveRequest(self, sender, message)
     local key = normalized .. "|" .. feature .. "|" .. id
     if state.repliedRequests[key] then return false end
     state.repliedRequests[key] = now + REQUEST_WINDOW
-    local epoch = state.requestEpoch
+    local send = state.send
     local header = "1|R|" .. feature .. "|" .. id .. "|" .. normalized .. "|"
     local ok, response = pcall(registration.onRequest, sender, payload, MAX_MESSAGE_BYTES - #header)
-    if not ok or IsSecret(response) or type(response) ~= "string" or state.requestEpoch ~= epoch then return false end
+    if not ok or IsSecret(response) or type(response) ~= "string" or state.send ~= send then return false end
     return SendFrame(self, header .. response)
 end
 
@@ -942,6 +942,7 @@ end
 function addon:GetDataStatusText()
     if not self.dataState then return "Still loading." end
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
+    if self:IsGroupSwitching() then return "Leaving the previous group before connecting." end
     if not self:HasGroup() then return "No group configured." end
     local state = self.dataState
     local name = self:GetGroupDataChannelName()

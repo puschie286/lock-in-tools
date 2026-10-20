@@ -153,40 +153,40 @@ do
     addon.rosterState.peers.friend = { name = "Friend", level = 20 }
     addon.rosterState.progress.friend = { level = 20, xpState = "known", xp = 1, xpMax = 10 }
     addon.db.roster.peers.friend = { name = "Friend", level = 20 }
-    local order, notifications, listeners = {}, {}, {}
-    for _, method in ipairs({ "OnDataGroupChanged", "OnGroupChanged", "OnPositionGroupChanged", "OnRosterGroupChanged" }) do
-        local original, name = addon[method], method
-        addon[method] = function(self, ...)
-            order[#order + 1] = name
-            return original(self, ...)
-        end
-    end
-    local expected = { "OnDataGroupChanged", "OnGroupChanged", "OnPositionGroupChanged", "OnRosterGroupChanged" }
+    local notifications, listeners = {}, {}
     for _, name in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "ROSTER_CHANGED" }) do
         listeners[#listeners + 1] = addon:RegisterNotification(name, function(event, ...)
             assert(select("#", ...) == 0, "model invalidations never carry group keys")
-            for index, method in ipairs(expected) do
-                assert(order[index] == method, "view notifications wait until ordered group teardown is complete")
-            end
             assert(not addon:IsDataConnected() and not addon:SendData("echo", "disconnected send")
                 and not addon:ReceiveData("Friend", "1|echo|disconnected receive"),
                 "subscribers cannot use the previous group's disconnected transport")
-            assert(next(addon.positionState.peers) == nil and next(addon.db.position.peers) == nil
-                and next(addon.rosterState.peers) == nil and next(addon.rosterState.progress) == nil
-                and next(addon.db.roster.peers) == nil and not world.channels[oldChat:lower()]
-                and not world.channels[oldData:lower()],
-                "every group-change view observes cleared feature caches and old channel memberships")
-            notifications[#notifications + 1] = event
+            if addon:IsGroupSwitching() then
+                assert(addon:GetGroupChannelName() == oldChat and addon:GetGroupDataChannelName() == oldData
+                    and next(addon:GetSharedPositions()) == nil and #addon:GetOverviewPlayers() == 0,
+                    "pending views hide old peers and retain the active route until departure finishes")
+            else
+                assert(next(addon.positionState.peers) == nil and next(addon.db.position.peers) == nil
+                    and next(addon.rosterState.peers) == nil and next(addon.rosterState.progress) == nil
+                    and next(addon.db.roster.peers) == nil and not world.channels[oldChat:lower()]
+                    and not world.channels[oldData:lower()],
+                    "completed views observe cleared feature caches and old channel memberships")
+            end
+            notifications[#notifications + 1] = { event = event, pending = addon:IsGroupSwitching() }
         end)
     end
     assert(addon:SetGroupSecret("notification-friends"))
-    assert(#notifications > 0 and notifications[#notifications] == "LockInTools:GROUP_CHANGED"
+    assert(#notifications == 1 and notifications[1].event == "LockInTools:GROUP_CHANGED"
+        and notifications[1].pending and addon.positionState.peers.friend
+        and addon.rosterState.peers.friend and world.channels[oldChat:lower()] and world.channels[oldData:lower()],
+        "the pending notification blocks old views before deferring teardown until the current callback returns")
+    world:advance(0)
+    assert(#notifications > 1 and notifications[#notifications].event == "LockInTools:GROUP_CHANGED"
+        and not notifications[#notifications].pending
         and #world.notificationErrors == 0 and received == 0,
-        "the final group notification follows all coalesced model changes without subscriber failures")
+        "the completed group notification follows batched cleanup without exposing partial views")
     for _, listener in ipairs(listeners) do listener:UnregisterAllMessages() end
     assert(not harness.contains(messages, harness.SECRET) and not harness.contains(messages, "notification-friends"),
         "notifications never print either group's key")
-    world:advance(1)
     assert(world.dataJoinCalls[#world.dataJoinCalls] == addon:GetGroupDataChannelName()
         and not addon:IsDataConnected(), "group replacement waits for the new asynchronous data membership")
     world:completeJoin(addon:GetGroupDataChannelName(), 6)

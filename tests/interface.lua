@@ -345,6 +345,7 @@ do
     assert(addon:SetPositionRetention(false))
     assert(addon:SetShowPositionTrails(false))
     assert(addon:SetGroupSecret("hidden-friends"))
+    world:advance(0)
     world:completeJoin(addon:GetGroupChannelName(), 17)
     world:completeJoin(addon:GetGroupDataChannelName(), 18)
     assert(writes == 0 and not options:IsVisible() and options.secret:GetText() == ""

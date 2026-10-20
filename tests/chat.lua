@@ -138,6 +138,7 @@ do
     assert(newBox.header.text == "7. Unrelated: ", "other composer channel names remain unchanged")
 
     assert(display:SetGroupSecret(OTHER_SECRET))
+    displayWorld:advance(0)
     local nextChat, nextData = display:GetGroupChannelName(), display:GetGroupDataChannelName()
     assert(nextChat ~= chatName and nextData ~= dataName)
     assert(resolve("3. " .. nextChat) == "3. LockInTools"
@@ -151,6 +152,7 @@ do
         and reloadedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("3. " .. nextChat) == "3. LockInTools",
         "reload preserves credentials and restores readable labels")
     assert(display:LeaveGroup())
+    displayWorld:advance(0)
     assert(resolve("3. " .. nextChat) == "3. LockInTools"
         and resolve("4. " .. nextData) == "4. LockInTools Data",
         "delayed notices remain readable after leaving the group")
@@ -228,11 +230,13 @@ for _, restoreFirst in ipairs({ false, true }) do
     switchWorld:advance(2)
     if not restoreFirst then switchWorld:completeJoin(room, 4) end
     assert(switcher:SetGroupSecret(OTHER_SECRET))
+    switchWorld:advance(0)
     local nextRoom = switcher:GetGroupChannelName()
     assert(nextRoom ~= room and switchWorld.leaveCalls[1] == room)
     assert(switchWorld.joinCalls[#switchWorld.joinCalls] == nextRoom)
     switchWorld:completeJoin(nextRoom, 3)
     assert(switcher:LeaveGroup())
+    switchWorld:advance(0)
     switchWorld.fire("PLAYER_ENTERING_WORLD", false, false)
     switchWorld:advance(120)
     assert(switchWorld.leaveCalls[2] == nextRoom and not switcher:HasGroup())
@@ -242,6 +246,7 @@ local pendingSwitch, _, _, _, pendingSwitchWorld = loadAddon(settings(), false)
 pendingSwitchWorld:initialize()
 pendingSwitchWorld:advance(2)
 assert(pendingSwitch:SetGroupSecret(OTHER_SECRET))
+pendingSwitchWorld:advance(0)
 local nextRoom = pendingSwitch:GetGroupChannelName()
 pendingSwitchWorld:completeJoin(nextRoom, 3)
 pendingSwitchWorld:advance(120)
@@ -317,6 +322,7 @@ do
     secondary:AddChannel(oldData:upper())
     secondary:AddChannel("Unrelated")
     assert(switching:SetGroupSecret(OTHER_SECRET))
+    clock:advance(0)
     assert(not clock.channels[oldChat:lower()] and not clock.channels[oldData:lower()]
         and #primary.channelList == 1 and primary.channelList[1] == "General"
         and #secondary.channelList == 1 and secondary.channelList[1] == "Unrelated",
@@ -329,6 +335,7 @@ do
     secondary:AddChannel(newChat)
     secondary:AddChannel(newData)
     assert(switching:LeaveGroup())
+    clock:advance(0)
     assert(not clock.channels[newChat:lower()] and not clock.channels[newData:lower()]
         and #primary.channelList == 1 and #primary.zoneChannelList == 1
         and #secondary.channelList == 1 and #secondary.zoneChannelList == 1,
@@ -343,6 +350,7 @@ do
     local oldChat, oldData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
     assert(#clock.joinCalls == 1 and #clock.dataJoinCalls == 1)
     assert(switching:SetGroupSecret(OTHER_SECRET))
+    clock:advance(0)
     local newChat, newData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
     clock:advance(1)
     clock:completeJoin(newChat, 4)
@@ -365,6 +373,7 @@ do
             "late old joins remove stale window entries without disrupting the current group")
     end
     assert(switching:LeaveGroup())
+    clock:advance(0)
     primary:AddChannel(newChat)
     secondary:AddChannel(newData)
     clock:completeJoin(newChat, 4)

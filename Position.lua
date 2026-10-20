@@ -35,6 +35,7 @@ end
 
 local function Active(self)
     return self.positionState and self.ready and self:HasGroup()
+        and not (self.IsGroupSwitching and self:IsGroupSwitching())
         and self.db.position.sharing and not self.savedDataReadOnly
 end
 

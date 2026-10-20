@@ -91,6 +91,9 @@ do
         "automatic old-channel cleanup preserves the current aliased position transport")
     connectedWorld:restore("Unrelated", 19)
     assert(connected:SetGroupSecret(OTHER_SECRET))
+    assert(connected:IsGroupSwitching() and not connected:IsDataConnected()
+        and connected:GetGroupDataChannelName() == dataRoom, "group activation waits for the current callback")
+    connectedWorld:advance(0)
     assert(not connected:IsDataConnected() and next(connected.db.position.peers) == nil
         and next(connected:GetSharedPositions()) == nil and not connectedWorld.channels[dataRoom:lower()],
         "group switching disconnects old data before clearing feature caches")
@@ -115,6 +118,69 @@ do
         and connected.db.position.peers["newfriend-testrealm"],
         "after reconnection, valid position packets do not depend on current channel metadata")
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
+end
+
+-- A normal switch waits for both native channels and clears old feature/request state.
+do
+    local switching, _, _, event, clock = loadAddon(settings(), false)
+    clock:initialize()
+    local oldChat, oldData = switching:GetGroupChannelName(), switching:GetGroupDataChannelName()
+    local oldFingerprint = switching:GetGroupFingerprint()
+    clock:completeJoin(oldChat, 3)
+    clock:completeJoin(oldData, 7)
+    assert(switching:RegisterDataRequest("snapshot", function() return "own" end, function() end))
+    local accepted, request = switching:RequestData("snapshot", "old")
+    assert(accepted)
+    local sample = assert(clock.statusSends[1]).message
+    event("CHAT_MSG_ADDON", switching:GetDataPrefix(), sample, "CHANNEL", "OldFriend")
+    assert(switching.db.roster.peers["oldfriend-testrealm"])
+    clock:restore("Unrelated", 19)
+    local chatJoins, dataJoins = #clock.joinCalls, #clock.dataJoinCalls
+    clock.holdLeaves = true
+    assert(switching:SetGroupSecret(OTHER_SECRET))
+    assert(not switching:IsDataConnected() and not switching:OpenChatInput()
+        and switching:GetGroupFingerprint() == oldFingerprint,
+        "Both traffic paths stop before a new group becomes active")
+    clock:advance(0)
+    assert(switching:IsGroupSwitching(), "Activation must await native departure")
+    assert(#clock.joinCalls == chatJoins and #clock.dataJoinCalls == dataJoins,
+        "Deferred cleanup cannot start new join requests")
+    assert(clock.channels[oldChat:lower()] and clock.channels[oldData:lower()],
+        "The native mock retains both memberships until departure completes")
+    assert(next(switching:GetSharedPositions()) == nil and #switching:GetOverviewPlayers() == 0,
+        "Old peers are hidden while native leaves remain pending")
+    assert(next(switching.dataState.pendingRequests) == nil,
+        "Deferred cleanup retires old requests while native leaves remain pending")
+    clock.channels[oldChat:lower()] = nil
+    event("CHANNEL_LEFT", 3, oldChat)
+    clock:advance(0)
+    assert(switching:IsGroupSwitching() and #clock.joinCalls == chatJoins and #clock.dataJoinCalls == dataJoins,
+        "Human chat departure alone cannot activate either new channel")
+    clock:advance(2)
+    assert(switching:IsGroupSwitching() and not switching:IsDataConnected()
+        and #clock.joinCalls == chatJoins and #clock.dataJoinCalls == dataJoins,
+        "Elapsed time does not replace native departure confirmation")
+    clock.channels[oldData:lower()] = nil
+    event("CHANNEL_LEFT", 7, oldData)
+    clock:advance(0)
+    assert(not switching:IsGroupSwitching() and #clock.joinCalls == chatJoins + 1 and #clock.dataJoinCalls == dataJoins + 1
+        and clock.joinCalls[chatJoins + 1] == switching:GetGroupChannelName()
+        and clock.dataJoinCalls[dataJoins + 1] == switching:GetGroupDataChannelName() and clock.channels.unrelated,
+        "Both channels join the new group only after both old memberships disappear")
+    local fingerprint = switching:GetGroupFingerprint()
+    assert(fingerprint ~= oldFingerprint and switching.db.position.groupFingerprint == fingerprint
+        and switching.db.roster.groupFingerprint == fingerprint and next(switching.db.position.peers) == nil
+        and next(switching.db.roster.peers) == nil,
+        "Persisted feature caches belong to the newly active group")
+    clock:completeJoin(switching:GetGroupChannelName(), 8)
+    clock:completeJoin(switching:GetGroupDataChannelName(), 12)
+    assert(switching:IsDataConnected()
+        and not switching:ReceiveData("OldFriend", "1|R|snapshot|" .. request .. "|self-testrealm|old"))
+    clock.holdLeaves = false
+    clock:completeJoin(oldChat, 3)
+    clock:completeJoin(oldData, 7)
+    assert(not clock.channels[oldChat:lower()] and not clock.channels[oldData:lower()]
+        and switching:IsDataConnected(), "Late obsolete joins are still removed without interrupting the active group")
 end
 
 -- Every shared feature recovers independently of human chat and position preferences.
@@ -187,18 +253,18 @@ do
     local pending, _, _, _, pendingWorld = loadAddon(settings(nil, false), false)
     pendingWorld:initialize()
     local state = pending.dataState
-    local timer, generation = state.timer, state.generation
+    local timer = state.timer
     assert(state.pending and state.attempts == 1 and timer)
     assert(pending:SetPositionSharing(true))
     assert(#pendingWorld.dataJoinCalls == 1 and state.attempts == 1
-        and state.timer == timer and state.generation == generation and not timer:IsCancelled(),
+        and state.timer == timer and not timer:IsCancelled(),
         "enabling positions does not duplicate or reset an in-progress startup join")
     pendingWorld:advance(2)
-    timer, generation = state.timer, state.generation
+    timer = state.timer
     assert(state.attempts == 2 and #pendingWorld.dataJoinCalls == 2)
     assert(pending:SetPositionSharing(true))
     assert(#pendingWorld.dataJoinCalls == 2 and state.attempts == 2
-        and state.timer == timer and state.generation == generation and not timer:IsCancelled(),
+        and state.timer == timer and not timer:IsCancelled(),
         "re-saving enabled sharing preserves the current shared retry delay")
     pendingWorld:completeJoin(pending:GetGroupDataChannelName(), 7)
     local send = state.send
@@ -206,16 +272,14 @@ do
     assert(#pendingWorld.dataJoinCalls == 2 and state.send == send and pending:IsDataConnected(),
         "saving enabled sharing leaves a connected data transport intact")
     assert(pending:SetGroupSecret(OTHER_SECRET))
-    timer, generation = state.timer, state.generation
-    assert(not state.pending and timer and not pending:IsDataConnected())
+    assert(pending:IsGroupSwitching() and not pending:IsDataConnected())
     assert(pending:SetPositionSharing(true))
-    assert(#pendingWorld.dataJoinCalls == 2 and state.timer == timer
-        and state.generation == generation and not timer:IsCancelled(),
-        "saving enabled sharing preserves the delayed group-switch connection check")
-    pendingWorld:advance(1)
+    assert(#pendingWorld.dataJoinCalls == 2 and pending:IsGroupSwitching(),
+        "saving enabled sharing does not bypass coordinated departure")
+    pendingWorld:advance(0)
     assert(#pendingWorld.dataJoinCalls == 3
         and pendingWorld.dataJoinCalls[3] == pending:GetGroupDataChannelName(),
-        "the existing delayed check joins the newly selected group once")
+        "the deferred switch joins the newly selected group once")
     local alternateSends = 0
     local alternate = function(_, message)
         if not isRosterMessage(message) and not isStatusMessage(message) then alternateSends = alternateSends + 1 end

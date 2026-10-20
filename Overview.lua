@@ -327,7 +327,9 @@ function addon:RefreshOverview()
     for key, header in pairs(page.headers) do
         header:SetText(header.title .. (key == page.sortKey and (page.sortDescending and " v" or " ^") or ""))
     end
-    if not self:HasGroup() then
+    if self:IsGroupSwitching() then
+        page.empty:SetText("Leaving previous group...")
+    elseif not self:HasGroup() then
         page.empty:SetText("Choose a group key in Settings > Group to see your friends.")
     elseif #players == 0 then
         page.empty:SetText("Waiting for players on this realm and faction.")

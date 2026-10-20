@@ -219,6 +219,7 @@ panel.applyGroup:Click()
 assert(uiAddon:GetGroupSecret() == OTHER_SECRET and panel.secret:GetText() == "",
     "switch confirms before changing every feature's group")
 assert(panel.ownSecret:GetText() == OTHER_SECRET)
+uiWorld:advance(0)
 panel.secret:UserInput(SECRET)
 panel.secret:SetFocus()
 uiAddon.mainPanel:Hide()
@@ -248,9 +249,11 @@ assert(uiAddon:GetGroupSecret() == OTHER_SECRET and panel.applyGroup:GetText() =
 panel.applyGroup:Click()
 assert(uiAddon:GetGroupSecret() == replacementDraft and panel.secret:GetText() == "",
     "generated key uses the same confirmation and clears after applying")
+uiWorld:advance(0)
 panel.leaveGroup:Click()
 assert(uiAddon:HasGroup() and panel.leaveGroup:GetText() == "Confirm leave")
 panel.leaveGroup:Click()
+uiWorld:advance(0)
 assert(not uiAddon:HasGroup() and not panel.join:IsEnabled() and not panel.leave:IsEnabled())
 assert(not contains(uiMessages, SECRET) and not contains(uiMessages, OTHER_SECRET))
 assert(not contains(uiMessages, generatedDraft) and not contains(uiMessages, replacementDraft))
@@ -404,6 +407,7 @@ do
         "reapplying the same group needs no model notification or full refresh to clear its draft")
     action(function() options.leaveGroup:Click() end, false)
     action(function() options.leaveGroup:Click() end, true)
+    world:advance(0)
     assert(not addon:HasGroup() and options.ownSecret:GetText() == ""
         and not options.join:IsEnabled() and options.leaveGroup:GetText() == "Leave group",
         "group leave keeps its notification-driven enabled states and local confirmation cleanup")

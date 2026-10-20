@@ -398,6 +398,8 @@ world:login()
 world:connect()
 assert(addon:GetSharedPositions()["friend-testrealm"])
 addon:SetGroupSecret("other-group")
+assert(next(addon:GetSharedPositions()) == nil, "Switching immediately hides old locations")
+world:advance(0)
 assert(next(addon:GetSharedPositions()) == nil and next(addon.db.position.peers) == nil)
 assert(addon.db.position.groupFingerprint ~= fingerprint)
 world:advance(2)
@@ -745,12 +747,12 @@ do
     for _, reset in ipairs({
         function() clock:connect() end,
         function() classes:SetPositionSharing(false); classes:SetPositionSharing(true) end,
-        function() classes:SetGroupSecret("class-tests-next-group"); clock:connect() end,
+        function() classes:SetGroupSecret("class-tests-next-group"); clock:advance(0); clock:connect() end,
     }) do
         local before = #clock.sent
         reset()
         assert(#clock.sent == before + 1 and classRequest(clock.sent[#clock.sent].wire),
-            "Connection, sharing and group resets immediately begin a fresh discovery")
+            "Connection, sharing and completed group resets begin a fresh discovery")
         clock:advance(2)
         assert(#clock.sent == before + 2 and fields(clock.sent[#clock.sent].payload)[2] == "P")
     end
@@ -987,6 +989,7 @@ do
     assert(not classes:ReceivePosition("Ignored", classPacket(clock, "ROGUE")))
     classes:SetPositionSharing(true)
     classes:SetGroupSecret("class-isolation-group")
+    clock:advance(0)
     assert(next(classes.positionState.classes) == nil and next(classes.db.position.peers) == nil)
     assert(classes:ReceivePosition("Friend", clock:position(37, 0.2, 0.8)))
     assert(classes:GetSharedPositions()["friend-testrealm"].class == nil,

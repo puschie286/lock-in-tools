@@ -240,6 +240,9 @@ do
         and not menu:IsShown() and not page.empty:IsShown(),
         "live roster removal clamps scrolling, removes old row targets and closes obsolete menus")
     assert(overview:LeaveGroup())
+    assert(page.empty:IsShown() and page.empty:GetText() == "Leaving previous group..."
+        and not page.rows[1]:IsShown(), "pending departure immediately hides the old roster")
+    overviewWorld:advance(0)
     assert(page.empty:IsShown() and page.empty:GetText():find("Choose a group key", 1, true)
         and not page.rows[1]:IsShown() and not page.rows[1].playerID,
         "leaving the global group clears the overview while it remains open")

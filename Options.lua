@@ -200,7 +200,9 @@ local function CreateOptionsPanel()
         local text = "One key connects all your characters and every LockInTools feature.\n\n"
             .. "Friends must be on the same realm and faction."
         local fingerprint = addon:GetGroupFingerprint()
-        if fingerprint then
+        if addon:IsGroupSwitching() then
+            text = text .. "\n\nLeaving the previous group before connecting."
+        elseif fingerprint then
             text = text .. "\n\nGroup ID: " .. fingerprint
                 .. "\nCompare this ID with a friend to check that you share a group."
         end
@@ -478,8 +480,8 @@ function addon:RefreshOptions()
         return
     end
 
-    local hasGroup = self:HasGroup()
-    panel.groupStatus:SetText(hasGroup and "Group configured"
+    local hasGroup, switching = self:HasGroup(), self:IsGroupSwitching()
+    panel.groupStatus:SetText(switching and "Leaving previous group..." or hasGroup and "Group configured"
         or (self.invalidGroupSecret and "Saved key needs replacing" or "No group yet"))
     panel.newKeyLabel:SetText(hasGroup and "Use a different key" or "Join a group")
     panel.status:SetText("Status: " .. self:GetChatStatusText(true))
@@ -500,8 +502,8 @@ function addon:RefreshOptions()
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
     panel.positionTrails:SetEnabled(editable)
-    panel.join:SetEnabled(self.ready and hasGroup)
-    panel.leave:SetEnabled(self.ready and hasGroup)
+    panel.join:SetEnabled(self.ready and hasGroup and not switching)
+    panel.leave:SetEnabled(self.ready and hasGroup and not switching)
     if not editable then
         ClearKeyDraft(panel)
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
