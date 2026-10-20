@@ -1,20 +1,14 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
-    <Frame name="LockInToolsPositionPinTemplate" mixin="LockInToolsPositionPinMixin" virtual="true">
-        <Size x="16" y="16"/>
+    <Frame name="LockInToolsPositionPinTemplate" mixin="LockInToolsPositionPinMixin" enableMouseMotion="true" enableMouseClicks="false" virtual="true">
+        <Size x="20" y="20"/>
         <Layers>
             <Layer level="ARTWORK">
                 <Texture parentKey="Icon">
+                    <Size x="12" y="12"/>
                     <Anchors>
-                        <Anchor point="TOPLEFT"/>
-                        <Anchor point="BOTTOMRIGHT"/>
+                        <Anchor point="CENTER"/>
                     </Anchors>
                 </Texture>
-                <FontString parentKey="Label" inherits="GameFontNormalSmall" justifyH="LEFT">
-                    <Anchors>
-                        <Anchor point="LEFT" relativePoint="RIGHT" x="4"/>
-                    </Anchors>
-                    <Color r="1" g="1" b="1"/>
-                </FontString>
             </Layer>
         </Layers>
     </Frame>

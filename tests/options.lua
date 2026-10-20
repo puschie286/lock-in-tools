@@ -101,36 +101,19 @@ do
     preferenceWorld:completeJoin(preferences:GetGroupDataChannelName(), 7)
     options.positionSharing.labelButton:Click()
     assert(options.positionSharing:GetChecked() and preferences.db.position.sharing
-        and preferences.db.position.keepLastKnown and preferences.db.position.showTrails
+        and preferences.db.position.keepLastKnown
         and not preferences.db.chat.autoJoin, "sharing's label changes only its own preference")
     assert(options.positionStatus:GetText() == "Sharing: On."
         and hover(options.positionStatusHelp):find("every 2 seconds", 1, true)
         and tooltip.lines[1]:find("world map's LockInTools filter", 1, true),
         "healthy position status is concise while timing and map-filter help remain available")
     options.positionRetention.labelButton:Click()
-    do
-        local state = preferences.positionState
-        local timer, generation = state.timer, state.generation
-        local sample, stamp, succeeded = state.lastSentSample, state.lastSentAt, state.lastSendSucceeded
-        local discovery, attempts = state.classRequestPending, state.classRequestAttempts
-        local joins, sends = #preferenceWorld.dataJoinCalls, #preferenceWorld.dataSends
-        options.positionTrails.labelButton:Click()
-        assert(state.timer == timer and state.generation == generation and state.lastSentSample == sample
-            and state.lastSentAt == stamp and state.lastSendSucceeded == succeeded
-            and state.classRequestPending == discovery and state.classRequestAttempts == attempts
-            and #preferenceWorld.dataJoinCalls == joins and #preferenceWorld.dataSends == sends,
-            "changing trail visibility preserves sampling, suppression, discovery and transport")
-    end
     assert(not options.positionRetention:GetChecked() and not preferences.db.position.keepLastKnown
-        and not options.positionTrails:GetChecked() and not preferences.db.position.showTrails
-        and preferences.db.position.sharing,
-        "retention and trails labels apply independent settings")
-    assert(not options.positionTrailLength
-        and hover(options.positionTrails.labelButton):find("10 seconds", 1, true)
-        and not preferences.db.position.showTrails,
-        "trail help explains the fixed duration without a length editor or changing visibility")
+        and preferences.db.position.sharing and not preferences.db.chat.autoJoin,
+        "retention's label changes only its own preference")
+    hover(options.positionRetention.labelButton)
     options.tabs.chat:Click()
-    assert(not tooltip.shown and not preferences.db.position.showTrails,
+    assert(not tooltip.shown and not preferences.db.position.keepLastKnown,
         "leaving Shared positions clears help and preserves its preferences")
     hover(options.join)
     options.content:Click()
@@ -139,7 +122,7 @@ do
     preferences.savedDataReadOnly = true
     preferences:RefreshOptions()
     for _, checkbox in ipairs({ options.autoJoin, options.positionSharing,
-        options.positionRetention, options.positionTrails }) do
+        options.positionRetention }) do
         local checked = checkbox:GetChecked()
         assert(not checkbox:IsEnabled() and not checkbox.labelButton:IsEnabled(),
             "read-only settings disable the checkbox and its label together")
@@ -164,8 +147,6 @@ assert(panel and panel:IsShown(), "/lit options opens the actual options panel")
 assert(panel.secret:GetText() == "" and not panel.toggleSecret and panel.autoJoin:GetChecked() == false)
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true,
     "position sharing starts off with last-known retention enabled")
-assert(panel.positionTrails:GetChecked() == true and not panel.positionTrailLength,
-    "trails default on without a duration editor")
 assert(panel.save == nil and panel.savePosition == nil, "feature preferences need no Save settings buttons")
 assert(not panel.join:IsEnabled() and not panel.leave:IsEnabled(), "no group means no join/leave buttons")
 assert(uiEnvironment.UISpecialFrames[1] == "LockInToolsWindow", "Escape can close the native panel")
@@ -192,7 +173,6 @@ uiWorld:completeJoin(uiAddon:GetGroupChannelName(), 9)
 assert(panel.secret:GetText() == OTHER_SECRET and panel.autoJoin:GetChecked() == false,
     "asynchronous status updates preserve key drafts and immediately applied preferences")
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true
-    and panel.positionTrails:GetChecked() == true and uiAddon.db.position.showTrails
     and not uiAddon.db.position.sharing and uiAddon.db.position.keepLastKnown,
     "asynchronous status updates retain applied position preferences")
 assert(panel.positionStatus:GetText() == "Sharing: " .. uiAddon:GetPositionStatusText(true),
@@ -228,7 +208,6 @@ assert(panel.secret:GetText() == "" and panel.ownSecret:GetText() == "" and not 
 uiAddon:OpenOptions()
 assert(uiAddon.optionsPanel == panel and panel.secret:GetText() == "")
 assert(panel.positionSharing:GetChecked() == false and panel.positionRetention:GetChecked() == true
-    and panel.positionTrails:GetChecked() == true
     and not panel.autoJoin:GetChecked(), "closing and reopening retains immediately applied preferences")
 panel.tabs.chat:Click()
 panel.tabs.group:Click()
@@ -272,7 +251,6 @@ assert(not readOnly.optionsPanel.secret:IsEnabled()
     and not readOnly.optionsPanel.autoJoin:IsEnabled()
     and not readOnly.optionsPanel.positionSharing:IsEnabled()
     and not readOnly.optionsPanel.positionRetention:IsEnabled()
-    and not readOnly.optionsPanel.positionTrails:IsEnabled()
     and not readOnly.optionsPanel.save and not readOnly.optionsPanel.savePosition,
     "read-only settings disable every immediately applied preference")
 assert(readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true))
@@ -297,16 +275,23 @@ assert(readOnly.optionsPanel.selectedTab == "chat" and not readOnly.optionsPanel
 
 end
 
--- Programmatic refreshes never save preferences, including profiles with an obsolete duration.
+-- Programmatic refreshes never save preferences; user clicks apply each preference once.
 do
-    local oldSettings = settings(SECRET, false)
-    oldSettings.position = { sharing = false, keepLastKnown = true, showTrails = true, trailLength = 27 }
-    local direct, directEnvironment, _, _, directWorld = loadAddon(oldSettings, false)
+    local direct, directEnvironment, _, _, directWorld = loadAddon(settings(SECRET, false), false)
     directWorld:initialize()
-    local trailCalls, setTrails = 0, direct.SetShowPositionTrails
-    direct.SetShowPositionTrails = function(self, ...)
-        trailCalls = trailCalls + 1
-        return setTrails(self, ...)
+    local setterCalls = {}
+    for _, name in ipairs({ "SetChatAutoJoin", "SetPositionSharing", "SetPositionRetention" }) do
+        local setter, setterName = direct[name], name
+        setterCalls[setterName] = 0
+        direct[setterName] = function(self, ...)
+            setterCalls[setterName] = setterCalls[setterName] + 1
+            return setter(self, ...)
+        end
+    end
+    local function checkCalls(expected)
+        for _, calls in pairs(setterCalls) do
+            assert(calls == expected, "each preference setter runs only for its user click")
+        end
     end
     loadOptions(direct, directEnvironment)
     direct:OpenOptions()
@@ -314,37 +299,37 @@ do
     options.tabs.position:Click()
     options.positionSharing:SetChecked(true)
     options.positionRetention:SetChecked(false)
-    options.positionTrails:SetChecked(false)
     options.autoJoin:SetChecked(true)
     direct:RefreshOptions()
-    assert(trailCalls == 0 and direct.db.position.trailLength == 27
-        and not direct.db.position.sharing and direct.db.position.keepLastKnown
-        and direct.db.position.showTrails and not direct.db.chat.autoJoin,
+    checkCalls(0)
+    assert(not direct.db.position.sharing and direct.db.position.keepLastKnown and not direct.db.chat.autoJoin,
         "loading and programmatically updating controls never applies preferences")
     direct.mainPanel:Hide()
     direct:OpenOptions()
-    assert(trailCalls == 0 and not options.positionTrailLength
-        and not options.positionSharing:GetChecked() and options.positionRetention:GetChecked()
-        and options.positionTrails:GetChecked() and not options.autoJoin:GetChecked(),
+    checkCalls(0)
+    assert(not options.positionSharing:GetChecked() and options.positionRetention:GetChecked()
+        and not options.autoJoin:GetChecked(),
         "reopening restores saved values without invoking setters")
-    options.positionTrails:Click()
+    options.positionSharing:Click()
+    options.positionRetention:Click()
+    options.autoJoin:Click()
     direct:RefreshOptions()
-    assert(trailCalls == 1 and not direct.db.position.showTrails and direct.db.position.trailLength == 27,
-        "a trail toggle applies once and leaves the obsolete saved duration untouched")
+    checkCalls(1)
+    assert(direct.db.position.sharing and not direct.db.position.keepLastKnown and direct.db.chat.autoJoin,
+        "preference clicks apply their independent saved settings immediately")
     options.tabs.chat:Click()
     options.tabs.position:Click()
     direct.mainPanel:Hide()
     direct:OpenOptions()
-    assert(trailCalls == 1 and not options.positionTrails:GetChecked()
-        and direct.db.position.trailLength == 27,
-        "navigation and reopening retain trail visibility without applying or repairing a duration")
+    checkCalls(1)
+    assert(options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
+        and options.autoJoin:GetChecked(), "navigation and reopening retain immediately applied preferences")
 
     direct.savedDataReadOnly = true
     direct:RefreshOptions()
     for _, preference in ipairs({ { options.autoJoin, direct.db.chat, "autoJoin" },
         { options.positionSharing, direct.db.position, "sharing" },
-        { options.positionRetention, direct.db.position, "keepLastKnown" },
-        { options.positionTrails, direct.db.position, "showTrails" } }) do
+        { options.positionRetention, direct.db.position, "keepLastKnown" } }) do
         local control, saved, name = unpack(preference)
         local previous = saved[name]
         control:SetChecked(not previous)
@@ -353,8 +338,6 @@ do
             and options.feedback.color[1] == 1,
             "rejected immediate changes restore the saved checkbox and report the read-only error")
     end
-    assert(direct.db.position.trailLength == 27,
-        "read-only checkbox rejection preserves the obsolete saved duration")
 end
 
 
@@ -387,7 +370,7 @@ do
     action(function() options.join:Click() end, true)
     assert(options.status:GetText():find("Joining", 1, true), "chat join status updates through model notifications")
     options.tabs.position:Click()
-    for _, control in ipairs({ options.positionSharing, options.positionRetention, options.positionTrails }) do
+    for _, control in ipairs({ options.positionSharing, options.positionRetention }) do
         action(function() control:Click() end, true)
     end
     options.tabs.group:Click()

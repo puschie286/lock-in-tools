@@ -70,6 +70,50 @@ local function NativeNumber(callback, maximum, ...)
     if ok and Number(value, maximum) then return value end
 end
 
+local STATUS_FLAGS = { "inParty", "canInvite", "partyFull", "sharing" }
+
+local function SavePeer(self, id, peer)
+    if self.savedDataReadOnly then return end
+    local saved = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt }
+    for _, name in ipairs(STATUS_FLAGS) do saved[name] = peer[name] end
+    local progress = self.rosterState.progress[id]
+    if progress and progress.level == peer.level then
+        saved.xp, saved.xpMax = progress.xp, progress.xpMax
+        saved.xpState, saved.xpUpdatedAt = progress.xpState, progress.xpUpdatedAt
+    end
+    self.db.roster.peers[id] = saved
+end
+
+local function RestoreProgress(saved)
+    local kind = saved.xpState
+    if not Number(saved.xpUpdatedAt, 9999999999)
+        or (kind ~= "known" and kind ~= "max" and kind ~= "unavailable") then return nil end
+    if kind ~= "unavailable" and (not saved.level or saved.level <= 0) then return nil end
+    if kind == "known" and (not Number(saved.xp, 9999999999)
+        or not Number(saved.xpMax, 9999999999) or saved.xpMax == 0 or saved.xp > saved.xpMax) then return nil end
+    return { level = saved.level, xp = kind == "known" and saved.xp or nil,
+        xpMax = kind == "known" and saved.xpMax or nil, xpState = kind,
+        xpUpdatedAt = saved.xpUpdatedAt, disconnected = true }
+end
+
+local function SaveLocalStatus(self, status)
+    if not Active(self) then return end
+    local name = SelfName()
+    local id = name and Identity(name)
+    if not id then return end
+    local state, now = self.rosterState, GetServerTime()
+    local previous, level = state.progress[id], status.level > 0 and status.level or nil
+    local updatedAt = previous and previous.xpUpdatedAt
+    if not previous or previous.disconnected or previous.level ~= level or previous.xpState ~= status.xpState
+        or previous.xp ~= status.xp or previous.xpMax ~= status.xpMax then updatedAt = now end
+    state.progress[id] = { level = level, xp = status.xp, xpMax = status.xpMax,
+        xpState = status.xpState, xpUpdatedAt = updatedAt, disconnected = false }
+    local peer = { name = name, level = level, seenAt = now, statusSynchronized = true }
+    for _, flag in ipairs(STATUS_FLAGS) do peer[flag] = status[flag] end
+    state.peers[id] = peer
+    SavePeer(self, id, peer)
+end
+
 local function LocalStatus(self)
     local state = self.rosterState
     local nativeLevel = NativeNumber(UnitLevel, 1000, "player") or 0
@@ -92,12 +136,8 @@ local function LocalStatus(self)
         end
     end
     state.localStatus = result
+    SaveLocalStatus(self, result)
     return result
-end
-
-local function SavePeer(self, id, peer)
-    if self.savedDataReadOnly then return end
-    self.db.roster.peers[id] = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt }
 end
 
 function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
@@ -120,7 +160,7 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
     end
     local level, xp, maximum = FieldNumber(fields.level), FieldNumber(fields.xp), FieldNumber(fields.xpMax)
     local flags = {}
-    for _, name in ipairs({ "inParty", "canInvite", "partyFull", "sharing" }) do
+    for _, name in ipairs(STATUS_FLAGS) do
         local value = fields[name]
         if IsSecret(value) then return Reject() end
         if value == true or value == "true" then flags[name] = true
@@ -136,7 +176,7 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
     if kind == "max" and level == 0 then return Reject() end
     local previous, peer = state.progress[id], state.peers[id]
     -- The shared protocol validates sessions and ordering. Direct callers retain ordering.
-    if previous and not metadata
+    if previous and previous.stamp and not metadata
         and (stamp < previous.stamp or (stamp == previous.stamp and sequence <= previous.sequence)) then
         return false
     end
@@ -174,8 +214,13 @@ function addon:InitializeRoster()
         local name = type(saved) == "table" and SavedName(saved.name, id)
         if name and Number(saved.seenAt, 9999999999)
             and (saved.level == nil or Number(saved.level, 1000)) then
-            self.rosterState.peers[id] = { name = name, level = saved.level, seenAt = saved.seenAt }
-            saved.name = name
+            local peer = { name = name, level = saved.level, seenAt = saved.seenAt, statusSynchronized = false }
+            for _, flag in ipairs(STATUS_FLAGS) do
+                if type(saved[flag]) == "boolean" then peer[flag] = saved[flag] end
+            end
+            self.rosterState.peers[id] = peer
+            self.rosterState.progress[id] = RestoreProgress(saved)
+            SavePeer(self, id, peer)
         else
             settings.peers[id] = nil
         end
@@ -185,10 +230,14 @@ function addon:InitializeRoster()
     end, function(sender, fields, stamp, sequence, metadata)
         return self:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
     end, function(connected)
-        if connected then self.rosterState.progress = {}
-        else
-            for _, progress in pairs(self.rosterState.progress) do progress.disconnected = true end
-            for _, peer in pairs(self.rosterState.peers) do peer.lastReceived = nil end
+        -- Keep last reported values, but never carry live contact or wire ordering
+        -- into another connection. Only a fresh status can synchronize a peer.
+        for _, progress in pairs(self.rosterState.progress) do
+            progress.disconnected = true
+            progress.stamp, progress.sequence, progress.session = nil, nil, nil
+        end
+        for _, peer in pairs(self.rosterState.peers) do
+            peer.lastReceived, peer.statusSynchronized = nil, false
         end
         Refresh(self)
     end)
@@ -232,6 +281,7 @@ end
 
 function addon:OnRosterLogout()
     if not self.rosterState then return end
+    if Active(self) then LocalStatus(self) end
     self.rosterState.stopped = true
 end
 
@@ -244,10 +294,11 @@ function addon:GetOverviewPlayers()
             online = isSelf or (self:IsDataConnected() and peer.lastReceived ~= nil and GetTime() - peer.lastReceived < TIMEOUT),
             inParty = peer.inParty, canInvite = peer.canInvite, partyFull = peer.partyFull, sharing = peer.sharing,
             statusSynchronized = peer.statusSynchronized }
-        local progress = isSelf and LocalStatus(self) or self.rosterState.progress[id]
+        local progress = isSelf and self.rosterState.localStatus or self.rosterState.progress[id]
         row.xpState, row.xpStale = "unavailable", false
         if progress then
-            row.xpUpdatedAt = isSelf and GetServerTime() or progress.xpUpdatedAt
+            local savedProgress = self.rosterState.progress[id]
+            row.xpUpdatedAt = isSelf and (savedProgress and savedProgress.xpUpdatedAt or GetServerTime()) or progress.xpUpdatedAt
             row.xpStale = not isSelf and (not row.online or progress.disconnected == true) or false
             if progress.level == row.level then
                 row.xp, row.xpMax, row.xpState = progress.xp, progress.xpMax, progress.xpState

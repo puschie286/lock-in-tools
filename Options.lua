@@ -183,6 +183,297 @@ local function BindPreference(panel, checkbox, getter, setter)
     end)
 end
 
+local function GuideText(value)
+    return tostring(value or ""):gsub("|", "||")
+end
+
+local function RestedXPList(parent, y, count, rowHeight, makeRow, render)
+    local list = CreateFrame("Frame", nil, parent)
+    list.themeOwner = parent.themeOwner
+    list:SetPoint("TOPLEFT", 16, -y)
+    list:SetSize(648, count * rowHeight)
+    list.offset, list.rows = 0, {}
+    list.empty = UI:Label(list, "", 12, "muted")
+    list.empty:SetPoint("TOPLEFT", 0, -4)
+    list.empty:SetSize(616, rowHeight * count)
+    for index = 1, count do
+        local row = CreateFrame("Frame", nil, list)
+        row.themeOwner = list.themeOwner
+        row:SetPoint("TOPLEFT", 0, -(index - 1) * rowHeight)
+        row:SetSize(620, rowHeight)
+        makeRow(row)
+        list.rows[index] = row
+    end
+    local scrollbar = CreateFrame("Slider", nil, list)
+    list.scrollbar = scrollbar
+    scrollbar:SetPoint("TOPRIGHT", 0, 0)
+    scrollbar:SetSize(14, count * rowHeight)
+    scrollbar:SetOrientation("VERTICAL")
+    scrollbar:SetValueStep(1)
+    scrollbar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    scrollbar:GetThumbTexture():SetSize(20, 24)
+    function list:Refresh(entries)
+        self.entries = entries or {}
+        self.maxOffset = math.max(0, #self.entries - count)
+        self.offset = math.max(0, math.min(self.offset, self.maxOffset))
+        self.refreshing = true
+        scrollbar:SetMinMaxValues(0, math.max(1, self.maxOffset))
+        scrollbar:SetValue(self.offset)
+        self.refreshing = false
+        if self.maxOffset > 0 then scrollbar:Show() else scrollbar:Hide() end
+        if #self.entries == 0 then self.empty:Show() else self.empty:Hide() end
+        for index, row in ipairs(self.rows) do
+            local entry = self.entries[self.offset + index]
+            if entry then render(row, entry); row:Show() else row:Hide() end
+        end
+    end
+    local function SetOffset(value)
+        for _, row in ipairs(list.rows) do
+            HideTooltip(row)
+            if row.follow then HideTooltip(row.follow) end
+        end
+        list.offset = math.max(0, math.min(math.floor(value + 0.5), list.maxOffset or 0))
+        list:Refresh(list.entries)
+    end
+    scrollbar:SetScript("OnValueChanged", function(_, value)
+        if not list.refreshing then SetOffset(value) end
+    end)
+    list:EnableMouseWheel(true)
+    scrollbar:EnableMouseWheel(true)
+    list:SetScript("OnMouseWheel", function(_, delta) SetOffset(list.offset - delta) end)
+    scrollbar:SetScript("OnMouseWheel", function(_, delta) SetOffset(list.offset - delta) end)
+    return list
+end
+
+local function CreateRestedXPPage(panel)
+    local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP")
+    panel.pages.restedxp = page
+    local main = CreateFrame("Frame", nil, page)
+    main.themeOwner = page.themeOwner
+    main:SetAllPoints(page)
+    page.main = main
+    local publish = CreateFrame("Frame", nil, page)
+    publish.themeOwner = page.themeOwner
+    publish:SetAllPoints(page)
+    publish:Hide()
+    page.publish = publish
+
+    panel.restedxpStatus = UI:Label(main, "", 12, "muted")
+    panel.restedxpStatus:SetPoint("TOPLEFT", 16, -48)
+    panel.restedxpStatus:SetSize(648, 36)
+    local installed = UI:Label(main, "Installed guides", 13)
+    installed:SetPoint("TOPLEFT", 16, -90)
+    panel.restedxpGuides = RestedXPList(main, 112, 4, 23, function(row)
+        row:EnableMouse(true)
+        row.name = UI:Label(row, "", 12)
+        row.name:SetPoint("TOPLEFT", 0, -3)
+        row.name:SetSize(536, 20)
+        row.version = UI:Label(row, "", 12, "muted")
+        row.version:SetPoint("TOPRIGHT", 0, -3)
+        row.version:SetSize(76, 20)
+        OptionTooltip(page, row, "Installed guide", function()
+            local guide = row.guide
+            if not guide then return "" end
+            return GuideText(guide.name or guide.key) .. "\n" .. GuideText(guide.group)
+                .. (guide.subgroup and guide.subgroup ~= "" and (" / " .. GuideText(guide.subgroup)) or "")
+                .. "\n" .. (tonumber(guide.version or 0) == 0 and "Unversioned" or ("Version " .. GuideText(guide.version)))
+        end)
+    end, function(row, guide)
+        row.guide = guide
+        local group = guide.group and guide.group ~= "" and (GuideText(guide.group) .. " / ") or ""
+        row.name:SetText(group .. GuideText(guide.name or guide.key))
+        row.version:SetText(tonumber(guide.version or 0) == 0 and "Unversioned" or ("v" .. GuideText(guide.version)))
+    end)
+    panel.restedxpGuides.empty:SetText("No installed guides found.")
+
+    local available = UI:Label(main, "Group packs and publishers", 13)
+    available:SetPoint("TOPLEFT", 16, -216)
+    panel.restedxpPacks = RestedXPList(main, 238, 2, 40, function(row)
+        row.name = UI:Label(row, "", 12)
+        row.name:SetPoint("TOPLEFT", 0, 0)
+        row.name:SetSize(514, 19)
+        row.detail = UI:Label(row, "", 11, "muted")
+        row.detail:SetPoint("TOPLEFT", 0, -18)
+        row.detail:SetSize(514, 18)
+        row.follow = UI:Button(row, "Follow")
+        row.follow:SetPoint("TOPRIGHT", 0, -2)
+        row.follow:SetSize(96, 30)
+        row.follow:SetScript("OnClick", function()
+            if not row.pack then return end
+            local success, message = addon:SelectRestedXPPack(row.pack.id, row.pack.source)
+            SetFeedback(panel, success and "Publisher selected. Click Update guides to download." or message, not success)
+            addon:RefreshOptions()
+        end)
+        OptionTooltip(page, row.follow, "Follow publisher",
+            "Choose this group member as the source for this pack. Future updates follow their published content. "
+                .. "Only follow a publisher whose guides you trust.")
+    end, function(row, pack)
+        row.pack = pack
+        local title = GuideText(pack.label or pack.id)
+        if pack.label and pack.label ~= pack.id then title = title .. " (" .. GuideText(pack.id) .. ")" end
+        row.name:SetText(title)
+        local status = pack.updateAvailable and "Update available" or pack.status
+            or (pack.installed and "Installed" or "Available")
+        row.detail:SetText(GuideText(pack.source or "You") .. " | " .. GuideText(status)
+            .. (pack.hash and (" | " .. GuideText(pack.hash:sub(1, 8))) or ""))
+        local canFollow = pack.source ~= nil and not pack.localPack and pack.canFollow ~= false
+        row.follow:SetText(pack.selected and "Following"
+            or (pack.localPack or not pack.source) and "Shared" or canFollow and "Follow" or "Cached")
+        row.follow:SetEnabled(not page.readOnly and not page.busy and canFollow and not pack.selected)
+    end)
+    panel.restedxpPacks.empty:SetText("No shared packs found. Update guides checks online group members.")
+    panel.restedxpUpdate = UI:Button(main, "Update guides", "primary")
+    panel.restedxpUpdate:SetPoint("TOPLEFT", 16, -338)
+    panel.restedxpUpdate:SetSize(160, 32)
+    panel.restedxpUpdate:SetScript("OnClick", function()
+        local success, message = addon:UpdateRestedXPGuides()
+        SetFeedback(panel, success and "Checking available guide updates..." or message, not success)
+        addon:RefreshOptions()
+    end)
+    OptionTooltip(page, panel.restedxpUpdate, "Update guides",
+        "Discover available group packs and install changed content from publishers you follow. "
+            .. "Guide versions are displayed above; pack content identifies changes.")
+    panel.restedxpShare = UI:Button(main, "Share export")
+    panel.restedxpShare:SetPoint("TOPRIGHT", -16, -12)
+    panel.restedxpShare:SetSize(128, 28)
+
+    local packLabel = UI:Label(publish, "Pack ID", 12, "muted")
+    packLabel:SetPoint("TOPLEFT", 16, -52)
+    panel.restedxpPackID = UI:EditBox(publish)
+    panel.restedxpPackID:SetPoint("TOPLEFT", 16, -74)
+    panel.restedxpPackID:SetSize(300, 30)
+    panel.restedxpPackID:SetMaxLetters(40)
+    OptionTooltip(page, panel.restedxpPackID, "Pack ID",
+        "Choose a short name using letters, numbers, hyphens or underscores. "
+            .. "Use the same ID when publishing updated content so followers receive the update.")
+    local tagLabel = UI:Label(publish, "Export's source BattleTag", 12, "muted")
+    tagLabel:SetPoint("TOPLEFT", 332, -52)
+    panel.restedxpBattleTag = UI:EditBox(publish)
+    panel.restedxpBattleTag:SetPoint("TOPLEFT", 332, -74)
+    panel.restedxpBattleTag:SetSize(332, 30)
+    panel.restedxpBattleTag:SetMaxLetters(128)
+    OptionTooltip(page, panel.restedxpBattleTag, "Export's source BattleTag",
+        "Enter the BattleTag this export was created for. It is used only to read this export; "
+            .. "each recipient uses their own BattleTag locally.")
+    local exportLabel = UI:Label(publish, "Paste a RestedXP export (Ctrl+V)", 12, "muted")
+    exportLabel:SetPoint("TOPLEFT", 16, -120)
+    local scroll = CreateFrame("ScrollFrame", nil, publish)
+    scroll:SetPoint("TOPLEFT", 16, -142)
+    scroll:SetSize(622, 164)
+    panel.restedxpExport = UI:EditBox(publish)
+    panel.restedxpExport:SetParent(scroll)
+    panel.restedxpExport:SetMultiLine(true)
+    panel.restedxpExport:SetMaxLetters(2 * 1024 * 1024)
+    panel.restedxpExport:SetSize(620, 164)
+    panel.restedxpExport:SetTextInsets(10, 10, 8, 8)
+    scroll:SetScrollChild(panel.restedxpExport)
+    local exportScroll = CreateFrame("Slider", nil, publish)
+    exportScroll:SetPoint("TOPLEFT", 648, -142)
+    exportScroll:SetSize(14, 164)
+    exportScroll:SetOrientation("VERTICAL")
+    exportScroll:SetValueStep(16)
+    exportScroll:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    exportScroll:GetThumbTexture():SetSize(20, 24)
+    exportScroll:SetMinMaxValues(0, 0)
+    exportScroll:SetScript("OnValueChanged", function(_, value) scroll:SetVerticalScroll(value) end)
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(_, delta)
+        exportScroll:SetValue(exportScroll:GetValue() - delta * 32)
+    end)
+    local function RefreshDraft()
+        panel.restedxpImport:SetEnabled(not page.readOnly and not page.busy
+            and panel.restedxpPackID:GetText():find("%S") ~= nil
+            and panel.restedxpBattleTag:GetText():find("%S") ~= nil
+            and panel.restedxpExport:GetText():find("%S") ~= nil)
+    end
+    for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
+        edit:SetScript("OnEscapePressed", function(widget) widget:ClearFocus() end)
+        edit:SetScript("OnTextChanged", RefreshDraft)
+    end
+    panel.restedxpExport:HookScript("OnTextChanged", function(edit)
+        local _, fontSize = edit:GetFont()
+        edit:SetHeight(math.max(164, edit:GetNumLines() * ((fontSize or 14) + 2) + 16))
+        scroll:UpdateScrollChildRect()
+        exportScroll:SetMinMaxValues(0, math.max(0, edit:GetHeight() - scroll:GetHeight()))
+    end)
+    panel.restedxpExport:SetScript("OnCursorChanged", function(_, _, y, _, height)
+        local top, bottom = -y, -y + height
+        local offset = scroll:GetVerticalScroll()
+        if top < offset then exportScroll:SetValue(top)
+        elseif bottom > offset + scroll:GetHeight() then exportScroll:SetValue(bottom - scroll:GetHeight()) end
+    end)
+    panel.restedxpImport = UI:Button(publish, "Import & share", "primary")
+    panel.restedxpImport:SetPoint("TOPLEFT", 16, -338)
+    panel.restedxpImport:SetSize(160, 32)
+    local function ClearDraft()
+        for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
+            edit:ClearFocus()
+            edit:SetText("")
+        end
+        exportScroll:SetValue(0)
+    end
+    page.ClearDraft = ClearDraft
+    panel.restedxpImport:SetScript("OnClick", function()
+        local success, message = addon:ImportRestedXPPack(panel.restedxpPackID:GetText(),
+            panel.restedxpExport:GetText(), panel.restedxpBattleTag:GetText())
+        if success then
+            ClearDraft()
+            publish:Hide()
+            main:Show()
+        end
+        SetFeedback(panel, success and "Validating export before sharing..." or message, not success)
+        addon:RefreshOptions()
+    end)
+    local back = UI:Button(publish, "Back")
+    page.back = back
+    back:SetPoint("TOPRIGHT", -16, -12)
+    back:SetSize(96, 28)
+    back:SetScript("OnClick", function()
+        ClearDraft()
+        publish:Hide()
+        main:Show()
+        SetFeedback(panel)
+    end)
+    panel.restedxpShare:SetScript("OnClick", function()
+        main:Hide()
+        publish:Show()
+        if type(addon.GetRestedXPBattleTag) == "function" then
+            panel.restedxpBattleTag:SetText(addon:GetRestedXPBattleTag() or "")
+        end
+        panel.restedxpPackID:SetFocus()
+        SetFeedback(panel)
+        RefreshDraft()
+    end)
+    page.RefreshDraft = RefreshDraft
+    page:SetScript("OnHide", function()
+        ClearDraft()
+        publish:Hide()
+        main:Show()
+    end)
+    RefreshDraft()
+end
+
+local function RefreshRestedXP(panel)
+    local page = panel.pages.restedxp
+    if not page or not page:IsVisible() then return end
+    local state = type(addon.GetRestedXPState) == "function" and addon:GetRestedXPState() or {}
+    page.readOnly, page.busy = addon.savedDataReadOnly or state.readOnly, state.busy
+    local status = not state.installed and "RestedXP is not installed."
+        or (state.loaded and "RestedXP is installed" or "RestedXP is installed but not loaded")
+            .. (state.version and (" (" .. GuideText(state.version) .. ")") or "") .. "."
+    if state.installationProblem then status = status .. " " .. GuideText(state.installationProblem) end
+    if state.status and state.status ~= "" then status = status .. "\n" .. GuideText(state.status) end
+    panel.restedxpStatus:SetText(status)
+    panel.restedxpGuides:Refresh(state.guides)
+    panel.restedxpPacks:Refresh(state.packs)
+    panel.restedxpUpdate:SetEnabled(not page.readOnly and not page.busy and state.canUpdate == true)
+    panel.restedxpShare:SetEnabled(not page.readOnly and not page.busy)
+    for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
+        edit:SetEnabled(not page.readOnly and not page.busy)
+    end
+    page.RefreshDraft()
+end
+
 local function CreateOptionsPanel()
     local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
@@ -391,16 +682,8 @@ local function CreateOptionsPanel()
         "Keep the last location across reloads and characters. Gray offline markers mean no position update for at least 60 seconds.\n\n"
             .. "Turning this off removes stale locations and stops saving them.")
 
-    panel.positionTrails = UI:Checkbox(position)
-    panel.positionTrails:SetPoint("TOPLEFT", 12, -166)
-    panel.positionTrails:SetSize(28, 28)
-    BindPreference(panel, panel.positionTrails, function() return addon:GetShowPositionTrails() end,
-        addon.SetShowPositionTrails)
-    PreferenceLabel(position, panel.positionTrails, "Show movement trails",
-        "Draw fading paths behind moving players for 10 seconds. Trails are temporary, shown only on your map, and are not saved or shared.")
-
     panel.positionStatusHelp = CreateFrame("Frame", nil, position)
-    panel.positionStatusHelp:SetPoint("TOPLEFT", 16, -214)
+    panel.positionStatusHelp:SetPoint("TOPLEFT", 16, -178)
     panel.positionStatusHelp:SetSize(648, 36)
     panel.positionStatusHelp:EnableMouse(true)
     panel.positionStatus = UI:Label(position, "", 12, "muted")
@@ -409,6 +692,8 @@ local function CreateOptionsPanel()
     OptionTooltip(position, panel.positionStatusHelp, "Position status", function()
         return addon:GetPositionStatusText() .. "\n\nTo hide player icons while sharing continues, use the world map's LockInTools filter."
     end)
+
+    CreateRestedXPPage(panel)
 
     for _, page in pairs(panel.pages) do
         local tooltipPage = page
@@ -435,8 +720,8 @@ local function CreateOptionsPanel()
         addon:RefreshOptions()
     end
     panel.SelectTab = SelectTab
-    local categories = { { "group", "Group", 134 }, { "chat", "Shared chat", 152 },
-        { "position", "Shared positions", 172 } }
+    local categories = { { "group", "Group", 116 }, { "chat", "Shared chat", 148 },
+        { "position", "Shared positions", 166 }, { "restedxp", "RestedXP", 136 } }
     local tabX = 20
     for _, category in ipairs(categories) do
         local name = category[1]
@@ -500,9 +785,9 @@ function addon:RefreshOptions()
     panel.autoJoin:SetEnabled(editable)
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
-    panel.positionTrails:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup and not switching)
     panel.leave:SetEnabled(self.ready and hasGroup and not switching)
+    RefreshRestedXP(panel)
     if not editable then
         ClearKeyDraft(panel)
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
@@ -602,7 +887,7 @@ function addon:OpenWelcome()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED" }) do
+for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
 end
 addon:RegisterNotification("GROUP_CHANGED", function() RefreshContentFeedback(addon) end)

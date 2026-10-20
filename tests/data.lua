@@ -1911,7 +1911,8 @@ do
     alice.world:disconnect()
     assert(player(alice, "Bob").xpStale)
     alice.world:connect()
-    assert(player(alice, "Bob").xp == nil)
+    assert(player(alice, "Bob").xp == 200 and player(alice, "Bob").xpStale,
+        "Reconnect keeps the last reported XP stale until the shared status response arrives")
     bus:pump()
     assert(player(alice, "Bob").xp == 200 and not player(alice, "Bob").xpStale)
 end

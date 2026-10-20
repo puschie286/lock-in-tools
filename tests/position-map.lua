@@ -19,15 +19,42 @@ local function Vector(x, y)
     return { x = x, y = y, GetXY = function(self) return self.x, self.y end }
 end
 
-local function LoadMap(enableTrails)
+local function CheckDotAssets()
+    for _, asset in ipairs({ "PositionDot", "PositionRing" }) do
+        local file = assert(io.open("Media/" .. asset .. ".tga", "rb"))
+        local data = file:read("*a")
+        file:close()
+        assert(data:byte(2) == 0 and data:byte(3) == 2 and data:byte(17) == 32,
+            "position markers use native uncompressed TGA textures with alpha")
+        local width = data:byte(13) + data:byte(14) * 256
+        local height = data:byte(15) + data:byte(16) * 256
+        local offset = 18 + data:byte(1)
+        assert(width > 0 and height > 0 and #data >= offset + width * height * 4)
+        local function Alpha(x, y) return data:byte(offset + (y * width + x) * 4 + 4) end
+        assert(Alpha(0, 0) == 0 and Alpha(width - 1, 0) == 0
+            and Alpha(0, height - 1) == 0 and Alpha(width - 1, height - 1) == 0,
+            "dot textures have transparent corners rather than square backgrounds")
+        local centerAlpha = Alpha(math.floor(width / 2), math.floor(height / 2))
+        assert(asset == "PositionDot" and centerAlpha == 255 or asset == "PositionRing" and centerAlpha == 0,
+            "the active dot has a filled center and the stale ring has a transparent center")
+        local visible = false
+        for index = offset + 4, offset + width * height * 4, 4 do
+            if data:byte(index) == 255 then visible = true; break end
+        end
+        assert(visible, "each position marker contains opaque visible pixels")
+    end
+end
+CheckDotAssets()
+
+local function LoadMap()
     local addon = {
         positions = {}, initialized = true, positionState = {},
-        db = { position = { showPlayerIcons = true, showTrails = enableTrails == true } },
+        db = { position = { showPlayerIcons = true } },
     }
     local world = {
         frames = {}, added = 0, created = 0, released = 0, rectangles = {},
         bounds = {}, secretValues = {}, worldConversions = 0, mapConversions = 0, now = 0,
-        menuModifiers = {}, menuRegistrations = 0, lines = {},
+        menuModifiers = {}, menuRegistrations = 0,
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
@@ -40,9 +67,9 @@ local function LoadMap(enableTrails)
             world.menuModifiers[tag] = callback
         end },
         issecretvalue = function(value) return world.secretValues[value] == true end,
-        CLASS_ICON_TCOORDS = {
-            WARRIOR = { 0, 0.25, 0, 0.25 },
-            MAGE = { 0.25, 0.5, 0, 0.25 },
+        RAID_CLASS_COLORS = {
+            WARRIOR = { r = 0.78, g = 0.61, b = 0.43 },
+            MAGE = { r = 0.25, g = 0.78, b = 0.92 },
         },
         C_Map = { GetMapRectOnMap = function(source, target)
             local rectangle = world.rectangles[source .. ":" .. target]
@@ -79,6 +106,17 @@ local function LoadMap(enableTrails)
             return frame
         end,
     }, { __index = _G })
+    local tooltip = { shown = false, lines = {}, hideCount = 0 }
+    function tooltip:SetOwner(owner, anchor) self.owner, self.anchor = owner, anchor end
+    function tooltip:IsOwned(owner) return self.owner == owner end
+    function tooltip:SetText(text, ...)
+        self.title, self.titleColor, self.lines = text, { ... }, {}
+    end
+    function tooltip:AddLine(text, ...) self.lines[#self.lines + 1] = { text = text, color = { ... } } end
+    function tooltip:Show() self.shown = true end
+    function tooltip:Hide() self.shown, self.owner, self.hideCount = false, nil, self.hideCount + 1 end
+    function tooltip:IsShown() return self.shown end
+    world.tooltip, environment.GameTooltip = tooltip, tooltip
     world.environment, world.mapAPI = environment, environment.C_Map
     world.notificationErrors = loadNotifications(addon, environment)
     world.libraryFrames = #world.frames
@@ -106,33 +144,8 @@ local function LoadMap(enableTrails)
             UseFrameLevelType = function(_, level) assert(level == "PIN_FRAME_LEVEL_GROUP_MEMBER") end,
             OnReleased = function() world.released = world.released + 1 end,
         }
-        local map = { shown = shown, id = 101, pins = {}, pool = {}, unrelatedPin = {}, scale = 1 }
-        local canvas = { width = 1000, height = 600 }
-        function canvas:GetWidth() return self.width end
-        function canvas:GetHeight() return self.height end
-        function canvas:CreateLine(name, layer)
-            assert(name == nil and layer == "ARTWORK", "trail lines use anonymous native canvas artwork")
-            local line = { canvas = self, shown = false }
-            function line:SetStartPoint(anchor, relative, x, y)
-                assert(anchor == "TOPLEFT" and relative == self.canvas)
-                self.startPoint = { x = x, y = y }
-            end
-            function line:SetEndPoint(anchor, relative, x, y)
-                assert(anchor == "TOPLEFT" and relative == self.canvas)
-                self.endPoint = { x = x, y = y }
-            end
-            function line:SetThickness(thickness) self.thickness = thickness end
-            function line:SetColorTexture(...) self.color = { ... } end
-            function line:SetAlpha(alpha) self.alpha = alpha end
-            function line:Show() self.shown = true end
-            function line:Hide() self.shown = false end
-            function line:ClearAllPoints() self.startPoint, self.endPoint = nil, nil end
-            world.lines[#world.lines + 1] = line
-            return line
-        end
-        map.canvas = canvas
-        function map:GetCanvas() return self.canvas end
-        function map:GetCanvasScale() return self.scale end
+        local map = { shown = shown, id = 101, pins = {}, pool = {}, unrelatedPin = {},
+            width = 1000, height = 600, zoom = 1, effectiveScale = 1, originX = 100, originY = 200 }
         function map:IsShown() return self.shown end
         function map:GetMapID() return self.id end
         function map:AddDataProvider(provider)
@@ -144,7 +157,7 @@ local function LoadMap(enableTrails)
             assert(template == "LockInToolsPositionPinTemplate", "remove only LockInTools pins")
             for _, pin in ipairs(self.pins) do
                 pin:OnReleased()
-                assert(pin.playerName == nil and pin.online == nil and pin.Label.text == "",
+                assert(pin.playerName == nil and pin.online == nil and pin.provider == nil and not pin.hovered,
                     "release clears player state before returning the pin to the native pool")
                 assert(pin:GetScript("OnUpdate") == nil, "released pins stop their animation callbacks")
                 self.pool[#self.pool + 1] = pin
@@ -161,10 +174,15 @@ local function LoadMap(enableTrails)
                 pin.scripts = {}
                 function pin:SetScript(script, callback) self.scripts[script] = callback end
                 function pin:GetScript(script) return self.scripts[script] end
-                pin.Label = {
-                    SetText = function(self, text) self.text = text end,
-                    SetTextColor = function(self, ...) self.color = { ... } end,
-                }
+                function pin:IsMouseOver() return world.hoveredName == self.playerName end
+                function pin:GetEffectiveScale() return self.effectiveScale or self:GetMap().effectiveScale end
+                function pin:GetCenter()
+                    if self.centerUnavailable then return end
+                    if self.centerX then return self.centerX, self.centerY end
+                    local owner, scale = self:GetMap(), self:GetEffectiveScale()
+                    return (owner.originX + self.x * owner.width * owner.zoom) / scale,
+                        (owner.originY + self.y * owner.height * owner.zoom) / scale
+                end
                 pin.Icon = {
                     SetColorTexture = function(self, ...) self.color, self.texture = { ... }, nil end,
                     SetTexture = function(self, texture) self.texture, self.color = texture, nil end,
@@ -184,6 +202,10 @@ local function LoadMap(enableTrails)
         function map:show()
             self.shown = true
             self.provider:RefreshAllData(true)
+        end
+        function map:hide()
+            self.shown = false
+            self.provider:OnHide()
         end
         function map:changeMap(mapID)
             self.id = mapID
@@ -222,11 +244,40 @@ local function LoadMap(enableTrails)
             end
         end
     end
+    function world:hover(pin)
+        self.hoveredName = pin.playerName
+        pin:OnMouseEnter()
+    end
+    function world:leave(pin)
+        if self.hoveredName == pin.playerName then self.hoveredName = nil end
+        pin:OnMouseLeave()
+    end
     return addon, world
 end
 
 local function Near(actual, expected)
     assert(math.abs(actual - expected) < 0.000001)
+end
+
+local dotTexture = "Interface\\AddOns\\LockInTools\\Media\\PositionDot"
+local ringTexture = "Interface\\AddOns\\LockInTools\\Media\\PositionRing"
+local fallbackColor, staleColor = { 0.27, 0.65, 1 }, { 0.6, 0.6, 0.6 }
+local function CheckDot(pin, color, online)
+    assert(pin.Label == nil, "player names are never rendered as map labels")
+    assert(pin.Icon.texture == (online and dotTexture or ringTexture),
+        "fresh positions use filled dots and stale positions use hollow dots")
+    assert(pin.Icon.color == nil, "dot textures are tinted rather than replaced with squares")
+    for index, value in ipairs({ 0, 1, 0, 1 }) do Near(pin.Icon.coordinates[index], value) end
+    for index = 1, 3 do Near(pin.Icon.vertexColor[index], color[index]) end
+    Near(pin.Icon.alpha, 1)
+    assert(not pin.Icon.desaturated, "pooled dots do not retain class-icon desaturation")
+end
+
+local function FindPin(testWorld, name)
+    for _, candidate in ipairs(testWorld.map.pins) do
+        if candidate:GetDisplayName() == name then return candidate end
+    end
+    error("missing map pin for " .. name)
 end
 
 local addon, world = LoadMap()
@@ -259,8 +310,8 @@ assert(world.added == 1, "attach the provider only once")
 world.map:show()
 assert(#world.map.pins == 1, "opening the map displays an existing retained position")
 local pin = world.map.pins[1]
-assert(pin.Label.text == "Alice-Realm (Offline)" and pin:GetDisplayName() == "Alice-Realm",
-    "retained coordinates show offline until fresh data arrives without changing the native display name")
+assert(pin.Label == nil and pin:GetDisplayName() == "Alice-Realm" and pin.online == nil,
+    "retained coordinates have no map label while preserving the native display name")
 Near(pin.x, 0.25)
 Near(pin.y, 0.5)
 
@@ -381,88 +432,73 @@ presenceWorld:loadNativeMap(true)
 presence.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
 presence:InitializePositionMap()
 local presencePin = presenceWorld.map.pins[1]
-assert(presencePin.Label.text == "Alice-Realm (Offline)" and presencePin.online == nil)
-Near(presencePin.Icon.color[1], 0.5)
-Near(presencePin.Icon.color[4], 0.6)
-Near(presencePin.Label.color[1], 0.6)
+assert(presencePin.online == nil)
+CheckDot(presencePin, staleColor, false)
+assert(not presenceWorld.tooltip:IsShown(), "a map position does not display its name before hover")
+presenceWorld:hover(presencePin)
+assert(presenceWorld.tooltip.title == "Alice-Realm" and presenceWorld.tooltip:IsOwned(presencePin)
+    and presenceWorld.tooltip:IsShown(), "hover shows the complete retained player name")
+assert(#presenceWorld.tooltip.lines == 1 and presenceWorld.tooltip.lines[1].text == "Last known position",
+    "retained positions explain freshness without asserting that the player logged out")
+presenceWorld:leave(presencePin)
+assert(not presenceWorld.tooltip:IsShown() and presencePin:GetScript("OnUpdate") == nil,
+    "leaving a stationary position dismisses its tooltip and stops hover updates")
 
 presence.positions.alice.online = false
 presence:RefreshPositionPins()
 assert(presenceWorld.map.pins[1] == presencePin and presenceWorld.created == 1,
     "presence changes refresh an existing native pooled pin")
-assert(presencePin.Label.text == "Alice-Realm (Offline)" and presencePin.online == false,
-    "timed-out peers show offline")
+assert(presencePin.online == false, "timed-out peers retain their stale status")
 assert(presencePin:GetDisplayName() == "Alice-Realm", "native player actions keep the real player name")
-Near(presencePin.Icon.color[1], 0.5)
-Near(presencePin.Icon.color[4], 0.6)
+CheckDot(presencePin, staleColor, false)
 
 presence.positions.alice.online = true
 presence:RefreshPositionPins()
-assert(presencePin.Label.text == "Alice-Realm" and presencePin.online == true,
-    "a new update restores the online label on a pooled pin")
-Near(presencePin.Icon.color[1], 0.1)
-Near(presencePin.Icon.color[2], 0.8)
-Near(presencePin.Icon.color[3], 1)
-Near(presencePin.Icon.color[4], 1)
-Near(presencePin.Label.color[1], 1)
+assert(presencePin.online == true, "a new update restores the active state on a pooled pin")
+CheckDot(presencePin, fallbackColor, true)
+presenceWorld:hover(presencePin)
+assert(presenceWorld.tooltip.title == "Alice-Realm" and #presenceWorld.tooltip.lines == 0,
+    "a fresh position has no stale-position warning")
+presenceWorld:leave(presencePin)
 
 presence.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5 } }
 presence:RefreshPositionPins()
 assert(presenceWorld.map.pins[1] == presencePin and presencePin.online == nil)
-assert(presencePin.Label.text == "Bob-Realm (Offline)" and presencePin:GetDisplayName() == "Bob-Realm",
-    "a pooled pin replaces the previous name and online status with an offline retained position")
-Near(presencePin.Icon.color[1], 0.5)
-Near(presencePin.Icon.color[4], 0.6)
-Near(presencePin.Label.color[1], 0.6)
+assert(presencePin:GetDisplayName() == "Bob-Realm",
+    "a pooled pin replaces the previous name and presence with the retained player's state")
+CheckDot(presencePin, staleColor, false)
 presence.positions = {}
 presence:RefreshPositionPins()
 assert(#presenceWorld.map.pins == 0 and presenceWorld.released == 4)
-assert(presencePin.playerName == nil and presencePin.online == nil and presencePin.Label.text == "")
+assert(presencePin.playerName == nil and presencePin.online == nil and presencePin.provider == nil)
 
 local classes, classWorld = LoadMap()
 classWorld:loadNativeMap(true)
 classes.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true, class = "WARRIOR" }
 classes:InitializePositionMap()
 local classPin = classWorld.map.pins[1]
-local classTexture = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES"
-local function CheckClassIcon(class, online)
+local function CheckClassDot(class, online)
     assert(classWorld.map.pins[1] == classPin and classWorld.created == 1,
         "class and presence updates reuse a native pooled pin")
-    assert(classPin.Icon.texture == classTexture and classPin.Icon.color == nil,
-        "a known class uses the native class icon texture")
-    for index = 1, 4 do
-        Near(classPin.Icon.coordinates[index], classWorld.environment.CLASS_ICON_TCOORDS[class][index])
-    end
-    assert(classPin.Icon.desaturated == not online)
-    Near(classPin.Icon.alpha, online and 1 or 0.6)
-    for index = 1, 3 do Near(classPin.Icon.vertexColor[index], online and 1 or 0.6) end
+    local color = classWorld.environment.RAID_CLASS_COLORS[class]
+    CheckDot(classPin, online and { color.r, color.g, color.b } or staleColor, online)
 end
 local function CheckFallback(online)
-    assert(classPin.Icon.texture == nil and classPin.Icon.color,
-        "unknown classes retain the position square")
-    local color = online and { 0.1, 0.8, 1, 1 } or { 0.5, 0.5, 0.5, 0.6 }
-    for index = 1, 4 do Near(classPin.Icon.color[index], color[index]) end
-    for index, value in ipairs({ 0, 1, 0, 1 }) do Near(classPin.Icon.coordinates[index], value) end
-    assert(classPin.Icon.desaturated == false, "fallback squares do not retain class desaturation")
-    Near(classPin.Icon.alpha, 1)
-    for index = 1, 3 do Near(classPin.Icon.vertexColor[index], 1) end
+    CheckDot(classPin, online and fallbackColor or staleColor, online)
 end
-CheckClassIcon("WARRIOR", true)
-assert(classPin.Label.text == "Alice-Realm")
+CheckClassDot("WARRIOR", true)
 
 classes.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5, online = false, class = "MAGE" } }
 classes:RefreshPositionPins()
-CheckClassIcon("MAGE", false)
-assert(classPin.Label.text == "Bob-Realm (Offline)" and classPin:GetDisplayName() == "Bob-Realm",
-    "a pooled pin replaces its class and name while retaining offline labels")
+CheckClassDot("MAGE", false)
+assert(classPin:GetDisplayName() == "Bob-Realm", "a pooled pin replaces its class and name")
 classes.positions.bob.online = true
 classes:RefreshPositionPins()
-CheckClassIcon("MAGE", true)
-assert(classPin.Label.text == "Bob-Realm", "online class icons restore the normal label")
+CheckClassDot("MAGE", true)
 
 classes.positions.bob.online = false
 classes:RefreshPositionPins()
-CheckClassIcon("MAGE", false)
+CheckClassDot("MAGE", false)
 classes.positions.bob.class = nil
 classes:RefreshPositionPins()
 CheckFallback(false)
@@ -481,14 +517,222 @@ end
 classWorld.secretValues.MAGE = nil
 classes.positions.bob.class = "MAGE"
 classes:RefreshPositionPins()
-CheckClassIcon("MAGE", true)
-local nativeCoordinates = classWorld.environment.CLASS_ICON_TCOORDS
-classWorld.environment.CLASS_ICON_TCOORDS = nil
+CheckClassDot("MAGE", true)
+local nativeColors = classWorld.environment.RAID_CLASS_COLORS
+classWorld.environment.RAID_CLASS_COLORS = nil
 classes:RefreshPositionPins()
 CheckFallback(true)
-classWorld.environment.CLASS_ICON_TCOORDS = nativeCoordinates
+classWorld.environment.RAID_CLASS_COLORS = nativeColors
+local mageColor = nativeColors.MAGE
+for _, invalidColor in ipairs({ {}, false, { r = -0.1, g = 0.5, b = 0.5 },
+    { r = 0.5, g = 1.1, b = 0.5 }, { r = 0.5, g = 0.5, b = 0 / 0 },
+    { r = math.huge, g = 0.5, b = 0.5 }, { r = "0.5", g = 0.5, b = 0.5 },
+    { r = 0.5, g = 0.5, b = secretClass } }) do
+    nativeColors.MAGE = invalidColor
+    classes:RefreshPositionPins()
+    CheckFallback(true)
+end
+nativeColors.MAGE = mageColor
 classes:RefreshPositionPins()
-CheckClassIcon("MAGE", true)
+CheckClassDot("MAGE", true)
+
+local function CheckSharedTooltips()
+    local shared, sharedWorld = LoadMap()
+    sharedWorld:loadNativeMap(true)
+    shared.positions.zed = { name = "Zed-Realm", map = 101, x = 0.2, y = 0.4, online = true, class = "WARRIOR" }
+    shared.positions.bob = { name = "Bob-Realm", map = 101, x = 0.2, y = 0.4, online = false, class = "MAGE" }
+    shared.positions.alice = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true, class = "MAGE" }
+    shared:InitializePositionMap()
+    local alice = FindPin(sharedWorld, "Alice-Realm")
+    local bob = FindPin(sharedWorld, "Bob-Realm")
+    local zed = FindPin(sharedWorld, "Zed-Realm")
+    local tooltip = sharedWorld.tooltip
+    assert(#shared.positionMapProvider.pins == 3 and alice.provider == shared.positionMapProvider,
+        "the provider tracks only its acquired pins for shared tooltips")
+    sharedWorld:hover(zed)
+    assert(tooltip.title == "Shared positions (3)" and #tooltip.lines == 3 and tooltip:IsOwned(zed),
+        "hovering any coincident dot shows all players in one owned tooltip")
+    assert(tooltip.lines[1].text == "Alice-Realm" and tooltip.lines[2].text == "Bob-Realm (Last known position)"
+        and tooltip.lines[3].text == "Zed-Realm", "shared names sort alphabetically and label stale positions")
+    local mage, warrior = sharedWorld.environment.RAID_CLASS_COLORS.MAGE, sharedWorld.environment.RAID_CLASS_COLORS.WARRIOR
+    for index, value in ipairs({ mage.r, mage.g, mage.b }) do Near(tooltip.lines[1].color[index], value) end
+    for index = 1, 3 do Near(tooltip.lines[2].color[index], staleColor[index]) end
+    for index, value in ipairs({ warrior.r, warrior.g, warrior.b }) do Near(tooltip.lines[3].color[index], value) end
+    alice:OnMouseLeave()
+    assert(tooltip:IsShown() and tooltip:IsOwned(zed), "another pin's leave callback cannot hide the owned tooltip")
+    sharedWorld:leave(zed)
+
+    alice.centerX, alice.centerY = 300, 440
+    bob.centerX, bob.centerY = 309, 449
+    zed.centerX, zed.centerY = 312, 440
+    sharedWorld:hover(alice)
+    assert(tooltip.title == "Shared positions (2)" and tooltip.lines[1].text == "Alice-Realm"
+        and tooltip.lines[2].text == "Zed-Realm",
+        "overlap includes touching 12-pixel dots but excludes diagonal hover-rectangle overlap")
+    zed.centerX = 312.01
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Alice-Realm" and #tooltip.lines == 0,
+        "dots immediately beyond the visible circular boundary have separate tooltips")
+    zed.centerX = 311.99
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Shared positions (2)", "nearby dot movement refreshes a stationary hovered tooltip")
+
+    alice.effectiveScale, alice.centerX, alice.centerY = 2, 150, 220
+    bob.centerX, bob.centerY = 400, 440
+    zed.effectiveScale, zed.centerX, zed.centerY = 0.5, 630, 880
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Shared positions (2)",
+        "overlap uses screen-space centers and the sum of differently scaled dot radii")
+    zed.centerX = 630.1
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Alice-Realm", "scaled circles just beyond their summed radii remain separate")
+
+    alice.effectiveScale, zed.effectiveScale = nil, nil
+    for _, candidate in ipairs({ alice, bob, zed }) do candidate.centerX, candidate.centerY = nil, nil end
+    alice.x, bob.x, zed.x = 0.2, 0.211, 0.24
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Shared positions (2)", "rendered map geometry identifies close normalized coordinates")
+    sharedWorld.map.zoom = 2
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Alice-Realm", "zooming separates dots without receiving new position data")
+    sharedWorld.map.zoom = 0.25
+    sharedWorld:advance(0.11)
+    assert(tooltip.title == "Shared positions (3)", "zooming out merges all visibly overlapping dots")
+    sharedWorld:leave(alice)
+    assert(alice:GetScript("OnUpdate") == nil and not tooltip:IsShown(), "stationary dots do no idle work after hover")
+
+    sharedWorld:hover(alice)
+    local foreignOwner, beforeHide = {}, tooltip.hideCount
+    tooltip:SetOwner(foreignOwner, "ANCHOR_RIGHT")
+    tooltip:SetText("Unrelated tooltip")
+    tooltip:Show()
+    sharedWorld:advance(0.11)
+    assert(tooltip:IsOwned(foreignOwner) and tooltip.title == "Unrelated tooltip" and tooltip.hideCount == beforeHide,
+        "hover refresh cannot take back or hide another control's tooltip")
+    assert(alice:GetScript("OnUpdate") == nil and not alice.hovered,
+        "losing tooltip ownership stops stationary hover updates")
+    sharedWorld:leave(alice)
+    shared.positionMapProvider:RemoveAllData()
+    assert(tooltip:IsShown() and tooltip:IsOwned(foreignOwner) and tooltip.hideCount == beforeHide,
+        "leaving and releasing pins preserve an unrelated tooltip")
+end
+CheckSharedTooltips()
+
+local function CheckTooltipLifecycle()
+    local lifecycle, lifecycleWorld = LoadMap()
+    lifecycleWorld:loadNativeMap(true)
+    local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true, class = "MAGE" }
+    lifecycle.positions.alice = peer
+    lifecycle:InitializePositionMap()
+    local tooltip = lifecycleWorld.tooltip
+    local hovered = FindPin(lifecycleWorld, peer.name)
+    lifecycleWorld:hover(hovered)
+    peer.online = false
+    lifecycle:RefreshPositionPins()
+    assert(not tooltip:IsShown(), "rebuilding releases the previous owned tooltip before native layout")
+    lifecycleWorld:advance(0.01)
+    hovered = FindPin(lifecycleWorld, peer.name)
+    assert(tooltip:IsShown() and tooltip:IsOwned(hovered) and tooltip.title == peer.name
+        and tooltip.lines[1].text == "Last known position", "hover survives a stationary freshness refresh after layout")
+    peer.online = true
+    lifecycle:RefreshPositionPins()
+    lifecycleWorld:advance(0.01)
+    hovered = FindPin(lifecycleWorld, peer.name)
+    assert(tooltip:IsOwned(hovered) and #tooltip.lines == 0, "a fresh sample clears the restored stale tooltip warning")
+    CheckDot(hovered, { 0.25, 0.78, 0.92 }, true)
+
+    lifecycle:RefreshPositionPins()
+    local foreignOwner = {}
+    tooltip:SetOwner(foreignOwner, "ANCHOR_RIGHT")
+    tooltip:SetText("Unrelated tooltip")
+    tooltip:Show()
+    local beforeHide = tooltip.hideCount
+    lifecycleWorld:advance(0.01)
+    assert(tooltip:IsOwned(foreignOwner) and tooltip.title == "Unrelated tooltip" and tooltip.hideCount == beforeHide,
+        "a deferred hover restoration preserves tooltips opened during native layout")
+    hovered = FindPin(lifecycleWorld, peer.name)
+    assert(hovered:GetScript("OnUpdate") == nil, "a cancelled deferred restoration leaves no idle update")
+    tooltip:Hide()
+
+    lifecycleWorld:hover(hovered)
+    lifecycleWorld.map:hide()
+    assert(not tooltip:IsShown() and hovered:GetScript("OnUpdate") == nil and not hovered.hovered,
+        "hiding the map dismisses its owned tooltip and stops stationary hover updates")
+    lifecycleWorld.map:show()
+    hovered = FindPin(lifecycleWorld, peer.name)
+    assert(not tooltip:IsShown(), "opening the map waits for native hover before showing a player name")
+    lifecycleWorld:hover(hovered)
+    lifecycle.db.position.showPlayerIcons = false
+    lifecycle:Notify("POSITION_VISIBILITY_CHANGED")
+    assert(not tooltip:IsShown() and #lifecycleWorld.map.pins == 0 and #lifecycle.positionMapProvider.pins == 0,
+        "filtering removes the owned tooltip and all overlap candidates")
+    lifecycle.db.position.showPlayerIcons = true
+    lifecycle:Notify("POSITION_VISIBILITY_CHANGED")
+    hovered = FindPin(lifecycleWorld, peer.name)
+    lifecycleWorld:hover(hovered)
+    lifecycle.positions = {}
+    lifecycle:Notify("GROUP_CHANGED")
+    assert(not tooltip:IsShown() and #lifecycleWorld.map.pins == 0 and not hovered.hovered
+        and hovered.provider == nil and hovered:GetScript("OnUpdate") == nil,
+        "group cleanup releases tooltip ownership and pooled player state")
+
+    lifecycle.positions.bob = { name = "Bob-Realm", map = 101, x = 0.2, y = 0.4, online = true }
+    lifecycle:RefreshPositionPins()
+    local bob = FindPin(lifecycleWorld, "Bob-Realm")
+    assert(not tooltip:IsShown() and not bob.hovered and bob:GetScript("OnUpdate") == nil,
+        "a pooled frame does not inherit the previous player's tooltip or hover loop")
+    tooltip:SetOwner(foreignOwner, "ANCHOR_RIGHT")
+    tooltip:SetText("Unrelated tooltip")
+    tooltip:Show()
+    beforeHide = tooltip.hideCount
+    lifecycleWorld.map:hide()
+    lifecycle.db.position.showPlayerIcons = false
+    lifecycle:Notify("POSITION_VISIBILITY_CHANGED")
+    lifecycle.positions = {}
+    lifecycle:Notify("GROUP_CHANGED")
+    assert(tooltip:IsShown() and tooltip:IsOwned(foreignOwner) and tooltip.hideCount == beforeHide,
+        "map hiding, filtering and group changes leave unrelated tooltips intact")
+end
+CheckTooltipLifecycle()
+
+local function CheckAnimatedTooltips()
+    local animated, animatedWorld = LoadMap()
+    animatedWorld:loadNativeMap(true)
+    animated.positions.alice = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
+    local movingPeer = { name = "Bob-Realm", map = 101, x = 0.24, y = 0.4, online = true }
+    animated.positions.bob = movingPeer
+    animated:InitializePositionMap()
+    local hovered = FindPin(animatedWorld, "Alice-Realm")
+    animatedWorld:hover(hovered)
+    assert(animatedWorld.tooltip.title == "Alice-Realm", "separated dots begin with individual tooltips")
+    movingPeer.x = 0.2
+    animated:RefreshPositionPins()
+    animatedWorld:advance(0.01)
+    hovered = FindPin(animatedWorld, "Alice-Realm")
+    assert(animatedWorld.tooltip:IsOwned(hovered) and animatedWorld.tooltip.title == "Alice-Realm",
+        "overlap uses the displayed start of interpolation instead of the newly received target")
+    animatedWorld:advance(0.9)
+    assert(animatedWorld.tooltip.title == "Alice-Realm", "dots remain separate before their animation reaches the radius")
+    animatedWorld:advance(0.6)
+    animatedWorld:advance(0.11)
+    assert(animatedWorld.tooltip.title == "Shared positions (2)",
+        "a moving neighbor enters the shared tooltip while the hovered dot stays stationary")
+    animatedWorld:advance(0.5)
+    assert(hovered:GetScript("OnUpdate"), "stationary hover keeps overlap detection alive after nearby motion ends")
+    movingPeer.x = 0.24
+    animated:RefreshPositionPins()
+    animatedWorld:advance(0.01)
+    assert(animatedWorld.tooltip.title == "Shared positions (2)",
+        "moving away preserves shared names until the displayed dots actually separate")
+    animatedWorld:advance(1.5)
+    animatedWorld:advance(0.11)
+    assert(animatedWorld.tooltip.title == "Alice-Realm" and #animatedWorld.tooltip.lines == 0,
+        "the tooltip removes a player whose interpolated dot moves outside the overlap")
+    hovered = FindPin(animatedWorld, "Alice-Realm")
+    animatedWorld:leave(hovered)
+    assert(hovered:GetScript("OnUpdate") == nil, "leaving a stationary dot stops updates after animated overlap")
+end
+CheckAnimatedTooltips()
 
 local projection, projectionWorld = LoadMap()
 -- Synthetic geometry for Thunder Bluff, Mulgore, Kalimdor and a different continent.
@@ -507,8 +751,8 @@ assert(projectionWorld.worldConversions == 0, "own-map positions need no convers
 
 projectionWorld.map:changeMap(1412)
 assert(#projectionWorld.map.pins == 1, "city coordinates appear on the overlapping region without a direct rectangle")
-assert(projectionWorld.map.pins[1].Icon.texture == classTexture,
-    "class icons remain available when projecting city positions onto the region")
+assert(projectionWorld.map.pins[1].Icon.texture == dotTexture,
+    "class-colored dots remain available when projecting city positions onto the region")
 Near(projectionWorld.map.pins[1].x, 0.3)
 Near(projectionWorld.map.pins[1].y, 0.575)
 assert(projectionWorld.worldConversions == 1 and projectionWorld.mapConversions == 1)
@@ -614,13 +858,6 @@ assert(#projectionWorld.map.pins == 1, "world continent ID zero is valid")
 Near(projectionWorld.map.pins[1].x, 0.3)
 Near(projectionWorld.map.pins[1].y, 0.575)
 
-local function FindPin(testWorld, name)
-    for _, candidate in ipairs(testWorld.map.pins) do
-        if candidate:GetDisplayName() == name then return candidate end
-    end
-    error("missing map pin for " .. name)
-end
-
 local smooth, smoothWorld = LoadMap()
 smoothWorld:loadNativeMap(true)
 local moving = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
@@ -653,7 +890,8 @@ smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
 Near(movingPin.x, 0.22)
 Near(movingPin.y, 0.43)
-assert(movingPin.Icon.texture == classTexture, "class changes update visuals during motion")
+assert(movingPin.Icon.texture == dotTexture, "class changes retain dots during motion")
+Near(movingPin.Icon.vertexColor[1], smoothWorld.environment.RAID_CLASS_COLORS.MAGE.r)
 smoothWorld:advance(0.5)
 Near(movingPin.x, 0.23)
 Near(movingPin.y, 0.445)
@@ -837,285 +1075,30 @@ Near(projectedMoving.y, 0.56)
 assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
     "projected movement ends at native map coordinates without changing the shared source data")
 
-local function VisibleTrailLines(testWorld)
-    local result = {}
-    for _, line in ipairs(testWorld.lines) do
-        if line.shown then
-            assert(line.startPoint and line.endPoint and line.thickness and line.thickness > 0,
-                "visible trail lines have native anchors and a positive thickness")
-            result[#result + 1] = line
-        end
-    end
-    return result
+-- Older profiles can retain removed display settings without affecting player icons.
+local legacy, legacyWorld = LoadMap()
+legacy.db.position.showTrails, legacy.db.position.trailLength = true, 27
+legacyWorld:loadNativeMap(true)
+local lineCreations = 0
+local canvas = { GetWidth = function() return 1000 end, GetHeight = function() return 600 end }
+function canvas:CreateLine()
+    lineCreations = lineCreations + 1
+    error("player movement must not allocate map lines")
 end
+function legacyWorld.map:GetCanvas() return canvas end
+local legacyPeer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
+legacy.positions.alice = legacyPeer
+legacy:InitializePositionMap()
+legacyPeer.x = 0.24
+legacy:RefreshPositionPins()
+local legacyPin = FindPin(legacyWorld, legacyPeer.name)
+legacyWorld:advance(1)
+Near(legacyPin.x, 0.22)
+legacyWorld:advance(1)
+Near(legacyPin.x, 0.24)
+assert(lineCreations == 0 and legacyPin:GetScript("OnUpdate") == nil,
+    "legacy display settings leave smooth icons without lines or idle animation")
+assert(legacy.db.position.showTrails == true and legacy.db.position.trailLength == 27,
+    "rendering preserves obsolete saved preferences")
 
-local function TrailAlpha(line)
-    return (line.alpha or 1) * (line.color and line.color[4] or 1)
-end
-
-local function HighestTrailAlpha(testWorld)
-    local result = 0
-    for _, line in ipairs(VisibleTrailLines(testWorld)) do result = math.max(result, TrailAlpha(line)) end
-    return result
-end
-
-local function HasTrailEndpoint(testWorld, x, y)
-    local canvas = testWorld.map.canvas
-    for _, line in ipairs(VisibleTrailLines(testWorld)) do
-        for _, point in ipairs({ line.startPoint, line.endPoint }) do
-            if math.abs(point.x - x * canvas.width) < 0.000001
-                and math.abs(point.y + y * canvas.height) < 0.000001 then return true end
-        end
-    end
-    return false
-end
-
-local function AdvanceFrames(testWorld, seconds)
-    for _ = 1, seconds * 4 do testWorld:advance(0.25) end
-end
-
-local function MovingTrail(legacyLength)
-    local testAddon, testWorld = LoadMap(true)
-    testAddon.db.position.trailLength = legacyLength
-    testWorld:loadNativeMap(true)
-    local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
-    testAddon.positions.alice = peer
-    testAddon:InitializePositionMap()
-    assert(#VisibleTrailLines(testWorld) == 0, "a first position has no fabricated travel history")
-    peer.x, peer.y = 0.24, 0.46
-    testAddon:RefreshPositionPins()
-    AdvanceFrames(testWorld, 1)
-    local testPin = FindPin(testWorld, peer.name)
-    Near(testPin.x, 0.22)
-    Near(testPin.y, 0.43)
-    assert(#VisibleTrailLines(testWorld) > 0, "online movement leaves a native canvas trail")
-    return testAddon, testWorld, peer, testPin
-end
-
-local trails, trailWorld, trailPeer, trailPin = MovingTrail()
-assert(HasTrailEndpoint(trailWorld, 0.2, 0.4), "the trail starts at the previously displayed location")
-assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y), "the trail head meets the smoothed pin")
-assert(not HasTrailEndpoint(trailWorld, trailPeer.x, trailPeer.y), "a trail never leads to an undisplayed raw target")
-trailWorld:advance(0.01)
-assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y),
-    "the trail head stays attached even between throttled history redraws")
-trailWorld:advance(0.24)
-Near(trailPin.x, 0.225)
-Near(trailPin.y, 0.4375)
-assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y),
-    "the displayed trail head follows every frame between half-second history samples")
-assert(#trailWorld.frames == trailWorld.libraryFrames,
-    "trails use pin callbacks without allocating a provider animation frame")
-
-local trailMotion = trails.positionMapProvider.positions.alice
-local historyBeforeRefresh = trailMotion.trail
-trailPeer.class = "MAGE"
-trails.positions.bob = { name = "Bob-Realm", map = 101, x = 0.8, y = 0.8, online = true }
-trails:RefreshPositionPins()
-trailPin = FindPin(trailWorld, trailPeer.name)
-Near(trailPin.x, 0.225)
-assert(trails.positionMapProvider.positions.alice.trail == historyBeforeRefresh
-    and HasTrailEndpoint(trailWorld, 0.2, 0.4),
-    "class updates and unrelated peers preserve the displayed path across pooled-pin refreshes")
-AdvanceFrames(trailWorld, 0.75)
-Near(trailPin.x, 0.24)
-Near(trailPin.y, 0.46)
-assert(trailPin:GetScript("OnUpdate"), "stationary pins continue aging their remaining trail")
-local alphaAtStop = HighestTrailAlpha(trailWorld)
-trailWorld:advance(0.5)
-assert(HighestTrailAlpha(trailWorld) < alphaAtStop, "trail opacity decays after movement stops")
-AdvanceFrames(trailWorld, 10)
-assert(#VisibleTrailLines(trailWorld) == 0 and trailPin:GetScript("OnUpdate") == nil,
-    "expired stationary trails hide their native lines and release their update callback")
-Near(trailPin.x, 0.24)
-Near(trailPin.y, 0.46)
-
-for _, legacyLength in ipairs({ 1, 30, "invalid", {} }) do
-    local fixed, fixedWorld, fixedPeer, fixedPin = MovingTrail(legacyLength)
-    Near(TrailAlpha(VisibleTrailLines(fixedWorld)[1]), 0.65 * 0.9)
-    AdvanceFrames(fixedWorld, 8.75)
-    assert(HasTrailEndpoint(fixedWorld, 0.2, 0.4), "history remains visible until ten seconds old")
-    AdvanceFrames(fixedWorld, 0.25)
-    assert(not HasTrailEndpoint(fixedWorld, 0.2, 0.4) and #VisibleTrailLines(fixedWorld) > 0,
-        "points expire at ten seconds, regardless of obsolete saved lengths")
-    AdvanceFrames(fixedWorld, 1.5)
-    assert(#VisibleTrailLines(fixedWorld) == 0 and fixedPin:GetScript("OnUpdate") == nil,
-        "fixed-duration history expires completely after movement stops")
-    assert(fixed.db.position.trailLength == legacyLength, "rendering never changes obsolete saved lengths")
-    Near(fixedPin.x, fixedPeer.x)
-    Near(fixedPin.y, fixedPeer.y)
-end
-
-local visibility, visibilityWorld, visibilityPeer, visibilityPin = MovingTrail()
-AdvanceFrames(visibilityWorld, 3)
-assert(#VisibleTrailLines(visibilityWorld) > 0, "the ten-second history remains after a short stop")
-visibilityPeer.x = 0.28
-visibility:RefreshPositionPins()
-AdvanceFrames(visibilityWorld, 0.5)
-assert(#VisibleTrailLines(visibilityWorld) > 0)
-assert(visibility:SetShowPositionTrails(false))
-visibilityPin = FindPin(visibilityWorld, visibilityPeer.name)
-local afterDisable = visibilityPin.x
-assert(#VisibleTrailLines(visibilityWorld) == 0 and visibilityPin:GetScript("OnUpdate"),
-    "disabling trails immediately hides lines while preserving active interpolation")
-AdvanceFrames(visibilityWorld, 0.5)
-assert(visibilityPin.x > afterDisable and #VisibleTrailLines(visibilityWorld) == 0,
-    "disabled trails never affect the original two-second pin movement")
-local displayAtEnable = visibilityPin.x
-assert(visibility:SetShowPositionTrails(true))
-assert(#VisibleTrailLines(visibilityWorld) == 0, "enabling a trail starts without resurrecting disabled history")
-AdvanceFrames(visibilityWorld, 0.5)
-assert(#VisibleTrailLines(visibilityWorld) > 0 and HasTrailEndpoint(visibilityWorld, displayAtEnable, visibilityPin.y),
-    "newly enabled trails start at the displayed position and record subsequent movement")
-AdvanceFrames(visibilityWorld, 9.25)
-assert(HasTrailEndpoint(visibilityWorld, displayAtEnable, visibilityPin.y))
-AdvanceFrames(visibilityWorld, 0.25)
-assert(not HasTrailEndpoint(visibilityWorld, displayAtEnable, visibilityPin.y),
-    "toggling trails preserves their fixed ten-second point lifetime")
-AdvanceFrames(visibilityWorld, 0.5)
-assert(#VisibleTrailLines(visibilityWorld) == 0 and visibilityPin:GetScript("OnUpdate") == nil)
-
-local sized, sizeWorld, sizePeer, sizePin = MovingTrail()
-sizeWorld.map.canvas.width, sizeWorld.map.canvas.height, sizeWorld.map.scale = 1600, 900, 2
-sizeWorld:advance(0.25)
-assert(HasTrailEndpoint(sizeWorld, sizePin.x, sizePin.y), "the next frame reanchors history after a canvas resize")
-for _, line in ipairs(VisibleTrailLines(sizeWorld)) do
-    Near(line.thickness * sizeWorld.map.scale, 2)
-end
-sizeWorld.map.GetCanvasScale = nil
-sizeWorld:advance(0.25)
-for _, line in ipairs(VisibleTrailLines(sizeWorld)) do Near(line.thickness, 2) end
-assert(#sizeWorld.lines < 10, "ordinary frames reuse native line objects")
-
-local resetScenarios = {
-    { "offline", function(testAddon, _, peer) peer.online = false; testAddon:RefreshPositionPins() end },
-    { "teleport", function(testAddon, _, peer) peer.x = 0.6; testAddon:RefreshPositionPins() end },
-    { "source-map change", function(testAddon, testWorld, peer)
-        testWorld.rectangles["102:101"] = { 0, 1, 0, 1 }
-        peer.map = 102
-        testAddon:RefreshPositionPins()
-    end },
-    { "displayed-map change", function(_, testWorld)
-        testWorld.rectangles["101:100"] = { 0, 1, 0, 1 }
-        testWorld.map:changeMap(100)
-    end },
-    { "icon filtering", function(testAddon) assert(testAddon:SetShowPlayerIcons(false)) end },
-    { "map hiding", function(testAddon, testWorld)
-        testWorld.map.shown = false
-        testAddon:RefreshPositionPins()
-    end },
-    { "map reopening", function(_, testWorld)
-        testWorld.map.shown = false
-        testWorld.map:show()
-    end },
-    { "provider reset", function(testAddon) testAddon.positionMapProvider:RemoveAllData() end },
-    { "group cleanup", function(testAddon) testAddon.positions = {}; testAddon:RefreshPositionPins() end },
-}
-for _, scenario in ipairs(resetScenarios) do
-    local testAddon, testWorld, peer = MovingTrail()
-    local oldLines = VisibleTrailLines(testWorld)
-    scenario[2](testAddon, testWorld, peer)
-    assert(#VisibleTrailLines(testWorld) == 0, scenario[1] .. " clears trail rendering immediately")
-    for _, line in ipairs(oldLines) do assert(not line.shown, scenario[1] .. " releases each native line") end
-    if scenario[1] == "offline" then
-        peer.online, peer.x = true, 0.28
-        testAddon:RefreshPositionPins()
-        assert(#VisibleTrailLines(testWorld) == 0, "reconnecting starts a fresh trail without an offline bridge")
-    end
-end
-
-local replaced, replaceWorld, replacePeer = MovingTrail()
-local oldPeerLines = VisibleTrailLines(replaceWorld)
-replaced.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.7, y = 0.8, online = true } }
-replaced:RefreshPositionPins()
-assert(#VisibleTrailLines(replaceWorld) == 0 and replaceWorld.created == 1,
-    "a reused pin never displays the removed peer's path for its next owner")
-for _, line in ipairs(oldPeerLines) do assert(not line.shown) end
-replaced.positions.bob.x = 0.74
-replaced:RefreshPositionPins()
-AdvanceFrames(replaceWorld, 1)
-assert(#VisibleTrailLines(replaceWorld) > 0 and not HasTrailEndpoint(replaceWorld, 0.2, 0.4),
-    "the reused native line pool contains only the new peer's path")
-
-local peers, peersWorld, firstPeer = MovingTrail()
-local secondPeer = { name = "Bob-Realm", map = 101, x = 0.7, y = 0.8, online = true }
-peers.positions.bob = secondPeer
-peers:RefreshPositionPins()
-secondPeer.x, secondPeer.y = 0.74, 0.84
-peers:RefreshPositionPins()
-AdvanceFrames(peersWorld, 1)
-assert(HasTrailEndpoint(peersWorld, 0.2, 0.4) and HasTrailEndpoint(peersWorld, 0.7, 0.8),
-    "simultaneously moving peers retain separate paths")
-peers.positions.alice = nil
-peers:RefreshPositionPins()
-assert(not HasTrailEndpoint(peersWorld, 0.2, 0.4) and HasTrailEndpoint(peersWorld, 0.7, 0.8),
-    "removing one peer clears its lines while preserving another peer's history")
-for _, line in ipairs(VisibleTrailLines(peersWorld)) do
-    assert(line.startPoint.x >= 0.7 * peersWorld.map.canvas.width
-        and line.endPoint.x >= 0.7 * peersWorld.map.canvas.width,
-        "no orphaned line survives pooled-pin reassignment between peers")
-end
-
-local toggled, toggleWorld, togglePeer = MovingTrail()
-local pooledLineCount = #toggleWorld.lines
-for toggle = 1, 12 do
-    assert(toggled:SetShowPositionTrails(false))
-    assert(#VisibleTrailLines(toggleWorld) == 0)
-    assert(toggled:SetShowPositionTrails(true))
-    togglePeer.x = toggle % 2 == 0 and 0.24 or 0.26
-    toggled:RefreshPositionPins()
-    AdvanceFrames(toggleWorld, 1)
-    assert(#VisibleTrailLines(toggleWorld) > 0 and #toggleWorld.lines <= pooledLineCount,
-        "repeated trail toggles reuse native line objects without growing the pool")
-end
-
-local projectedTrails, projectedTrailWorld = LoadMap(true)
-projectedTrailWorld:loadNativeMap(true)
-projectedTrailWorld.map.id = 100
-projectedTrailWorld.rectangles["101:100"] = { 0.1, 0.5, 0.2, 0.6 }
-local projectedTrailPeer = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true }
-projectedTrails.positions.alice = projectedTrailPeer
-projectedTrails:InitializePositionMap()
-projectedTrailPeer.x, projectedTrailPeer.y = 0.29, 0.56
-projectedTrails:RefreshPositionPins()
-AdvanceFrames(projectedTrailWorld, 1)
-local projectedTrailPin = FindPin(projectedTrailWorld, projectedTrailPeer.name)
-Near(projectedTrailPin.x, 0.208)
-Near(projectedTrailPin.y, 0.412)
-assert(HasTrailEndpoint(projectedTrailWorld, 0.2, 0.4)
-    and HasTrailEndpoint(projectedTrailWorld, projectedTrailPin.x, projectedTrailPin.y)
-    and not HasTrailEndpoint(projectedTrailWorld, 0.25, 0.5),
-    "projected trails use the same displayed-map coordinates as their pins")
-Near(projectedTrailPeer.x, 0.29)
-Near(projectedTrailPeer.y, 0.56)
-
-local bounded, boundedWorld, boundedPeer = MovingTrail()
-for sample = 1, 120 do
-    boundedPeer.x = 0.24 + (sample % 20) * 0.002
-    bounded:RefreshPositionPins()
-    AdvanceFrames(boundedWorld, 2)
-    local motion = bounded.positionMapProvider.positions.alice
-    assert(motion.trail and #motion.trail.points <= 64, "long journeys keep a bounded in-memory history")
-    assert(#VisibleTrailLines(boundedWorld) <= 64 and #boundedWorld.lines <= 64,
-        "long journeys bound native line allocation and reuse the existing pool")
-end
-AdvanceFrames(boundedWorld, 10)
-assert(#VisibleTrailLines(boundedWorld) == 0 and FindPin(boundedWorld, boundedPeer.name):GetScript("OnUpdate") == nil,
-    "ten-second trails expire even after a long journey")
-
-for _, unavailable in ipairs({ "canvas", "CreateLine" }) do
-    local fallback, fallbackWorld = LoadMap(true)
-    fallbackWorld:loadNativeMap(true)
-    if unavailable == "canvas" then fallbackWorld.map.canvas = nil
-    else fallbackWorld.map.canvas.CreateLine = nil end
-    local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
-    fallback.positions.alice = peer
-    fallback:InitializePositionMap()
-    peer.x = 0.24
-    fallback:RefreshPositionPins()
-    AdvanceFrames(fallbackWorld, 1)
-    Near(FindPin(fallbackWorld, peer.name).x, 0.22)
-    assert(#fallbackWorld.lines == 0, "missing " .. unavailable .. " preserves pins without allocating lines")
-end
-
-print("PASS: native map attachment/filter, class icons/fallbacks, presence, projection, smooth movement, trails and pooled lifecycle")
+print("PASS: native map attachment/filter, class dots/fallbacks, stale rings, shared tooltips, projection, smooth movement and pooled lifecycle")

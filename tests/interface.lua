@@ -25,9 +25,10 @@ do
     assert(options.selectedTab == "group" and options.tabs.group.themeTab.selected
         and not options.tabs.chat.themeTab.selected and options.pages.group:IsVisible()
         and not options.pages.chat:IsVisible() and not options.pages.position:IsVisible()
+        and not options.pages.restedxp:IsVisible()
         and not options.tabs.overview and not options.pages.overview
         and not options.screenTabs and not options.selectedScreen and not options.SelectScreen,
-        "Settings contains Group, Shared chat and Shared positions without Content navigation tabs")
+        "Settings contains Group, Shared chat, Shared positions and RestedXP without Content navigation tabs")
     local settingsPages = 0
     for _, page in pairs(options.pages) do
         settingsPages = settingsPages + 1
@@ -35,11 +36,11 @@ do
             and -page.point[3] + page:GetHeight() == options:GetHeight() - 20,
             "every Settings page fills the available height with a small bottom margin")
     end
-    assert(settingsPages == 3 and options.content:GetText() == "Content"
+    assert(settingsPages == 4 and options.content:GetText() == "Content"
         and options.content.point[1] == "TOPRIGHT" and options.content.point[3] == -12
         and options.content:GetHeight() == 32 and options.feedback.parent == options.pages.group
         and options.feedback.point[1] == "BOTTOMLEFT",
-        "Settings has exactly three pages and its Content switch in the header")
+        "Settings has exactly four pages and its Content switch in the header")
     options.secret:UserInput(OTHER_SECRET)
     options.secret:SetFocus()
     options.applyGroup:Click()
@@ -100,14 +101,11 @@ do
     options.tabs.position:Click()
     options.positionSharing:Click()
     options.positionRetention:Click()
-    options.positionTrails:Click()
     options.content:Click()
     content.options:Click()
     assert(options.selectedTab == "position" and options.pages.position:IsVisible()
         and options.positionSharing:GetChecked() and not options.positionRetention:GetChecked()
-        and not options.positionTrails:GetChecked()
         and navigation.db.position.sharing and not navigation.db.position.keepLastKnown
-        and not navigation.db.position.showTrails
         and options.feedback.parent == options.pages.position,
         "Settings remembers its page and all immediately applied preferences")
     for _, entry in ipairs({ "", "content", "overview", "welcome" }) do
@@ -331,7 +329,7 @@ do
     for _, widget in ipairs({ options.groupStatus, options.newKeyLabel, options.status, options.positionStatus,
         options.secret, options.ownSecret, options.applyGroup, options.createGroup, options.leaveGroup,
         options.selectKey, options.autoJoin, options.positionSharing, options.positionRetention,
-        options.positionTrails, options.join, options.leave }) do
+        options.join, options.leave }) do
         for _, name in ipairs({ "SetText", "SetEnabled", "SetChecked" }) do
             local original = widget[name]
             widget[name] = function(self, ...)
@@ -343,7 +341,6 @@ do
     assert(addon:SetChatAutoJoin(true))
     assert(addon:SetPositionSharing(true))
     assert(addon:SetPositionRetention(false))
-    assert(addon:SetShowPositionTrails(false))
     assert(addon:SetGroupSecret("hidden-friends"))
     world:advance(0)
     world:completeJoin(addon:GetGroupChannelName(), 17)
@@ -354,7 +351,7 @@ do
     assert(writes > 0 and options.selectedTab == "group" and options.ownSecret:GetText() == "hidden-friends"
         and options.secret:GetText() == "" and options.pendingSecret == nil
         and options.autoJoin:GetChecked() and options.positionSharing:GetChecked()
-        and not options.positionRetention:GetChecked() and not options.positionTrails:GetChecked()
+        and not options.positionRetention:GetChecked()
         and options.status:GetText() == "Status: " .. addon:GetChatStatusText(true)
         and options.positionStatus:GetText() == "Sharing: " .. addon:GetPositionStatusText(true),
         "reopening catches up saved keys, preferences and connection status without restoring an old draft")

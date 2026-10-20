@@ -65,7 +65,7 @@ local ROUND = {
     1955562222.0, 2024104815.0, 2227730452.0, 2361852424.0, 2428436474.0, 2756734187.0, 3204031479.0, 3329325298.0,
 }
 
-function Crypto.SHA256(message)
+function Crypto.SHA256(message, progress)
     assert(type(message) == "string", "SHA256 requires a string")
     local length = #message
     local bitLength = length * 8.0
@@ -97,6 +97,7 @@ function Crypto.SHA256(message)
         end
         h0, h1, h2, h3 = (h0 + a) % UINT32, (h1 + b) % UINT32, (h2 + c) % UINT32, (h3 + d) % UINT32
         h4, h5, h6, h7 = (h4 + e) % UINT32, (h5 + f) % UINT32, (h6 + g) % UINT32, (h7 + h) % UINT32
+        if progress and (offset - 1) % 4096 == 0 then progress() end
     end
     return wordBytes(h0) .. wordBytes(h1) .. wordBytes(h2) .. wordBytes(h3)
         .. wordBytes(h4) .. wordBytes(h5) .. wordBytes(h6) .. wordBytes(h7)

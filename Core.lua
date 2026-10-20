@@ -67,6 +67,7 @@ function addon:Initialize()
     self:InitializeData()
     self:InitializePositions()
     self:InitializeRoster()
+    self:InitializeRestedXP()
 
     -- Also support loading after login through an addon manager.
     if IsLoggedIn() then
@@ -95,6 +96,7 @@ function addon:OnLogin()
     self:OnDataLogin()
     self:OnPositionLogin()
     self:OnRosterLogin()
+    if self.OnRankingLogin then self:OnRankingLogin() end
     if self.db.showWelcome and not self:HasGroup() and not self.savedDataReadOnly then
         self:OpenContent()
     end

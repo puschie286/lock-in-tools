@@ -14,7 +14,7 @@ local function loadAddon(savedVariables, loggedIn)
     local world = {
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
-        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, statusSends = {}, prefixes = {},
+        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, statusSends = {}, guideSends = {}, prefixes = {},
         resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
         optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
@@ -258,7 +258,8 @@ local function loadAddon(savedVariables, loggedIn)
                 assert(distribution == "CHANNEL", "production data does not send whispers")
                 -- Keep feature assertions separate from independent presence and status traffic.
                 local sends = isStatusMessage(message) and world.statusSends
-                    or isRosterMessage(message) and world.rosterSends or world.dataSends
+                    or isRosterMessage(message) and world.rosterSends
+                    or message:match("^1|guides|") and world.guideSends or world.dataSends
                 sends[#sends + 1] = {
                     prefix = prefix, message = message, target = target,
                 }
@@ -298,7 +299,8 @@ local function loadAddon(savedVariables, loggedIn)
     prepareMinimap(environment, world)
     world.notificationErrors = loadNotifications(addon, environment)
     for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
-        "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua", "Roster.lua", "Minimap.lua", "Commands.lua" }) do
+        "Libs/LibDeflate/LibDeflate.lua", "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua", "Roster.lua",
+        "RestedXPCodec.lua", "RestedXPAdapter.lua", "RestedXP.lua", "Minimap.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)

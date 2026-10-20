@@ -39,6 +39,19 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetAllPoints(widget) self.allPoints = widget or self.parent end
     function methods:SetWidth(width) self.width = width end
     function methods:SetHeight(height) self.height = height end
+    function methods:SetMultiLine(multiline) self.multiline = multiline end
+    function methods:SetMaxLetters(maximum) self.maxLetters = maximum end
+    function methods:GetNumLines()
+        local lines = 0
+        for line in (self:GetText() .. "\n"):gmatch("([^\n]*)\n") do
+            lines = lines + math.max(1, math.ceil(#line / math.max(1, math.floor(self:GetWidth() / 8))))
+        end
+        return lines
+    end
+    function methods:SetScrollChild(child) self.scrollChild = child end
+    function methods:UpdateScrollChildRect() self.scrollRectUpdates = (self.scrollRectUpdates or 0) + 1 end
+    function methods:SetVerticalScroll(value) self.verticalScroll = value end
+    function methods:GetVerticalScroll() return self.verticalScroll or 0 end
     function methods:GetWidth() return self.width or (self.allPoints and self.allPoints:GetWidth()) or 0 end
     function methods:GetHeight() return self.height or (self.allPoints and self.allPoints:GetHeight()) or 0 end
     function methods:SetColorTexture(...)
@@ -88,6 +101,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetFontObject(fontObject) self.fontObject = fontObject end
     function methods:SetAlpha(alpha) self.alpha = alpha end
     function methods:SetText(text)
+        if self.maxLetters then text = text:sub(1, self.maxLetters) end
         self.text = text
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
@@ -182,7 +196,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:UserInput(text)
         assert(self.enabled, "disabled fields do not accept user input")
         assert(self:IsVisible(), "hidden fields do not accept user input")
-        self.text = text
+        self.text = self.maxLetters and text:sub(1, self.maxLetters) or text
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
     end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
@@ -193,7 +207,8 @@ local function loadOptions(uiAddon, uiEnvironment)
             return createEventFrame(frameType)
         end
         assert(frameType == "Frame" or frameType == "EditBox"
-            or frameType == "CheckButton" or frameType == "Button" or frameType == "Slider", "use supported native widgets")
+            or frameType == "CheckButton" or frameType == "Button" or frameType == "Slider"
+            or frameType == "ScrollFrame", "use supported native widgets")
         local widget = makeWidget()
         widget.frameType, widget.name, widget.template = frameType, name, template
         widget:SetParent(parent)

@@ -464,11 +464,9 @@ do
     local future, _, _, _, futureWorld = loadAddon(futureSettings, false)
     futureWorld:initialize()
     assert(not future:SetPositionSharing(true))
-    assert(not future:SetShowPositionTrails(false))
-    assert(future:GetShowPositionTrails() == true
-        and futureSettings.position.showTrails == "future-trails"
+    assert(futureSettings.position.showTrails == "future-trails"
         and futureSettings.position.trailLength == "future-length",
-        "Read-only startup uses safe trail defaults without repairing the original newer-schema data")
+        "Read-only startup preserves retired preferences in the original newer-schema data")
     futureWorld:advance(30)
     assert(not futureSettings.position.sharing and #futureWorld.dataJoinCalls == 0
         and #futureWorld.dataSends == 0, "read-only preferences cannot enable sharing or reconnect data")

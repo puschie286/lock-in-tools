@@ -198,8 +198,8 @@ local fingerprint = addon:GetGroupFingerprint()
 assert(addon.db.schemaVersion == 3 and addon.db.group.secret == "otter-4827")
 assert(addon.db.position.sharing == false and addon.db.position.keepLastKnown == true)
 assert(addon:GetShowPlayerIcons() == true and addon.db.position.showPlayerIcons == true)
-assert(addon:GetShowPositionTrails() == true and addon.db.position.showTrails == true
-    and addon.db.position.trailLength == nil)
+assert(addon.db.position.showTrails == nil and addon.db.position.trailLength == nil,
+    "New profiles do not create retired movement-trail preferences")
 assert(next(addon:GetSharedPositions()) == nil)
 world:connect()
 world:advance(10)
@@ -255,75 +255,26 @@ do
         "The display setting remains available before the map provider is loaded")
 end
 
--- Trail visibility is an account-wide display preference; obsolete custom lengths are ignored.
+-- Retired movement-trail preferences stay untouched in existing saved data.
 do
-    local getter = addon.GetShowPositionTrails
-    for _, uninitialized in ipairs({ {}, { db = false }, { db = {} }, { db = { position = "invalid" } } }) do
-        assert(getter(uninitialized) == true, "Trail visibility defaults are available before saved settings initialize")
-    end
-    for _, invalid in ipairs({ "false", 0, {} }) do
-        local profile = copy(addon.db)
-        profile.position.showTrails = invalid
-        assert(getter({ db = profile }) == true, "Malformed trail visibility reads safely without mutation")
-        assert(profile.position.showTrails == invalid)
-        local repaired = newAddon(profile)
-        assert(repaired.db.position.showTrails == true, "Writable profiles repair malformed trail visibility")
-    end
-    for _, legacyLength in ipairs({ 1, 30, 0, 31, 1.5, "10", math.huge, -math.huge, true, {} }) do
+    for _, legacy in ipairs({
+        { showTrails = true, trailLength = 10 },
+        { showTrails = false, trailLength = 30 },
+        { showTrails = "false", trailLength = "10" },
+        { showTrails = {}, trailLength = {} },
+    }) do
         for _, readOnly in ipairs({ false, true }) do
             local profile = copy(addon.db)
-            profile.position.trailLength = legacyLength
+            profile.position.showTrails, profile.position.trailLength = legacy.showTrails, legacy.trailLength
             local restored = newAddon(profile, readOnly)
-            assert(restored:GetShowPositionTrails() == true and profile.position.trailLength == legacyLength,
-                "Obsolete saved lengths stay untouched, including malformed and read-only data")
-            assert(restored:SetShowPositionTrails(false) == not readOnly
-                and profile.position.trailLength == legacyLength,
-                "Changing visibility never changes an obsolete saved length")
+            assert(restored:SetPositionSharing(true) == not readOnly)
+            assert(restored:SetShowPlayerIcons(false) == not readOnly)
+            assert(restored:SetPositionRetention(false) == not readOnly)
+            assert(profile.position.showTrails == legacy.showTrails
+                and profile.position.trailLength == legacy.trailLength,
+                "Initialization and active preferences preserve retired values, including malformed/read-only data")
         end
     end
-    local trails, clock = newAddon()
-    clock:login()
-    clock:connect()
-    assert(trails:SetPositionSharing(true))
-    clock:advance(2)
-    local state, timer = trails.positionState, trails.positionState.timer
-    local stateBefore, databaseBefore = copy(state), copy(trails.db)
-    local sent, samples, refreshes, optionsRefreshes = #clock.sent, clock.samples, clock.refreshes, 0
-    function trails:RefreshOptions() optionsRefreshes = optionsRefreshes + 1 end
-    assert(trails:SetShowPositionTrails(false))
-    assert(trails:GetShowPositionTrails() == false and clock.refreshes == refreshes + 1 and optionsRefreshes == 1)
-    databaseBefore.position.showTrails = false
-    assert(equal(trails.db, databaseBefore) and equal(state, stateBefore) and state.timer == timer
-        and #clock.sent == sent and clock.samples == samples and trails:IsDataConnected(),
-        "Trail preferences only refresh visuals, preserving peers, sampling, sends and discovery")
-    clock:advance(2)
-    assert(clock.samples == samples + 1 and #clock.sent == sent,
-        "Changing trails preserves two-second sampling and unchanged-position suppression")
-    local restored = newAddon(copy(trails.db))
-    assert(restored:GetShowPositionTrails() == false, "Trail visibility survives a reload or another character")
-    assert(trails:SetShowPositionTrails(true) and trails:GetShowPositionTrails() == true)
-
-    local before, stateSnapshot = copy(trails.db), copy(state)
-    refreshes, optionsRefreshes = clock.refreshes, 0
-    local function rejected(value)
-        local changed, problem = trails:SetShowPositionTrails(value)
-        assert(changed == false and type(problem) == "string")
-        assert(equal(trails.db, before) and equal(state, stateSnapshot)
-            and clock.refreshes == refreshes and optionsRefreshes == 0,
-            "Rejected trail settings do not mutate preferences, state or UI")
-    end
-    for _, invalid in ipairs({ 0, "false", {} }) do rejected(invalid) end
-    rejected(nil)
-    trails.initialized = false
-    rejected(false)
-    trails.initialized = true
-    trails.positionState = nil
-    local changed, problem = trails:SetShowPositionTrails(false)
-    assert(changed == false and type(problem) == "string" and equal(trails.db, before))
-    trails.positionState, trails.savedDataReadOnly = state, true
-    rejected(false)
-    trails.savedDataReadOnly, trails.RefreshPositionPins, trails.RefreshOptions = nil, nil, nil
-    assert(trails:SetShowPositionTrails(false), "Trail visibility works before the map UI loads")
 end
 
 -- Incoming updates use the actual sender and replace only an older valid position.
