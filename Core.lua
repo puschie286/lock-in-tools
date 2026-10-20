@@ -15,6 +15,12 @@ function addon:Print(message)
     DEFAULT_CHAT_FRAME:AddMessage("|cff66ccff[LockInTools]|r " .. message)
 end
 
+function addon:GetPlayerDisplayName(name)
+    if (issecretvalue and issecretvalue(name)) or type(name) ~= "string" then return "" end
+    -- Strip realms only for display; saved identities and native actions need full names.
+    return name:match("^[^%-]+") or ""
+end
+
 function addon:Initialize()
     if self.initialized then
         return

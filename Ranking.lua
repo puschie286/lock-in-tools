@@ -43,7 +43,8 @@ function addon:GetRankingHelpText()
         .. "XP %: progress toward the next level. MAX: confirmed maximum level.\n"
         .. "Stale / ~: last saved progress, which may have changed; these values still count in the ranking.\n"
         .. "Awaiting XP: no usable level and XP report yet (new discovery, older saved data or a level-up). "
-        .. "These characters have no rank until progress is available."
+        .. "These characters have no rank until progress is available.\n"
+        .. "Hover a player for exact XP and location; right-click for Invite or Request to join."
 end
 
 local function Editable(self, value)

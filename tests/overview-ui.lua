@@ -70,19 +70,20 @@ do
         "reopening Content or selecting its current Overview page does not request status")
     assert(not page.summary and not page.previous and not page.next and not page.pagination and not page.pageNumber
         and #page.rows == 8 and page.offset == 0 and not page.sortKey
-        and page.rows[1].name:GetText():find("(you)", 1, true)
+        and page.rows[1].name:GetText() == "Self (you)"
         and page.rows[8].playerID == "golf-testrealm" and not page.empty:IsShown(),
         "overview has eight reusable rows without the summary line or paging controls")
     local minimum, maximum = page.scrollbar:GetMinMaxValues()
     assert(page.scrollbar:IsShown() and minimum == 0 and maximum == 3 and page.scrollbar:GetValue() == 0,
         "the native scrollbar exposes all eleven players through a bounded row offset")
-    assert(page.rows[2].name:GetText() == "Alpha-TestRealm" and page.rows[2].level:GetText() == "21"
+    assert(page.rows[2].name:GetText() == "Alpha" and page.rows[2].level:GetText() == "21"
         and page.rows[2].progress:GetText() == "· 42%" and page.rows[2].progressFill:IsShown()
         and page.rows[2].position:GetText() == "Elwynn Forest" and page.rows[2].seen:GetText() == "Active"
         and page.rows[3].level:GetText() == "—" and page.rows[5].position:GetText() == "Not sharing"
         and page.rows[4].position:GetText() == "Last: Westfall" and page.rows[4].seen:GetText() == "Active",
         "status reaches level progress, and region labels omit ages while active players show only Active")
     for _, row in ipairs(page.rows) do
+        assert(not row.name:GetText():find("-TestRealm", 1, true), "overview names never include realm suffixes")
         assert(row.actions:IsEnabled() and not row.invite and not row.request,
             "each row has one dropdown trigger instead of individual action buttons")
     end
@@ -94,6 +95,11 @@ do
             "the actions dropdown is anchored to its selected player")
         return page.actionMenu
     end
+    page.rows[2].levelCell.scripts.OnEnter(page.rows[2].levelCell)
+    assert(api.GameTooltip.text == "Alpha — level 21"
+        and page.rows[2].levelCell.player.name == "Alpha-TestRealm",
+        "progress tooltips hide realms while player identities retain their complete names")
+    page.rows[2].levelCell.scripts.OnLeave(page.rows[2].levelCell)
     local menu = openMenu(1)
     assert(not menu.invite:IsEnabled() and not menu.request:IsEnabled(),
         "the local player's menu explains unavailable actions")
@@ -248,6 +254,82 @@ do
         "leaving the global group clears the overview while it remains open")
 end
 
+-- Player actions also work on independent surfaces without opening Content.
+do
+    local actions, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    local mayInvite, invitations, results, scroll = true, {}, {}, 0
+    api.C_PartyInfo = {
+        CanInvite = function() return mayInvite end,
+        IsPartyFull = function() return false end,
+        InviteUnit = function(name) invitations[#invitations + 1] = name end,
+        RequestInviteFromUnit = function() end,
+    }
+    world:initialize()
+    world:completeJoin(actions:GetGroupDataChannelName(), 7)
+    assert(actions:ReceivePlayerStatus("Alpha-TestRealm", {
+        level = 21, xpState = "unavailable", inParty = false, partyFull = false,
+    }, api.GetServerTime(), 1))
+    loadOptions(actions, api)
+    local firstParent = api.CreateFrame("Frame", nil, api.UIParent)
+    local secondParent = api.CreateFrame("Frame", nil, api.UIParent)
+    local anchor = api.CreateFrame("Frame", nil, firstParent)
+    local otherAnchor = api.CreateFrame("Frame", nil, secondParent)
+    local menu = actions:CreatePlayerActionMenu(firstParent, "LockInToolsTestPlayerActions", function(success, message)
+        results[#results + 1] = { success, message }
+    end, function(delta) scroll = scroll + delta end)
+    local otherMenu = actions:CreatePlayerActionMenu(secondParent, "LockInToolsTestOtherActions")
+    assert(not actions.contentPanel and not menu:IsShown() and not otherMenu:IsShown(),
+        "independent player menus do not create or open Content")
+    assert(contains(api.UISpecialFrames, "LockInToolsTestPlayerActions")
+        and contains(api.UISpecialFrames, "LockInToolsTestOtherActions"),
+        "every player action surface registers its own Escape dismissal")
+    menu:Open("alpha-testrealm", anchor)
+    assert(menu:IsShown() and menu.anchor == anchor and menu.menu.point[2] == anchor
+        and menu.invite:IsEnabled() and not menu.request:IsEnabled(),
+        "an independent menu anchors to its player and uses the roster's native action eligibility")
+    menu.request.scripts.OnEnter(menu.request)
+    assert(api.GameTooltip.shown and api.GameTooltip.text == "No active party is known for this player.",
+        "independent disabled actions explain the same restrictions as the roster")
+    otherMenu:Open("self-testrealm", otherAnchor)
+    assert(not menu:IsShown() and not menu.playerID and not menu.anchor and not api.GameTooltip.shown
+        and otherMenu:IsShown() and actions.activePlayerActionMenu == otherMenu,
+        "opening a player menu dismisses the other surface and its owned tooltip")
+    otherMenu:Open("self-testrealm", otherAnchor)
+    assert(not otherMenu:IsShown() and not actions.activePlayerActionMenu,
+        "opening the same player again toggles the menu closed")
+    menu:Open("alpha-testrealm", anchor)
+    menu.invite.scripts.OnEnter(menu.invite)
+    mayInvite = false
+    menu:Refresh()
+    assert(not menu.invite:IsEnabled() and api.GameTooltip.text == "You cannot invite players right now.",
+        "an independent refresh updates both live action eligibility and its hovered explanation")
+    mayInvite = true
+    menu:Refresh()
+    mayInvite = false
+    menu.invite:Click()
+    assert(#invitations == 0 and #results == 1 and results[1][1] == false
+        and results[1][2] == "You cannot invite players right now." and not menu:IsShown()
+        and not api.GameTooltip.shown,
+        "independent action selection rechecks permissions and returns visible-feedback details")
+    mayInvite = true
+    menu:Open("alpha-testrealm", anchor)
+    menu.invite:Click()
+    assert(#invitations == 1 and invitations[1] == "Alpha-TestRealm" and #results == 2
+        and results[2][1] == true and results[2][2]:find("invitation notices", 1, true),
+        "successful independent actions report the same native invitation result")
+    menu:Open("alpha-testrealm", anchor)
+    menu.scripts.OnMouseWheel(menu, -1)
+    assert(not menu:IsShown() and scroll == -1, "wheel dismissal preserves the owner's scrolling callback")
+    menu:Open("alpha-testrealm", anchor)
+    firstParent:Hide()
+    firstParent:Show()
+    assert(not menu:IsShown() and not menu.playerID and not actions.activePlayerActionMenu,
+        "hiding and reopening a parent cannot restore a stale action target")
+    otherMenu:Open("alpha-testrealm", otherAnchor)
+    otherMenu.scripts.OnMouseWheel(otherMenu, 1)
+    assert(not otherMenu:IsShown(), "independent menus without scrolling still dismiss on the wheel")
+end
+
 -- The local player's progress is read directly and has no remote-report age.
 do
     local localAddon, api, _, _, localWorld = loadAddon(settings(SECRET, false), false)
@@ -275,7 +357,7 @@ do
     progressWorld:initialize()
     local now, snapshots = api.GetServerTime(), 0
     local players = {
-        { id = "alpha", name = "Alpha", level = 24, xp = 420, xpMax = 1000, xpState = "known", online = true },
+        { id = "alpha", name = "Alpha-Other Realm", level = 24, xp = 420, xpMax = 1000, xpState = "known", online = true },
         { id = "bravo", name = "Bravo", level = 24, xp = 0, xpMax = 1000, xpState = "known", online = true },
         { id = "charlie", name = "Charlie", level = 24, xp = 999, xpMax = 1000, xpState = "known", online = true },
         { id = "delta", name = "Delta", level = 60, xpState = "max", online = true },

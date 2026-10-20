@@ -24,6 +24,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetClampedToScreen(clamped) self.clamped = clamped end
     function methods:SetMovable(movable) self.movable = movable end
     function methods:EnableMouse(enabled) self.mouseEnabled = enabled end
+    function methods:RegisterForClicks(...) self.clicks = { ... } end
     function methods:RegisterForDrag(...) self.drags = { ... } end
     function methods:SetPoint(...) self.point = { ... } end
     function methods:GetPoint()
@@ -198,10 +199,10 @@ local function loadOptions(uiAddon, uiEnvironment)
         self.shown = true
         updateVisibility(self)
     end
-    function methods:Click()
+    function methods:Click(button)
         if not self.enabled then return end
         if self.frameType == "CheckButton" then self:SetChecked(not self:GetChecked()) end
-        if self.scripts.OnClick then self.scripts.OnClick(self) end
+        if self.scripts.OnClick then self.scripts.OnClick(self, button or "LeftButton") end
     end
     function methods:UserInput(text)
         assert(self.enabled, "disabled fields do not accept user input")

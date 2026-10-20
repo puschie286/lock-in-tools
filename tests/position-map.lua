@@ -60,6 +60,7 @@ local function LoadMap()
         CreateFromMixins = Mix,
         Mixin = Mixin,
         CreateVector2D = Vector,
+        C_AddOns = { GetAddOnMetadata = function() return "test" end },
         GetTime = function() return world.now end,
         Menu = { ModifyMenu = function(tag, callback)
             world.menuRegistrations = world.menuRegistrations + 1
@@ -101,6 +102,7 @@ local function LoadMap()
     local tooltip = { shown = false, lines = {}, hideCount = 0 }
     function tooltip:SetOwner(owner, anchor) self.owner, self.anchor = owner, anchor end
     function tooltip:IsOwned(owner) return self.owner == owner end
+    function tooltip:ClearLines() self.title, self.lines = nil, {} end
     function tooltip:SetText(text, ...)
         self.title, self.titleColor, self.lines = text, { ... }, {}
     end
@@ -111,12 +113,15 @@ local function LoadMap()
     world.tooltip, environment.GameTooltip = tooltip, tooltip
     world.environment, world.mapAPI = environment, environment.C_Map
     world.notificationErrors = loadNotifications(addon, environment)
-    world.libraryFrames = #world.frames
-    for _, file in ipairs({ "Position.lua", "PositionMap.lua" }) do
+    for _, file in ipairs({ "Core.lua", "Position.lua", "PositionMap.lua" }) do
         local chunk = assert(loadfile(file))
         setfenv(chunk, environment)
         chunk("LockInTools", addon)
     end
+    -- Exercise Core's display helper without starting unrelated addon features.
+    addon.startupEvents:UnregisterAllEvents()
+    addon.initialized = true
+    world.libraryFrames = #world.frames
     function addon:GetSharedPositions() return self.positions end
     -- Simulate a virtual template retaining its mixin table before map load.
     world.templateMixin = assert(environment.LockInToolsPositionPinMixin)
@@ -267,7 +272,7 @@ end
 
 local function FindPin(testWorld, name)
     for _, candidate in ipairs(testWorld.map.pins) do
-        if candidate:GetDisplayName() == name then return candidate end
+        if candidate.playerName == name then return candidate end
     end
     error("missing map pin for " .. name)
 end
@@ -302,8 +307,8 @@ assert(world.added == 1, "attach the provider only once")
 world.map:show()
 assert(#world.map.pins == 1, "opening the map displays an existing retained position")
 local pin = world.map.pins[1]
-assert(pin.Label == nil and pin:GetDisplayName() == "Alice-Realm" and pin.online == nil,
-    "retained coordinates have no map label while preserving the native display name")
+assert(pin.Label == nil and pin:GetDisplayName() == "Alice" and pin.online == nil,
+    "retained coordinates have no map label and the native display name omits the realm")
 Near(pin.x, 0.25)
 Near(pin.y, 0.5)
 
@@ -428,10 +433,10 @@ assert(presencePin.online == nil)
 CheckDot(presencePin, staleColor, false)
 assert(not presenceWorld.tooltip:IsShown(), "a map position does not display its name before hover")
 presenceWorld:hover(presencePin)
-assert(presenceWorld.tooltip.title == "Alice-Realm" and presenceWorld.tooltip:IsOwned(presencePin)
-    and presenceWorld.tooltip:IsShown(), "hover shows the complete retained player name")
-assert(#presenceWorld.tooltip.lines == 1 and presenceWorld.tooltip.lines[1].text == "Last known position",
-    "retained positions explain freshness without asserting that the player logged out")
+assert(presenceWorld.tooltip.title == "Alice" and presenceWorld.tooltip:IsOwned(presencePin)
+    and presenceWorld.tooltip:IsShown(), "hover shows the retained character name without the realm")
+assert(#presenceWorld.tooltip.lines == 0,
+    "retained coordinates without a timestamp show only the character name")
 presenceWorld:leave(presencePin)
 assert(not presenceWorld.tooltip:IsShown() and presencePin:GetScript("OnUpdate") == nil,
     "leaving a stationary position dismisses its tooltip and stops hover updates")
@@ -441,28 +446,73 @@ presence:RefreshPositionPins()
 assert(presenceWorld.map.pins[1] == presencePin and presenceWorld.created == 1,
     "presence changes refresh an existing native pooled pin")
 assert(presencePin.online == false, "timed-out peers retain their stale status")
-assert(presencePin:GetDisplayName() == "Alice-Realm", "native player actions keep the real player name")
+assert(presencePin:GetDisplayName() == "Alice" and presencePin.playerName == "Alice-Realm",
+    "native display names omit realms while pooled pins retain the complete identity")
 CheckDot(presencePin, staleColor, false)
+presenceWorld.tooltip:SetText("Previous tooltip")
+presenceWorld.tooltip:AddLine("Last known position: Unknown")
+presenceWorld:hover(presencePin)
+assert(presenceWorld.tooltip.title == "Alice" and #presenceWorld.tooltip.lines == 0,
+    "offline positions replace previous tooltip contents with only the character name")
+presenceWorld:leave(presencePin)
 
 presence.positions.alice.online = true
 presence:RefreshPositionPins()
 assert(presencePin.online == true, "a new update restores the active state on a pooled pin")
 CheckDot(presencePin, fallbackColor, true)
 presenceWorld:hover(presencePin)
-assert(presenceWorld.tooltip.title == "Alice-Realm" and #presenceWorld.tooltip.lines == 0,
-    "a fresh position has no stale-position warning")
+assert(presenceWorld.tooltip.title == "Alice" and #presenceWorld.tooltip.lines == 0,
+    "fresh positions also show only the character name")
 presenceWorld:leave(presencePin)
 
 presence.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5 } }
 presence:RefreshPositionPins()
 assert(presenceWorld.map.pins[1] == presencePin and presencePin.online == nil)
-assert(presencePin:GetDisplayName() == "Bob-Realm",
+assert(presencePin:GetDisplayName() == "Bob",
     "a pooled pin replaces the previous name and presence with the retained player's state")
 CheckDot(presencePin, staleColor, false)
+presenceWorld:hover(presencePin)
+assert(presenceWorld.tooltip.title == "Bob" and #presenceWorld.tooltip.lines == 0,
+    "a reused pin shows only its current retained player's name")
+presenceWorld:leave(presencePin)
 presence.positions = {}
 presence:RefreshPositionPins()
 assert(#presenceWorld.map.pins == 0 and presenceWorld.released == 4)
 assert(presencePin.playerName == nil and presencePin.online == nil and presencePin.provider == nil)
+
+local function CheckRealmFreeNames()
+    local names, namesWorld = LoadMap()
+    namesWorld:loadNativeMap(true)
+    local first = { name = "Alice-FirstRealm", map = 101, x = 0.25, y = 0.5, online = true }
+    local second = { name = "Alice-SecondRealm", map = 101, x = 0.75, y = 0.5, online = false }
+    names.positions = {
+        first = first, second = second,
+        carol = { name = "Carol", map = 101, x = 0.5, y = 0.7, online = true },
+    }
+    names:InitializePositionMap()
+    local firstPin, secondPin = FindPin(namesWorld, first.name), FindPin(namesWorld, second.name)
+    assert(firstPin:GetDisplayName() == "Alice" and secondPin:GetDisplayName() == "Alice"
+        and FindPin(namesWorld, "Carol"):GetDisplayName() == "Carol",
+        "display names omit every realm while preserving character names without suffixes")
+    namesWorld:hover(secondPin)
+    names:RefreshPositionPins()
+    namesWorld:advance(0.01)
+    firstPin, secondPin = FindPin(namesWorld, first.name), FindPin(namesWorld, second.name)
+    assert(namesWorld.tooltip:IsOwned(secondPin) and secondPin.hovered and not firstPin.hovered
+        and namesWorld.tooltip.title == "Alice" and #namesWorld.tooltip.lines == 0,
+        "hover restoration keeps same-named characters from different realms distinct")
+    assert(first.name == "Alice-FirstRealm" and second.name == "Alice-SecondRealm"
+        and firstPin.motion.name == first.name and secondPin.motion.name == second.name,
+        "realm-free presentation preserves source records and interpolation identities")
+    namesWorld:leave(secondPin)
+    second.x = first.x
+    names:RefreshPositionPins()
+    namesWorld:hover(FindPin(namesWorld, second.name))
+    assert(namesWorld.tooltip.title == "Alice" and #namesWorld.tooltip.lines == 1
+        and namesWorld.tooltip.lines[1].text == "Alice",
+        "overlapping same-named players both remain visible without realm suffixes")
+end
+CheckRealmFreeNames()
 
 local classes, classWorld = LoadMap()
 classWorld:loadNativeMap(true)
@@ -483,7 +533,7 @@ CheckClassDot("WARRIOR", true)
 classes.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5, online = false, class = "MAGE" } }
 classes:RefreshPositionPins()
 CheckClassDot("MAGE", false)
-assert(classPin:GetDisplayName() == "Bob-Realm", "a pooled pin replaces its class and name")
+assert(classPin:GetDisplayName() == "Bob", "a pooled pin replaces its class and realm-free display name")
 classes.positions.bob.online = true
 classes:RefreshPositionPins()
 CheckClassDot("MAGE", true)
@@ -542,14 +592,14 @@ local function CheckSharedTooltips()
     assert(#shared.positionMapProvider.pins == 3 and alice.provider == shared.positionMapProvider,
         "the provider tracks only its acquired pins for shared tooltips")
     sharedWorld:hover(zed)
-    assert(tooltip.title == "Shared positions (3)" and #tooltip.lines == 3 and tooltip:IsOwned(zed),
+    assert(tooltip.title == "Alice" and #tooltip.lines == 2 and tooltip:IsOwned(zed),
         "hovering any coincident dot shows all players in one owned tooltip")
-    assert(tooltip.lines[1].text == "Alice-Realm" and tooltip.lines[2].text == "Bob-Realm (Last known position)"
-        and tooltip.lines[3].text == "Zed-Realm", "shared names sort alphabetically and label stale positions")
+    assert(tooltip.lines[1].text == "Bob" and tooltip.lines[2].text == "Zed",
+        "shared tooltips contain only alphabetically sorted character names, including offline players")
     local mage, warrior = sharedWorld.environment.RAID_CLASS_COLORS.MAGE, sharedWorld.environment.RAID_CLASS_COLORS.WARRIOR
-    for index, value in ipairs({ mage.r, mage.g, mage.b }) do Near(tooltip.lines[1].color[index], value) end
-    for index = 1, 3 do Near(tooltip.lines[2].color[index], staleColor[index]) end
-    for index, value in ipairs({ warrior.r, warrior.g, warrior.b }) do Near(tooltip.lines[3].color[index], value) end
+    for index, value in ipairs({ mage.r, mage.g, mage.b }) do Near(tooltip.titleColor[index], value) end
+    for index = 1, 3 do Near(tooltip.lines[1].color[index], staleColor[index]) end
+    for index, value in ipairs({ warrior.r, warrior.g, warrior.b }) do Near(tooltip.lines[2].color[index], value) end
     alice:OnMouseLeave()
     assert(tooltip:IsShown() and tooltip:IsOwned(zed), "another pin's leave callback cannot hide the owned tooltip")
     sharedWorld:leave(zed)
@@ -558,38 +608,42 @@ local function CheckSharedTooltips()
     bob.centerX, bob.centerY = 309, 449
     zed.centerX, zed.centerY = 312, 440
     sharedWorld:hover(alice)
-    assert(tooltip.title == "Shared positions (2)" and tooltip.lines[1].text == "Alice-Realm"
-        and tooltip.lines[2].text == "Zed-Realm",
+    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
         "overlap includes touching 12-pixel dots but excludes diagonal hover-rectangle overlap")
     zed.centerX = 312.01
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice-Realm" and #tooltip.lines == 0,
+    assert(tooltip.title == "Alice" and #tooltip.lines == 0,
         "dots immediately beyond the visible circular boundary have separate tooltips")
     zed.centerX = 311.99
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Shared positions (2)", "nearby dot movement refreshes a stationary hovered tooltip")
+    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
+        "nearby dot movement refreshes a stationary hovered tooltip")
 
     alice.effectiveScale, alice.centerX, alice.centerY = 2, 150, 220
     bob.centerX, bob.centerY = 400, 440
     zed.effectiveScale, zed.centerX, zed.centerY = 0.5, 630, 880
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Shared positions (2)",
+    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
         "overlap uses screen-space centers and the sum of differently scaled dot radii")
     zed.centerX = 630.1
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice-Realm", "scaled circles just beyond their summed radii remain separate")
+    assert(tooltip.title == "Alice" and #tooltip.lines == 0,
+        "scaled circles just beyond their summed radii remain separate")
 
     alice.effectiveScale, zed.effectiveScale = nil, nil
     for _, candidate in ipairs({ alice, bob, zed }) do candidate.centerX, candidate.centerY = nil, nil end
     alice.x, bob.x, zed.x = 0.2, 0.211, 0.24
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Shared positions (2)", "rendered map geometry identifies close normalized coordinates")
+    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Bob",
+        "rendered map geometry identifies close normalized coordinates")
     sharedWorld.map.zoom = 2
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice-Realm", "zooming separates dots without receiving new position data")
+    assert(tooltip.title == "Alice" and #tooltip.lines == 0,
+        "zooming separates dots without receiving new position data")
     sharedWorld.map.zoom = 0.25
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Shared positions (3)", "zooming out merges all visibly overlapping dots")
+    assert(tooltip.title == "Alice" and #tooltip.lines == 2 and tooltip.lines[1].text == "Bob"
+        and tooltip.lines[2].text == "Zed", "zooming out merges all visibly overlapping dots")
     sharedWorld:leave(alice)
     assert(alice:GetScript("OnUpdate") == nil and not tooltip:IsShown(), "stationary dots do no idle work after hover")
 
@@ -624,13 +678,14 @@ local function CheckTooltipLifecycle()
     assert(not tooltip:IsShown(), "rebuilding releases the previous owned tooltip before native layout")
     lifecycleWorld:advance(0.01)
     hovered = FindPin(lifecycleWorld, peer.name)
-    assert(tooltip:IsShown() and tooltip:IsOwned(hovered) and tooltip.title == peer.name
-        and tooltip.lines[1].text == "Last known position", "hover survives a stationary freshness refresh after layout")
+    assert(tooltip:IsShown() and tooltip:IsOwned(hovered) and tooltip.title == "Alice"
+        and #tooltip.lines == 0, "hover survives an offline refresh with only the character name after layout")
     peer.online = true
     lifecycle:RefreshPositionPins()
     lifecycleWorld:advance(0.01)
     hovered = FindPin(lifecycleWorld, peer.name)
-    assert(tooltip:IsOwned(hovered) and #tooltip.lines == 0, "a fresh sample clears the restored stale tooltip warning")
+    assert(tooltip:IsOwned(hovered) and tooltip.title == "Alice" and #tooltip.lines == 0,
+        "a fresh sample preserves the restored name-only tooltip")
     CheckDot(hovered, { 0.25, 0.78, 0.92 }, true)
 
     lifecycle:RefreshPositionPins()
@@ -696,29 +751,34 @@ local function CheckAnimatedTooltips()
     animated:InitializePositionMap()
     local hovered = FindPin(animatedWorld, "Alice-Realm")
     animatedWorld:hover(hovered)
-    assert(animatedWorld.tooltip.title == "Alice-Realm", "separated dots begin with individual tooltips")
+    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 0,
+        "separated dots begin with individual tooltips")
     movingPeer.x = 0.2
     animated:RefreshPositionPins()
     animatedWorld:advance(0.01)
     hovered = FindPin(animatedWorld, "Alice-Realm")
-    assert(animatedWorld.tooltip:IsOwned(hovered) and animatedWorld.tooltip.title == "Alice-Realm",
+    assert(animatedWorld.tooltip:IsOwned(hovered) and animatedWorld.tooltip.title == "Alice"
+        and #animatedWorld.tooltip.lines == 0,
         "overlap uses the displayed start of interpolation instead of the newly received target")
     animatedWorld:advance(0.9)
-    assert(animatedWorld.tooltip.title == "Alice-Realm", "dots remain separate before their animation reaches the radius")
+    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 0,
+        "dots remain separate before their animation reaches the radius")
     animatedWorld:advance(0.6)
     animatedWorld:advance(0.11)
-    assert(animatedWorld.tooltip.title == "Shared positions (2)",
+    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 1
+        and animatedWorld.tooltip.lines[1].text == "Bob",
         "a moving neighbor enters the shared tooltip while the hovered dot stays stationary")
     animatedWorld:advance(0.5)
     assert(hovered:GetScript("OnUpdate"), "stationary hover keeps overlap detection alive after nearby motion ends")
     movingPeer.x = 0.24
     animated:RefreshPositionPins()
     animatedWorld:advance(0.01)
-    assert(animatedWorld.tooltip.title == "Shared positions (2)",
+    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 1
+        and animatedWorld.tooltip.lines[1].text == "Bob",
         "moving away preserves shared names until the displayed dots actually separate")
     animatedWorld:advance(1.5)
     animatedWorld:advance(0.11)
-    assert(animatedWorld.tooltip.title == "Alice-Realm" and #animatedWorld.tooltip.lines == 0,
+    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 0,
         "the tooltip removes a player whose interpolated dot moves outside the overlap")
     hovered = FindPin(animatedWorld, "Alice-Realm")
     animatedWorld:leave(hovered)

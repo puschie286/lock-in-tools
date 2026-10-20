@@ -613,17 +613,12 @@ local function CreateOptionsPanel()
         "Show the top five characters, plus your own rank when outside the top five. Chat and position sharing can stay off.\n\n"
             .. "This preference saves across reloads and characters.")
 
-    panel.rankingLocked = UI:Checkbox(ranking)
-    panel.rankingLocked:SetPoint("TOPLEFT", 12, -130)
-    panel.rankingLocked:SetSize(28, 28)
-    BindPreference(panel, panel.rankingLocked, function() return addon:GetRankingSettings().locked end,
-        addon.SetRankingLocked)
-    PreferenceLabel(ranking, panel.rankingLocked, "Lock overlay position",
-        "Unlock to drag the title bar, then lock it to keep the overlay in place. Player rows always let clicks pass through.")
     local rankingHint = UI:Label(ranking,
-        "Use /lit ranking to show or hide it. See Content > Overview for all players.", 12, "muted")
-    rankingHint:SetPoint("TOPLEFT", 16, -182)
-    rankingHint:SetSize(648, 40)
+        "Use /lit ranking to show or hide it. Hold Shift and drag the title or a player row to move it.\n"
+            .. "See Content > Overview for all players.\n"
+            .. "Hover a player for XP and location; right-click for Invite or Request to join.", 12, "muted")
+    rankingHint:SetPoint("TOPLEFT", 16, -138)
+    rankingHint:SetSize(648, 60)
 
     CreateRestedXPPage(panel)
 
@@ -718,9 +713,7 @@ function addon:RefreshOptions()
     panel.positionRetention:SetEnabled(editable)
     local ranking = self:GetRankingSettings()
     panel.rankingEnabled:SetChecked(ranking.enabled and not self.rankingOverlayDismissed)
-    panel.rankingLocked:SetChecked(ranking.locked)
     panel.rankingEnabled:SetEnabled(editable)
-    panel.rankingLocked:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup and not switching)
     panel.leave:SetEnabled(self.ready and hasGroup and not switching)
     RefreshRestedXP(panel)

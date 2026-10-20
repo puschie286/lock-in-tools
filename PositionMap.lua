@@ -203,15 +203,14 @@ function Pin:RefreshTooltip()
         local a, b = string.lower(first.playerName), string.lower(second.playerName)
         return a == b and first.playerName < second.playerName or a < b
     end)
-    if #players <= 1 then
-        GameTooltip:SetText(self.playerName, self.red, self.green, self.blue)
-        if self.online ~= true then GameTooltip:AddLine("Last known position", 0.6, 0.6, 0.6) end
-    else
-        GameTooltip:SetText("Shared positions (" .. #players .. ")")
-        for _, pin in ipairs(players) do
-            local text = pin.playerName .. (pin.online == true and "" or " (Last known position)")
-            GameTooltip:AddLine(text, pin.red, pin.green, pin.blue)
-        end
+    -- Marker shape and color convey freshness; tooltip text contains names only.
+    -- GameTooltip is shared with native unit/map tooltips, so clear their old lines.
+    GameTooltip:ClearLines()
+    local first = players[1] or self
+    GameTooltip:SetText(first:GetDisplayName(), first.red, first.green, first.blue)
+    for index = 2, #players do
+        local pin = players[index]
+        GameTooltip:AddLine(pin:GetDisplayName(), pin.red, pin.green, pin.blue)
     end
     GameTooltip:Show()
     self.tooltipUpdated = GetTime()
@@ -250,7 +249,7 @@ function Pin:OnReleased()
 end
 
 function Pin:GetDisplayName()
-    return self.playerName or ""
+    return addon:GetPlayerDisplayName(self.playerName)
 end
 
 function Provider:RemoveAllData()

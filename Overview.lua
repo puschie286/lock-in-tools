@@ -40,7 +40,8 @@ local function ProgressTooltip(cell)
     local player = cell.player
     if not player or not GameTooltip then return end
     GameTooltip:SetOwner(cell, "ANCHOR_RIGHT")
-    GameTooltip:SetText(player.name .. (player.level and " — level " .. player.level or " — level unknown"))
+    GameTooltip:SetText(addon:GetPlayerDisplayName(player.name)
+        .. (player.level and " — level " .. player.level or " — level unknown"))
     if KnownXP(player) then
         GameTooltip:AddLine("XP: " .. player.xp .. " / " .. player.xpMax)
         GameTooltip:AddLine("To next level: " .. math.max(0, player.xpMax - player.xp) .. " XP")
@@ -84,7 +85,7 @@ local function RefreshProgress(row, player)
     if GameTooltip and GameTooltip:IsOwned(cell) and GameTooltip:IsShown() then ProgressTooltip(cell) end
 end
 
-local function ActionButton(menu, panel, label, action, y)
+local function ActionButton(menu, onResult, label, action, y)
     local button = UI:Button(menu.menu, label)
     button:SetPoint("TOPLEFT", 8, -y)
     button:SetSize(154, 28)
@@ -102,10 +103,8 @@ local function ActionButton(menu, panel, label, action, y)
         menu:Hide()
         if not playerID then return end
         local success, message = addon:PerformOverviewAction(playerID, action)
-        panel.feedback:SetText(message or "")
-        if success then panel.feedback:SetTextColor(0.4, 1, 0.4)
-        else panel.feedback:SetTextColor(1, 0.35, 0.35) end
-        addon:RefreshOverview()
+        if onResult then onResult(success, message) end
+        menu:Refresh()
     end)
     return button
 end
@@ -122,8 +121,8 @@ local function RefreshActions(menu)
     end
 end
 
-local function CreateActionMenu(page, panel)
-    local menu = CreateFrame("Button", "LockInToolsOverviewActions", page)
+function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
+    local menu = CreateFrame("Button", name, parent)
     menu:SetAllPoints(UIParent)
     menu:SetFrameStrata("FULLSCREEN_DIALOG")
     menu:EnableMouse(true)
@@ -132,17 +131,39 @@ local function CreateActionMenu(page, panel)
     menu.menu:SetFrameLevel(menu:GetFrameLevel() + 1)
     menu.menu:SetClampedToScreen(true)
     menu.menu:EnableMouse(true)
-    menu.invite = ActionButton(menu, panel, "Invite", "invite", 8)
-    menu.request = ActionButton(menu, panel, "Request to join", "request", 44)
+    menu.invite = ActionButton(menu, onResult, "Invite", "invite", 8)
+    menu.request = ActionButton(menu, onResult, "Request to join", "request", 44)
     menu:SetScript("OnClick", function() menu:Hide() end)
-    menu:SetScript("OnMouseWheel", function(_, delta) page:SetOffset(page.offset - delta) end)
+    menu:SetScript("OnMouseWheel", function(_, delta)
+        menu:Hide()
+        if onScroll then onScroll(delta) end
+    end)
     menu:SetScript("OnHide", function()
         menu.playerID, menu.anchor = nil, nil
+        if addon.activePlayerActionMenu == menu then addon.activePlayerActionMenu = nil end
         HideTooltip(menu.invite)
         HideTooltip(menu.request)
     end)
+    parent:HookScript("OnHide", function() menu:Hide() end)
+    function menu:Refresh()
+        if self.playerID then RefreshActions(self) end
+    end
+    function menu:Open(playerID, anchor, anchorTarget)
+        local wasOpen = self:IsShown() and self.playerID == playerID
+        self:Hide()
+        if wasOpen or not playerID or not anchor or addon:IsDataSelf(playerID) then return end
+        -- Roster and ranking share native action guards, and only one menu may
+        -- own the screen at a time even when both player lists are visible.
+        if addon.activePlayerActionMenu then addon.activePlayerActionMenu:Hide() end
+        self.playerID, self.anchor = playerID, anchor
+        self.menu:ClearAllPoints()
+        self.menu:SetPoint("TOPRIGHT", anchorTarget or anchor, "BOTTOMRIGHT", 0, -2)
+        self:Refresh()
+        self:Show()
+        addon.activePlayerActionMenu = self
+    end
     menu:Hide()
-    tinsert(UISpecialFrames, "LockInToolsOverviewActions")
+    tinsert(UISpecialFrames, name)
     return menu
 end
 
@@ -150,7 +171,7 @@ local function SortPlayers(page, players)
     local key = page.sortKey
     if not key then return end
     local function Value(player)
-        if key == "name" then return player.name:lower() end
+        if key == "name" then return addon:GetPlayerDisplayName(player.name):lower() end
         if key == "region" then return player.region and player.region:lower() end
         if key == "seen" then return player.seenAt end
         return player.level
@@ -196,7 +217,12 @@ function addon:CreateOverviewPage(panel)
     local actions = UI:Label(page, "Actions", 12, "muted")
     actions:SetPoint("TOPLEFT", 536, -20)
     actions:SetWidth(106)
-    page.actionMenu = CreateActionMenu(page, panel)
+    page.actionMenu = self:CreatePlayerActionMenu(page, "LockInToolsOverviewActions", function(success, message)
+        panel.feedback:SetText(message or "")
+        if success then panel.feedback:SetTextColor(0.4, 1, 0.4)
+        else panel.feedback:SetTextColor(1, 0.35, 0.35) end
+        addon:RefreshOverview()
+    end, function(delta) page:SetOffset(page.offset - delta) end)
     for index = 1, VISIBLE_ROWS do
         local row = CreateFrame("Frame", nil, page)
         row:SetPoint("TOPLEFT", 16, -48 - (index - 1) * ROW_HEIGHT)
@@ -234,15 +260,8 @@ function addon:CreateOverviewPage(panel)
         row.actions:SetPoint("TOPLEFT", 520, -5)
         row.actions:SetSize(106, 30)
         row.actions:SetScript("OnClick", function()
-            local menu = page.actionMenu
-            if menu:IsShown() and menu.playerID == row.playerID then menu:Hide(); return end
-            menu:Hide()
-            if not row.playerID then return end
-            menu.playerID, menu.anchor = row.playerID, row
-            menu.menu:ClearAllPoints()
-            menu.menu:SetPoint("TOPRIGHT", row.actions, "BOTTOMRIGHT", 0, -2)
-            RefreshActions(menu)
-            menu:Show()
+            if not row.playerID or addon:IsDataSelf(row.playerID) then return end
+            page.actionMenu:Open(row.playerID, row, row.actions)
         end)
         page.rows[index] = row
     end
@@ -326,12 +345,14 @@ function addon:RefreshOverview()
         if row.playerID ~= (player and player.id) then HideTooltip(row.levelCell) end
         row.playerID = player and player.id or nil
         if player then
-            row.name:SetText(player.name .. (player.isSelf and " (you)" or ""))
+            row.name:SetText(self:GetPlayerDisplayName(player.name))
+            row.actions:SetEnabled(not player.isSelf)
             RefreshProgress(row, player)
             row.position:SetText(Location(player))
             row.seen:SetText(player.online and "Active" or Age(player.seenAt, now))
             row:Show()
         else
+            row.actions:SetEnabled(false)
             row.levelCell.player = nil
             row.level:SetText("")
             row.progress:SetText("")
@@ -340,7 +361,7 @@ function addon:RefreshOverview()
             row:Hide()
         end
     end
-    if menu:IsShown() then RefreshActions(menu) end
+    if menu:IsShown() then menu:Refresh() end
 end
 
 function addon:OpenOverview()

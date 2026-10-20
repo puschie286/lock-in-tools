@@ -4,7 +4,7 @@ function addon:ShowHelp()
     self:Print("/lit or /lit content - Open Content and your player overview.")
     self:Print("/lit options - Open Settings for your group and features.")
     self:Print("/lit overview - Show group players and party actions.")
-    self:Print("/lit ranking [on|off|lock|unlock] - Toggle or arrange the player ranking overlay.")
+    self:Print("/lit ranking [on|off] - Toggle the player ranking overlay; hold Shift and drag its title or a player row to move it.")
     self:Print("/lit rxp [import] - Open the local RestedXP import helper.")
     self:Print("/lit rxp cleanup - Remove old RestedXP data from LockInTools settings.")
     self:Print("/lit help - Show commands.")
@@ -40,7 +40,8 @@ function addon:HandleRankingCommand(argument)
     local settings = self:GetRankingSettings()
     local success, message
     if argument == "lock" or argument == "unlock" then
-        success, message = self:SetRankingLocked(argument == "lock")
+        self:Print("Hold Shift and drag the title or a player row to move the overlay.")
+        return
     else
         local enabled = argument == "on" or (argument == "" and not (settings.enabled and not self.rankingOverlayDismissed))
         if self.savedDataReadOnly and settings.enabled then
