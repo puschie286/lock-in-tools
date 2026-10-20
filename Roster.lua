@@ -91,9 +91,9 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
         or self:IsDataSelf(sender) then return false end
     local id, state = Identity(sender), self.rosterState
     local function Reject()
-        -- Transport coherence does not prove that this consumer accepted the
-        -- merged player data. Retain the last good values visibly stale.
-        if metadata and (metadata.kind == "full" or metadata.kind == "delta") and state.peers[id] then
+        -- A valid protocol frame may still contain invalid player data.
+        -- Retain the last good values visibly stale until a valid report arrives.
+        if state.peers[id] then
             state.peers[id].statusSynchronized = false
             if state.progress[id] then state.progress[id].disconnected = true end
             Refresh(self)
@@ -121,44 +121,28 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
         or not Number(maximum, 9999999999) or maximum == 0 or xp > maximum) then return Reject() end
     if kind == "max" and level == 0 then return Reject() end
     local previous, peer = state.progress[id], state.peers[id]
-    -- The shared protocol validates sessions/revisions, including requested full
-    -- snapshots of an unchanged revision. Direct callers retain ordering.
+    -- The shared protocol validates sessions and ordering. Direct callers retain ordering.
     if previous and not metadata
         and (stamp < previous.stamp or (stamp == previous.stamp and sequence <= previous.sequence)) then
         return false
     end
     local now = GetServerTime()
+    local session = metadata and metadata.session
     local updatedAt = previous and previous.xpUpdatedAt
     if not previous or previous.level ~= (level > 0 and level or nil) or previous.xpState ~= kind
         or previous.xp ~= (kind == "known" and xp or nil) or previous.xpMax ~= (kind == "known" and maximum or nil)
-        or not metadata or metadata.kind == "full" then updatedAt = now end
+        or previous.disconnected or previous.session ~= session or not peer or not peer.lastReceived
+        or GetTime() - peer.lastReceived >= TIMEOUT then updatedAt = now end
     state.progress[id] = { level = level > 0 and level or nil, xp = kind == "known" and xp or nil,
         xpMax = kind == "known" and maximum or nil, xpState = kind, xpUpdatedAt = updatedAt,
-        stamp = stamp, sequence = sequence,
-        disconnected = metadata and metadata.coherent == false or false }
+        stamp = stamp, sequence = sequence, session = session, disconnected = false }
     if not peer then
         peer = { name = sender }
         state.peers[id] = peer
     end
     peer.level, peer.seenAt, peer.lastReceived = level > 0 and level or nil, now, GetTime()
     peer.inParty, peer.canInvite, peer.partyFull, peer.sharing = flags.inParty, flags.canInvite, flags.partyFull, flags.sharing
-    peer.statusSynchronized = not metadata or metadata.coherent ~= false
-    SavePeer(self, id, peer)
-    Refresh(self)
-    return true
-end
-
-function addon:ReceivePlayerContact(sender, stamp, metadata)
-    if not Active(self) or not self:IsDataConnected() or not Identity(sender)
-        or self:IsDataSelf(sender) or not Number(stamp, 9999999999) then return false end
-    local id = Identity(sender)
-    local peer, progress = self.rosterState.peers[id], self.rosterState.progress[id]
-    if not peer then return false end
-    peer.seenAt, peer.lastReceived = GetServerTime(), GetTime()
-    if metadata and metadata.coherent == false then
-        if progress then progress.disconnected = true end
-        peer.statusSynchronized = false
-    end
+    peer.statusSynchronized = true
     SavePeer(self, id, peer)
     Refresh(self)
     return true
@@ -191,8 +175,6 @@ function addon:InitializeRoster()
             for _, peer in pairs(self.rosterState.peers) do peer.lastReceived = nil end
         end
         Refresh(self)
-    end, function(sender, stamp, metadata)
-        return self:ReceivePlayerContact(sender, stamp, metadata)
     end)
     self.rosterEvents = self:RegisterGameEvents({ "PLAYER_LEVEL_UP", "GROUP_ROSTER_UPDATE", "PARTY_LEADER_CHANGED",
         "PLAYER_XP_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }, function(self, event, value)

@@ -1,7 +1,7 @@
 local _, addon = ...
 
--- Shared player-status snapshots, updates and recovery over the data transport.
-local STATUS_INTERVAL, STATUS_HEARTBEAT_INTERVAL = 5, 30
+-- Complete player-status snapshots on change and periodic presence refreshes.
+local STATUS_INTERVAL, STATUS_REFRESH_INTERVAL = 5, 30
 local MAX_STATUS_REVISION, MAX_STATUS_STAMP = 999999999, 9999999999
 
 local function IsSecret(value)
@@ -95,33 +95,20 @@ local function UnescapeStatus(value)
 end
 
 local function DecodeStatus(payload)
-    local kind, session, stampText, revisionText, body = payload:match("^3|([FDH])|([^|]+)|(%d+)|(%d+)(.*)$")
+    local session, stampText, revisionText, body = payload:match("^3|F|([^|]+)|(%d+)|(%d+)|(.*)$")
     local stamp = StatusInteger(stampText, MAX_STATUS_STAMP, 0)
     local revision = StatusInteger(revisionText, MAX_STATUS_REVISION, 1)
-    if not kind or not ValidStatusSession(session) or not stamp or not revision then return nil end
-    -- Keep unknown IDs in the baseline so future fields obey the same revision
-    -- checks and delta recovery. Only provider callbacks translate known names.
-    local message = { kind = kind, session = session, stamp = stamp, revision = revision, fields = {} }
-    if kind == "H" then return body == "" and message or nil end
-    if kind == "D" then
-        local baseText
-        baseText, body = body:match("^|(%d+)|(.*)$")
-        message.base = StatusInteger(baseText, MAX_STATUS_REVISION, 1)
-        if not message.base or message.base >= revision or body == "" then return nil end
-    else
-        body = body:match("^|(.*)$")
-        if body == nil then return nil end
-    end
+    if not ValidStatusSession(session) or not stamp or not revision then return nil end
+    local message = { session = session, stamp = stamp, revision = revision, fields = {} }
     if body ~= "" then
         if body:sub(-1) == "|" then return nil end
         for part in (body .. "|"):gmatch("(.-)|") do
             local idText, encoded = part:match("^([^=]+)=(.*)$")
-            if not idText and kind == "D" then idText = part end
             local id = StatusFieldID(idText)
             if not id or message.fields[id] ~= nil then return nil end
-            local value = encoded ~= nil and UnescapeStatus(encoded)
-            if encoded ~= nil and value == nil then return nil end
-            message.fields[id] = encoded == nil and false or value
+            local value = UnescapeStatus(encoded)
+            if value == nil then return nil end
+            message.fields[id] = value
         end
     end
     return message
@@ -186,37 +173,20 @@ local function CurrentStatus(self)
     return status.current, status.revision
 end
 
-local function EncodeStatus(self, kind, fields, revision, base)
+local function EncodeStatus(self, fields, revision)
     local status = self.dataState.status
     local stamp = GetServerTime()
     if IsSecret(stamp) or type(stamp) ~= "number" or stamp ~= stamp or stamp < 0
         or stamp > MAX_STATUS_STAMP or stamp % 1 ~= 0 then return nil end
     stamp = math.max(stamp, status.lastStamp or 0)
     status.lastStamp = stamp
-    local header = "3|" .. kind .. "|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision
-    if kind == "H" then return header end
     local encoded = {}
     for _, id in ipairs(STATUS_FIELD_ORDER) do
         local name = STATUS_FIELD_NAMES[id]
         local value = name and fields[name]
-        if value ~= nil and name then
-            encoded[#encoded + 1] = value == false and tostring(id) or id .. "=" .. EscapeStatus(value)
-        end
+        if value ~= nil and name then encoded[#encoded + 1] = id .. "=" .. EscapeStatus(value) end
     end
-    return header .. "|" .. (base and base .. "|" or "") .. table.concat(encoded, "|")
-end
-
-local function ContactStatus(self, sender, message, peer)
-    local status = self.dataState.status
-    local synchronized = peer.fields ~= nil and not peer.unsynchronized
-    local metadata = { kind = ({ F = "full", D = "delta", H = "heartbeat" })[message.kind],
-        session = message.session, revision = message.revision, hasBaseline = peer.fields ~= nil,
-        coherent = synchronized, synchronized = synchronized }
-    for _, name in ipairs(status.providerNames) do
-        local provider = status.providers[name]
-        if provider.contact then pcall(provider.contact, sender, message.stamp, CopyStatus(metadata)) end
-    end
-    return metadata
+    return "3|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
 end
 
 local function ProcessStatus(self, sender, message, requested)
@@ -225,49 +195,32 @@ local function ProcessStatus(self, sender, message, requested)
     if not normalized or isSelf then return false end
     local peer = status.received[normalized]
     if not peer then
-        peer = { retired = {}, revision = 0, advertised = 0 }
+        peer = { retired = {} }
         status.received[normalized] = peer
     end
     if peer.retired[message.session] then return false end
     if peer.session ~= message.session then
         if peer.stamp and message.stamp < peer.stamp then return false end
         if peer.session then peer.retired[peer.session] = true end
-        peer.session, peer.fields, peer.revision, peer.advertised = message.session, nil, 0, 0
-        peer.unsynchronized, peer.contactStamp = true, nil
-    end
-    if message.revision < peer.revision or message.revision < peer.advertised then return false end
-    if peer.stamp and message.stamp < peer.stamp and message.revision <= peer.revision then return false end
-    if message.kind == "H" then
-        if peer.contactStamp and message.stamp <= peer.contactStamp then return false end
-        peer.advertised = message.revision
-        if not peer.fields or message.revision ~= peer.revision then peer.unsynchronized = true; status.resyncNeeded = true end
-        peer.stamp, peer.contactStamp = message.stamp, message.stamp
-        return ContactStatus(self, sender, message, peer) ~= false
-    end
-    if message.kind == "D" then
-        if message.revision == peer.revision then return false end
-        if not peer.fields or peer.unsynchronized or message.base ~= peer.revision then
-            peer.unsynchronized, peer.advertised = true, message.revision
-            peer.stamp, peer.contactStamp, status.resyncNeeded = message.stamp, message.stamp, true
-            ContactStatus(self, sender, message, peer)
-            return false
-        end
-        local merged = CopyStatus(peer.fields)
-        for name, value in pairs(message.fields) do merged[name] = value ~= false and value or nil end
-        peer.fields = merged
     else
-        if message.revision == peer.revision and not SameStatus(message.fields, peer.fields) then return false end
-        if message.revision == peer.revision and not requested and message.stamp <= (peer.contactStamp or -1) then return false end
-        peer.fields = message.fields
+        if message.revision < peer.revision then return false end
+        if message.revision == peer.revision then
+            -- Unknown field IDs also belong to this complete snapshot.
+            if not SameStatus(message.fields, peer.fields) then return false end
+            if message.stamp < peer.stamp or (not requested and message.stamp == peer.stamp) then return false end
+        end
     end
-    peer.revision, peer.advertised, peer.stamp = message.revision, message.revision, message.stamp
-    peer.contactStamp, peer.unsynchronized = message.stamp, false
-    local metadata = ContactStatus(self, sender, message, peer)
+    peer.session, peer.fields = message.session, message.fields
+    peer.revision, peer.stamp = message.revision, message.stamp
+    local metadata = { kind = "full", session = message.session, revision = message.revision,
+        hasBaseline = true, coherent = true, synchronized = true }
     for _, name in ipairs(status.providerNames) do
-        -- Each callback owns its copies. Central revision ordering keeps one
-        -- coherent baseline even if a consumer throws or rejects the sample.
         local provider = status.providers[name]
-        pcall(provider.receive, sender, NamedStatus(peer.fields), message.stamp, message.revision, CopyStatus(metadata))
+        if provider.contact then pcall(provider.contact, sender, message.stamp, CopyStatus(metadata)) end
+    end
+    for _, name in ipairs(status.providerNames) do
+        local provider = status.providers[name]
+        pcall(provider.receive, sender, NamedStatus(message.fields), message.stamp, message.revision, CopyStatus(metadata))
     end
     return true
 end
@@ -286,9 +239,8 @@ local function StatusConnectionChanged(self, connected)
     if status.connected == connected then return end
     if status.timer then status.timer:Cancel(); status.timer = nil end
     status.connected = connected
-    status.received, status.lastBroadcast, status.lastAttemptAt = {}, nil, nil
-    status.current, status.revision, status.broadcastRevision = nil, 0, 0
-    status.forceFull, status.resyncNeeded, status.lastResyncAttemptAt, status.lastTrafficAt = false, false, nil, nil
+    status.received, status.lastAttemptAt, status.lastBroadcastAt = {}, nil, nil
+    status.current, status.revision, status.lastSentRevision = nil, 0, 0
     if connected then
         -- Revisions restart after reconnecting. Peers need a fresh wire session
         -- even when the group and server timestamp are unchanged.
@@ -325,22 +277,17 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     status.providerNames = StatusNames(status.providers)
     if first then
         self:RegisterDataRequest("status", function(sender, payload, budget)
-            if payload ~= "3|S" then
-                local message = DecodeStatus(payload)
-                if not message or message.kind ~= "F" then return nil end
-                ProcessStatus(self, sender, message, true)
-            end
+            local message = DecodeStatus(payload)
+            if not message then return nil end
+            ProcessStatus(self, sender, message, true)
             local fields, revision = CurrentStatus(self)
             if fields == nil then return nil end
-            local response = EncodeStatus(self, "F", fields, revision)
-            -- A recipient of an unpublished full snapshot cannot apply a later
-            -- patch against the older broadcast baseline. Publish a full next.
-            if revision ~= status.broadcastRevision then status.forceFull = true end
+            local response = EncodeStatus(self, fields, revision)
             if response and #response <= budget then return response end
-            -- A reply never marks a changed snapshot as broadcast to all peers.
+            -- Replies do not replace the public snapshot or postpone its refresh.
         end, function(sender, payload)
             local message = DecodeStatus(payload)
-            return message and message.kind == "F" and ProcessStatus(self, sender, message, true) or false
+            return message and ProcessStatus(self, sender, message, true) or false
         end)
         self:RegisterDataFeature("status", function(sender, payload)
             local message = DecodeStatus(payload)
@@ -348,29 +295,6 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
         end, function(connected) StatusConnectionChanged(self, connected) end)
     elseif connectionChanged then pcall(connectionChanged, self:IsDataConnected()) end
     return true
-end
-
-local function NextStatusPacket(self, fields, revision, now)
-    local status = self.dataState.status
-    if status.requestNeeded then
-        return EncodeStatus(self, "F", fields, revision), true, true
-    elseif status.resyncNeeded and (not status.lastResyncAttemptAt or now - status.lastResyncAttemptAt >= STATUS_HEARTBEAT_INTERVAL) then
-        return "3|S", true
-    elseif status.forceFull or revision ~= status.broadcastRevision then
-        if not status.forceFull and status.lastBroadcast then
-            local changed = {}
-            for name, value in pairs(fields) do
-                if status.lastBroadcast[name] ~= value then changed[name] = value end
-            end
-            for name in pairs(status.lastBroadcast) do if fields[name] == nil then changed[name] = false end end
-            if next(changed) then
-                return EncodeStatus(self, "D", changed, revision, status.broadcastRevision), false, true
-            end
-        end
-        return EncodeStatus(self, "F", fields, revision), false, true
-    elseif status.lastTrafficAt and now - status.lastTrafficAt >= STATUS_HEARTBEAT_INTERVAL then
-        return EncodeStatus(self, "H", nil, status.broadcastRevision)
-    end
 end
 
 function addon:DataStatusTick()
@@ -385,23 +309,15 @@ function addon:DataStatusTick()
     if status.lastAttemptAt and now - status.lastAttemptAt < STATUS_INTERVAL then ScheduleStatus(self); return false end
     local fields, revision = CurrentStatus(self)
     local sent = false
-    if fields ~= nil and self:IsDataConnected() then
-        local payload, request, broadcast = NextStatusPacket(self, fields, revision, now)
+    if fields ~= nil and self:IsDataConnected() and (status.requestNeeded or revision ~= status.lastSentRevision
+        or (status.lastBroadcastAt and now - status.lastBroadcastAt >= STATUS_REFRESH_INTERVAL)) then
+        local payload = EncodeStatus(self, fields, revision)
         if payload then
             status.lastAttemptAt = now
-            if payload == "3|S" then
-                status.resyncNeeded, status.lastResyncAttemptAt = false, now
-            end
-            if request then sent = self:RequestData("status", payload)
+            if status.requestNeeded then sent = self:RequestData("status", payload)
             else sent = self:SendData("status", payload) end
             if sent then
-                if broadcast then
-                    status.requestNeeded, status.lastBroadcast, status.broadcastRevision = false, fields, revision
-                    status.forceFull = false
-                end
-                if payload ~= "3|S" then status.lastTrafficAt = now end
-            elseif payload == "3|S" then
-                status.resyncNeeded = true
+                status.requestNeeded, status.lastSentRevision, status.lastBroadcastAt = false, revision, now
             end
         end
     end

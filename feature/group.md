@@ -16,7 +16,7 @@ Switching pauses sharing and leaves both old channels before joining the saved g
 
 [Player overview](overview.md) and [position sharing](position-sharing.md) share an automatically reconnecting data connection, separate from human chat. It remains available when chat autojoin or position sharing is off. `/lit status` shows its connection state.
 
-The connection carries extensible player status: level, XP, party availability and the position-sharing preference. Changed fields are combined into updates at most every five seconds, with full snapshots on connection or recovery. A small heartbeat after thirty seconds without a status update maintains presence without resending player details. Missed changes trigger snapshot recovery. Position updates keep their own timing.
+The connection carries player status: level, XP, party availability and the position-sharing preference. Every five seconds it checks for changes and sends the complete current status when needed. A full refresh after thirty seconds without a status broadcast maintains presence; connecting also exchanges initial snapshots. Each report is independent, so a later report replaces a missed one without recovery requests. Position updates keep their own timing.
 
 ## Limits
 

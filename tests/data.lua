@@ -1119,14 +1119,6 @@ local function full(session, stamp, revision, body)
     return "3|F|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. body
 end
 
-local function delta(session, stamp, revision, base, body)
-    return "3|D|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. base .. "|" .. body
-end
-
-local function heartbeat(session, stamp, revision)
-    return "3|H|" .. session .. "|" .. stamp .. "|" .. revision
-end
-
 local function receive(current, sender, payload)
     return current:ReceiveData(sender, "1|status|" .. payload)
 end
@@ -1207,53 +1199,52 @@ for _, phase in ipairs({ "collect", "contact", "sample", "connection" }) do
     else assert(table.concat(seen[phase], ",") == "alpha,middle,zeta") end
 end
 
--- A failed initial snapshot remains a full join request even when a remote gap
--- and newer local data appear before the retry. Recovery follows on the next tick.
+-- A failed initial snapshot retries the latest full join request. Receiving a
+-- remote snapshot with an arbitrary revision needs no recovery traffic.
 do
     local values = { xp = 1 }
     local current, clock = statusFixture(values, false)
-    assert(receive(current, "Friend", heartbeat("peer", 2000000000, 2)))
+    assert(receive(current, "Friend", full("peer", 2000000000, 20, "2=99")))
     values.xp, clock.sendResult = 2, 0
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].message:match("^1|Q|status|[^|]+|3|F|[^|]+|2000000005|2|2=2$"),
-        "The latest full join snapshot takes priority over remote resync")
+        "The initial request retries with current values")
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|Q|status|[^|]+|3|S$"),
-        "Publishing the join snapshot must not lose the outstanding remote recovery request")
+    assert(#clock.sent == 2, "An accepted full snapshot needs no recovery request")
 end
 
--- A changed sample due at the heartbeat boundary publishes its delta instead.
+-- A change at the refresh boundary produces one complete snapshot and starts
+-- the next refresh interval from that successful public broadcast.
 do
-    local values = { xp = 1 }
+    local values = { level = 24, xp = 1 }
     local _, clock = statusFixture(values)
     clock:advance(25)
     values.xp = 2
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|D|[^|]+|2000000030|2|1|2=2$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|F|[^|]+|2000000030|2|1=24|2=2$"))
     clock:advance(25)
-    assert(#clock.sent == 2, "An accepted change restarts the idle heartbeat interval")
+    assert(#clock.sent == 2, "An accepted change restarts the refresh interval")
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|3|H|[^|]+|2000000060|2$"))
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|3|F|[^|]+|2000000060|2|1=24|2=2$"))
 end
 
--- Rejected deltas never advance the accepted baseline. Retry only the latest
--- sample; returning to that baseline still needs a full with the new revision.
+-- Rejected sends never count as successful broadcasts. Retry the latest whole
+-- sample, including when it has returned to the previously broadcast values.
 for _, latest in ipairs({ 3, 1 }) do
     local values = { xp = 1 }
     local _, clock = statusFixture(values)
     values.xp, clock.sendResult = 2, 11
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("|3|D|[^|]+|2000000005|2|1|2=2$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|3|F|[^|]+|2000000005|2|2=2$"))
     values.xp, clock.sendResult = latest, 0
     clock:advance(5)
-    local expected = latest == 1 and "|3|F|[^|]+|2000000010|3|2=1$"
-        or "|3|D|[^|]+|2000000010|3|1|2=3$"
+    local expected = "|3|F|[^|]+|2000000010|3|2=" .. latest .. "$"
     assert(#clock.sent == 3 and clock.sent[3].message:match(expected),
-        "Retries use the accepted baseline and current values, including the empty-delta full fallback")
+        "Retries publish current values without any dependency on earlier packets")
     clock:advance(25)
     assert(#clock.sent == 3, "A successfully retried sample clears unpublished state")
     clock:advance(5)
-    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|3|H|[^|]+|2000000040|3$"))
+    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|3|F|[^|]+|2000000040|3|2=" .. latest .. "$"))
 end
 
 -- These IDs are permanent protocol assignments. Collectors and consumers retain
@@ -1282,34 +1273,33 @@ do
     assert(#clock.sent == 1)
 end
 
--- Unknown IDs stay in the wire baseline for comparisons and delta revisions,
--- but never leak to named consumers. Their addition/removal must not cause a
--- needless resync or make a matching same-revision full snapshot inconsistent.
+-- Unknown numeric IDs never leak to named consumers, but still participate in
+-- same-revision consistency. Newer complete snapshots replace all prior fields.
 do
     local current, clock, samples, _, contacts = statusFixture({ level = 24 })
     local function sample(revision, expected)
         local received = samples[#samples]
         assert(received.sequence == revision and equal(received.fields, expected))
-        assert(contacts[#contacts].metadata.synchronized and not current.dataState.status.resyncNeeded)
+        assert(contacts[#contacts].metadata.synchronized)
     end
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|9=future|65535=edge")))
     sample(1, { level = "25" })
-    assert(receive(current, "Friend", delta("peer", 2000000001, 2, 1, "9=changed|10=")))
-    sample(2, { level = "25" })
-    assert(receive(current, "Friend", full("peer", 2000000002, 2, "1=25|9=changed|10=|65535=edge")))
-    sample(2, { level = "25" })
-    assert(receive(current, "Friend", delta("peer", 2000000003, 3, 2, "2=10")))
-    sample(3, { level = "25", xp = "10" })
-    assert(receive(current, "Friend", delta("peer", 2000000004, 4, 3, "9|10|65535")))
-    sample(4, { level = "25", xp = "10" })
-    assert(receive(current, "Friend", full("peer", 2000000005, 4, "1=25|2=10")))
-    sample(4, { level = "25", xp = "10" })
+    assert(receive(current, "Friend", full("peer", 2000000001, 5, "1=25|9=changed|10=|65535=edge")))
+    sample(5, { level = "25" })
+    assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25|9=conflict|10=|65535=edge")))
+    assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25")))
+    assert(receive(current, "Friend", full("peer", 2000000002, 5, "1=25|9=changed|10=|65535=edge")))
+    sample(5, { level = "25" })
+    assert(receive(current, "Friend", full("peer", 2000000003, 8, "1=25|2=10")))
+    sample(8, { level = "25", xp = "10" })
+    assert(receive(current, "Friend", full("peer", 2000000004, 9, "2=10")))
+    sample(9, { xp = "10" })
     clock:advance(5)
-    assert(#clock.sent == 1, "Unknown-only changes must not schedule recovery requests")
+    assert(#clock.sent == 1, "Remote changes must not schedule recovery requests")
 end
 
--- One shared five-second scheduler broadcasts only changes. Idle presence is a
--- short heartbeat carrying the sender session/revision, without repeating fields.
+-- One shared five-second scheduler sends complete changes and periodic complete
+-- refreshes. Targeted replies cannot mark an unpublished local change as public.
 do
     local values = { xpState = "known", xpMax = 100, xp = 10, level = 24 }
     local current, clock, samples, connections = statusFixture(values)
@@ -1320,17 +1310,19 @@ do
     clock:advance(25)
     assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 2, "One membership check and one shared status timer")
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].at == 30 and clock.sent[2].message:match("^1|status|3|H|[^|]+|2000000030|1$"))
+    assert(#clock.sent == 2 and clock.sent[2].at == 30
+        and clock.sent[2].message:match("^1|status|3|F|[^|]+|2000000030|1|1=24|2=10|3=100|4=known$"))
     values.xp = 20
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("|3|D|[^|]+|2000000035|2|1|2=20$"),
-        "A changed field omits identical level and XP capacity")
+    assert(#clock.sent == 3 and clock.sent[3].message:match("|3|F|[^|]+|2000000035|2|1=24|2=20|3=100|4=known$"),
+        "A changed field sends the complete independently usable status")
     values.xp = 21
     clock:advance(1)
     assert(not current:DataStatusTick() and #clock.sent == 3)
     values.xp = 29
     clock:advance(4)
-    assert(#clock.sent == 4 and clock.sent[4].at == 40 and clock.sent[4].message:match("|3|2|2=29$"))
+    assert(#clock.sent == 4 and clock.sent[4].at == 40
+        and clock.sent[4].message:match("|3|F|[^|]+|2000000040|3|1=24|2=29|3=100|4=known$"))
     values.xp = 30
     assert(current:ReceiveData("Friend", "1|Q|status|joined|" .. full("friend-1", 2000000040, 1,
         "1=25|2=5|3=200|4=known")))
@@ -1341,11 +1333,12 @@ do
     clock:advance(5)
     assert(#clock.sent == 6 and clock.sent[6].message:match("^1|status|3|F|")
         and clock.sent[6].message:find("2=30", 1, true),
-        "An unpublished requested snapshot forces a coherent full broadcast without clearing dirty state")
+        "A targeted reply does not consume the public change")
     clock:advance(25)
     assert(#clock.sent == 6)
     clock:advance(5)
-    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|3|H|"))
+    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|3|F|")
+        and clock.sent[7].message:find("1=24|2=30|3=100|4=known", 1, true))
 end
 
 -- A temporary value shared in a requested reply must be corrected even if it
@@ -1354,7 +1347,7 @@ do
     local values = { xp = 1 }
     local current, clock = statusFixture(values)
     values.xp = 2
-    assert(current:ReceiveData("Friend", "1|Q|status|temporary|3|S"))
+    assert(current:ReceiveData("Friend", "1|Q|status|temporary|" .. full("peer", 2000000000, 1, "1=25")))
     assert(clock.sent[2].message:find("2=2", 1, true))
     values.xp = 1
     clock:advance(5)
@@ -1362,8 +1355,8 @@ do
         and clock.sent[3].message:match("|3|2=1$"))
 end
 
--- Full and delta messages dispatch complete independent merged tables. Missing
--- values are explicit deletion markers, distinct from a real empty string.
+-- Complete snapshots dispatch independent tables. Omitted fields disappear;
+-- an explicitly empty string remains a real value.
 do
     local current, clock, samples, _, contacts = statusFixture({ level = 24 })
     local second = {}
@@ -1380,9 +1373,9 @@ do
     assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, true))
     assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, nil, true))
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|D|")
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|F|")
         and clock.sent[2].message:find("4=a%7Cb%3Dc%25|8=true", 1, true)
-        and not clock.sent[2].message:find("1=", 1, true))
+        and clock.sent[2].message:find("1=24", 1, true))
     assert(clock:activeTimers() == 2 and current.dataState.features.status and current.dataState.requests.status
         and not current.dataState.features.player and not current.dataState.features.future)
     local initial = full("friend-1", 2000000005, 10, "1=25|4=future%7Cvalue|3=|6=old")
@@ -1393,14 +1386,15 @@ do
     assert(not receive(current, "FRIEND-Test Realm", initial))
     assert(not receive(current, "Friend", full("friend-1", 2000000004, 9, "1=26")))
     assert(not receive(current, "Self-TestRealm", initial))
-    assert(receive(current, "Friend", delta("friend-1", 2000000006, 11, 10, "2=20|6")))
+    assert(receive(current, "Friend", full("friend-1", 2000000006, 11, "1=25|2=20|4=future%7Cvalue")))
     assert(#samples == 2 and samples[2].fields.level == "25" and samples[2].fields.xp == "20"
         and samples[2].fields.xpState == "future|value" and samples[2].fields.canInvite == nil
-        and samples[2].metadata.kind == "delta" and samples[2].metadata.coherent)
-    assert(receive(current, "Friend", heartbeat("friend-1", 2000000036, 11)))
-    assert(#samples == 2 and #contacts == 3 and contacts[3].metadata.kind == "heartbeat",
-        "Heartbeats refresh contact only, never the age of a sampled XP value")
-    assert(not receive(current, "Friend", heartbeat("friend-1", 2000000036, 11)))
+        and samples[2].fields.xpMax == nil and samples[2].metadata.kind == "full" and samples[2].metadata.coherent)
+    assert(receive(current, "Friend", full("friend-1", 2000000036, 11, "1=25|2=20|4=future%7Cvalue")))
+    assert(#samples == 3 and #contacts == 3 and contacts[3].metadata.kind == "full"
+        and samples[3].metadata.hasBaseline and samples[3].metadata.synchronized,
+        "A complete refresh delivers current values and refreshes presence")
+    assert(not receive(current, "Friend", full("friend-1", 2000000036, 11, "1=25|2=20|4=future%7Cvalue")))
     local attempts, healthy = 0, 0
     assert(current:RegisterDataStatusProvider("declining", function() error("Collector failed") end,
         function() attempts = attempts + 1; return false end))
@@ -1409,48 +1403,40 @@ do
     assert(current:RegisterDataStatusProvider("healthy", function() return { canInvite = 1 } end,
         function() healthy = healthy + 1 end))
     assert(receive(current, "Other", full("other-1", 2000000005, 1, "1=99")))
-    assert(receive(current, "Other", delta("other-1", 2000000006, 2, 1, "1=26")))
+    assert(receive(current, "Other", full("other-1", 2000000006, 2, "1=26")))
     assert(attempts == 2 and healthy == 2, "Failed and declining callbacks cannot stop other consumers")
     clock:advance(5)
     assert(clock.sent[#clock.sent].message:find("6=1", 1, true))
 end
 
--- Detect lost or out-of-order patches and changes of sender session. Resync
--- requests contain no repeated self snapshot and are rate limited globally.
+-- Every complete packet is usable across revision gaps. Revisions order one
+-- session; timestamps also order its refreshes and changes of session.
 do
     local values = { xp = 1 }
     local current, clock, samples, _, contacts = statusFixture(values)
     assert(receive(current, "Friend", full("friend-1", 2000000000, 1, "1=24|2=10")))
-    assert(not receive(current, "Friend", delta("friend-1", 2000000005, 3, 2, "2=30")))
-    assert(#samples == 1 and #contacts == 2 and not contacts[2].metadata.synchronized)
-    values.xp = 2
-    clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("^1|Q|status|[^|]+|3|S$"),
-        "Continuous local changes cannot starve a remote baseline resync")
-    local requestID = clock.sent[#clock.sent].message:match("^1|Q|status|([^|]+)|3|S$")
-    assert(current:ReceiveData("Friend", "1|R|status|" .. requestID .. "|self-testrealm|"
-        .. full("friend-1", 2000000005, 3, "1=24|2=30")))
-    assert(#samples == 2 and samples[2].fields.xp == "30" and samples[2].metadata.synchronized)
-    clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("^1|status|3|D|")
-        and clock.sent[#clock.sent].message:match("2=2$"))
-    assert(not receive(current, "Friend", delta("friend-1", 2000000001, 2, 1, "2=20")))
-    assert(receive(current, "Friend", heartbeat("friend-1", 2000000030, 4)))
-    assert(not contacts[#contacts].metadata.synchronized and #samples == 2)
-    clock:advance(20)
-    local before = #clock.sent
-    clock:advance(5)
-    assert(#clock.sent == before + 1 and clock.sent[#clock.sent].message:match("|3|S$"))
-    assert(receive(current, "Friend", full("friend-1", 2000000035, 4, "1=24|2=40")))
-    assert(receive(current, "Friend", heartbeat("friend-2", 2000000035, 1)),
-        "A new session may have a heartbeat in the same server second")
-    assert(not contacts[#contacts].metadata.hasBaseline and not contacts[#contacts].metadata.synchronized)
-    assert(not receive(current, "Friend", full("friend-1", 2000000040, 5, "1=99")),
+    assert(receive(current, "Friend", full("friend-1", 2000000005, 30, "1=24|2=30")))
+    assert(#samples == 2 and #contacts == 2 and contacts[2].metadata.synchronized
+        and samples[2].fields.xp == "30", "No earlier revision is needed for a complete snapshot")
+    assert(not receive(current, "Friend", full("friend-1", 2000000006, 29, "1=24|2=29")))
+    assert(not receive(current, "Friend", full("friend-1", 2000000004, 30, "1=24|2=30")))
+    assert(not receive(current, "Friend", full("friend-1", 2000000006, 30, "1=24|2=99")))
+    assert(not receive(current, "Friend", full("friend-1", 2000000005, 30, "1=24|2=30")))
+    assert(#samples == 2 and #contacts == 2, "Rejected packets cannot refresh presence or alter current values")
+    assert(receive(current, "Friend", full("friend-1", 2000000006, 30, "1=24|2=30")))
+    assert(receive(current, "Friend", full("friend-1", 2000000005, 31, "1=24|2=31")),
+        "A newer revision retains precedence over timestamp ordering within one session")
+    assert(receive(current, "Friend", full("friend-2", 2000000006, 1, "1=25|2=0")),
+        "A reconnect may restart revisions in the same server second under a fresh session")
+    assert(not receive(current, "Friend", full("friend-1", 2000000040, 31, "1=99")),
         "A retired sender session cannot overwrite the replacement")
-    assert(receive(current, "Friend", full("friend-2", 2000000035, 1, "1=25|2=0")))
-    assert(samples[#samples].fields.xp == "0" and samples[#samples].metadata.synchronized)
-    assert(not receive(current, "Unknown", delta("unknown-1", 2000000040, 2, 1, "2=99")))
-    assert(not contacts[#contacts].metadata.hasBaseline)
+    assert(not receive(current, "Friend", full("old-session", 2000000005, 99, "1=99")))
+    assert(samples[#samples].fields.xp == "0" and samples[#samples].metadata.session == "friend-2")
+    assert(receive(current, "Unknown", full("unknown-1", 2000000006, 9999, "2=99")))
+    assert(samples[#samples].fields.xp == "99" and samples[#samples].metadata.synchronized,
+        "A new peer can start at any complete revision")
+    clock:advance(5)
+    assert(#clock.sent == 1, "Receiving status never schedules a standalone recovery request")
 end
 
 -- A group switch requested during delivery blocks new work immediately while
@@ -1466,7 +1452,7 @@ do
             assert(current:SetGroupSecret("switch-after-delivery"))
             assert(current:IsGroupSwitching() and current:GetGroupDataChannelName() == oldName)
             assert(not receive(current, sender, full("old-peer", 2000000001, 2, "1=stale")))
-            assert(not current:RequestData("status", "3|S") and #clock.sent == 1)
+            assert(not current:RequestData("status", full("local", 2000000000, 1, "1=24")) and #clock.sent == 1)
             finished = true
         end))
     assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
@@ -1475,36 +1461,40 @@ do
         "No new group is activated inside the old group's callback")
     clock:advance(0)
     assert(not current:IsGroupSwitching() and current:GetGroupDataChannelName() ~= oldName
-        and next(current.dataState.status.received) == nil, "Deferred cleanup discards old peer baselines")
+        and next(current.dataState.status.received) == nil, "Deferred cleanup discards old peer snapshots")
 end
 
--- Logically targeted replies do not postpone the public heartbeat needed by
+-- Logically targeted replies do not postpone the public refresh needed by
 -- other peers. Switching to read-only settings stops this scheduler as well.
 do
     local current, clock = statusFixture({ level = 24 })
     clock:advance(10)
-    assert(current:ReceiveData("Friend", "1|Q|status|first|3|S"))
+    assert(current:ReceiveData("Friend", "1|Q|status|first|" .. full("peer", 2000000010, 1, "1=25")))
     clock:advance(10)
-    assert(current:ReceiveData("Friend", "1|Q|status|second|3|S"))
+    assert(current:ReceiveData("Friend", "1|Q|status|second|" .. full("peer", 2000000020, 1, "1=25")))
     clock:advance(10)
-    assert(clock.sent[#clock.sent].message:match("^1|status|3|H|"))
+    assert(clock.sent[#clock.sent].message:match("^1|status|3|F|[^|]+|2000000030|1|1=24$"))
     current.savedDataReadOnly = true
     local sent = #clock.sent
     clock:advance(60)
     assert(#clock.sent == sent and clock:activeTimers() == 0 and not current.dataState.status.connected)
 end
 
--- A full reply may be ahead of a patch's target revision; an already obsolete
--- delta is ignored without invalidating a newer coherent full baseline.
+-- Initial responses may repeat the current sample in the same server second;
+-- this exception never permits conflicting values at an existing revision.
 do
     local current, clock, samples, _, contacts = statusFixture({ xp = 1 })
-    assert(receive(current, "Friend", full("friend-1", 2000000000, 4, "2=40")))
-    assert(not receive(current, "Friend", delta("friend-1", 2000000000, 3, 2, "2=30")))
-    assert(#samples == 1 and #contacts == 1 and not current.dataState.status.resyncNeeded)
-    clock:advance(5)
-    assert(#clock.sent == 1)
-    assert(receive(current, "Friend", delta("friend-1", 2000000005, 5, 4, "2=50")))
-    assert(samples[2].fields.xp == "50")
+    local requestID = assert(clock.sent[1].message:match("^1|Q|status|([^|]+)|"))
+    local snapshot = full("friend-1", 2000000000, 4, "2=40")
+    assert(receive(current, "Friend", snapshot))
+    assert(current:ReceiveData("Friend", "1|R|status|" .. requestID .. "|self-testrealm|" .. snapshot))
+    assert(#samples == 2 and #contacts == 2 and samples[2].fields.xp == "40")
+    assert(receive(current, "Other", full("other-1", 2000000000, 4, "2=40")))
+    assert(not current:ReceiveData("Other", "1|R|status|" .. requestID .. "|self-testrealm|"
+        .. full("other-1", 2000000000, 4, "2=99")),
+        "A solicited response cannot change values at the same revision")
+    assert(not receive(current, "Friend", full("friend-1", 2000000001, 4, "2=99")))
+    assert(samples[2].fields.xp == "40")
 end
 
 -- Decode every field before dispatch. Invalid frames cannot partially merge or
@@ -1516,6 +1506,7 @@ do
         "1|2000000000|1|level=25", "2|F|peer|2000000000|1|level=25",
         "2|F|peer|2000000000|1|1=25", "4|F|peer|2000000000|1|1=25",
         "2|D|peer|2000000000|2|1|1=25", "2|H|peer|2000000000|1", "2|S",
+        "3|D|peer|2000000000|2|1|1=25", "3|H|peer|2000000000|1", "3|S",
         "3|F|peer|10000000000|1|1=25", "3|F|peer|0200000000|1|1=25",
         "3|F|peer|2000000000|0|1=25", "3|F|peer|2000000000|1000000000|1=25",
         "3|F|peer|2000000000|01|1=25", "3|F||2000000000|1|1=25",
@@ -1531,16 +1522,9 @@ do
         "3|F|peer|2000000000|1|9=first|9=second",
         "3|F|peer|2000000000|1|1=%", "3|F|peer|2000000000|1|1=%GG",
         "3|F|peer|2000000000|1|1=%0A", "3|F|peer|2000000000|1|1=bad\nvalue",
-        "3|F|peer|2000000000|1|1=%7F", "3|H|peer|2000000000|1|extra=bad",
-        "3|D|peer|2000000000|2|2|1=25", "3|D|peer|2000000000|2|0|1=25",
-        "3|D|peer|2000000000|2|1|", "3|D|peer|2000000000|2|1|1|1=25",
-        "3|D|peer|2000000000|2|1|9|9=25", "3|D|peer|2000000000|2|1|9|9",
-        "3|D|peer|2000000000|2|1|0", "3|D|peer|2000000000|2|1|01",
-        "3|D|peer|2000000000|2|1|65536",
+        "3|F|peer|2000000000|1|1=%7F",
         "3|F|peer\n|2000000000|1|1=25", "3|F|peer|2000000000\n|1|1=25",
         "3|F|peer|2000000000|1\n|1=25", "3|F|peer|2000000000|1|1\n=25",
-        "3|D|peer|2000000000|2|1\n|1=25", "3|D|peer|2000000000|2|1|1\n",
-        "3|H|peer|2000000000|1\n",
     }) do
         assert(not receive(current, "Friend", payload), payload)
         assert(not current:ReceiveData("Friend", "1|Q|status|direct-" .. index .. "|" .. payload), payload)
@@ -1552,12 +1536,12 @@ do
     clock:incoming("1|status|" .. full("peer", 2000000000, 1, "1=25"), "Friend")
     assert(#samples == 1)
     for _, body in ipairs({ "2=20|9=%GG", "2=20|0=x", "2=20|65536=x", "2=20|9|9=bad" }) do
-        assert(not receive(current, "Friend", delta("malformed-session", 9999999999, 999999999, 1, body)))
-        clock:incoming("1|status|" .. delta("malformed-session", 9999999999, 999999999, 1, body), "Friend")
-        assert(#samples == 1 and not current.dataState.status.resyncNeeded,
+        assert(not receive(current, "Friend", full("malformed-session", 9999999999, 999999999, body)))
+        clock:incoming("1|status|" .. full("malformed-session", 9999999999, 999999999, body), "Friend")
+        assert(#samples == 1,
             "Malformed later IDs cannot partially dispatch or poison sender ordering")
     end
-    clock:incoming("1|status|" .. delta("peer", 2000000005, 2, 1, "2=20"), "Friend")
+    clock:incoming("1|status|" .. full("peer", 2000000005, 2, "1=25|2=20"), "Friend")
     assert(#samples == 2 and samples[2].fields.level == "25" and samples[2].fields.xp == "20")
 end
 
@@ -1567,14 +1551,15 @@ do
     local values = { xpState = "x" }
     local current, clock = statusFixture(values)
     local sender, requestID = "Friend-TestRealm", string.rep("r", 32)
-    assert(current:ReceiveData(sender, "1|Q|status|" .. requestID .. "|3|S"))
+    local request = full("peer", 2000000000, 1, "1=25")
+    assert(current:ReceiveData(sender, "1|Q|status|" .. requestID .. "|" .. request))
     local response = clock.sent[#clock.sent].message
     values.xpState = string.rep("x", 256 - #response)
-    assert(current:ReceiveData(sender, "1|Q|status|" .. string.rep("s", 32) .. "|3|S"))
+    assert(current:ReceiveData(sender, "1|Q|status|" .. string.rep("s", 32) .. "|" .. request))
     assert(#clock.sent[#clock.sent].message == 255)
     local sent = #clock.sent
     values.xpState = values.xpState .. "x"
-    assert(not current:ReceiveData(sender, "1|Q|status|" .. string.rep("t", 32) .. "|3|S"))
+    assert(not current:ReceiveData(sender, "1|Q|status|" .. string.rep("t", 32) .. "|" .. request))
     assert(#clock.sent == sent)
     values.xpState = string.rep("x", 250)
     clock:advance(5)
@@ -1585,7 +1570,7 @@ do
 end
 
 -- A provider with no initial sample stays quiet. Once it had a sample, becoming
--- unavailable explicitly removes its old fields instead of retaining stale data.
+-- unavailable sends an empty complete snapshot instead of retaining stale data.
 do
     local current, clock = newAddon()
     local values, marker = nil, {}
@@ -1603,11 +1588,11 @@ do
     assert(#clock.sent == 1 and clock.sent[1].message:find("4=false", 1, true))
     values = nil
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("|2|1|4$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|3|F|[^|]+|%d+|2|$"))
 end
 
--- Send failures retain the latest unpublished state, and a failed resync is
--- retried at the bounded 30-second cadence despite repeated incoming gaps.
+-- Initial failures retry at the five-second cadence; reconnecting resets peer
+-- state and starts a fresh join request. Logout cancels all scheduled work.
 do
     local values = { xp = 1 }
     local current, clock, _, connections = statusFixture(values, false)
@@ -1624,24 +1609,27 @@ do
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=7")))
     clock:disconnect(); clock:connect()
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=8")))
-    clock.sendResult = 11
-    assert(receive(current, "Friend", heartbeat("peer", 2000000005, 2)))
-    clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("|3|S$"))
-    local function resyncs()
-        local total = 0
-        for _, packet in ipairs(clock.sent) do if packet.message:match("|3|S$") then total = total + 1 end end
-        return total
-    end
-    local requests = resyncs()
-    clock:advance(25)
-    assert(resyncs() == requests)
-    clock:advance(5)
-    assert(resyncs() == requests + 1 and clock.sent[#clock.sent].message:match("|3|S$"))
     clock:fire("PLAYER_LOGOUT")
     local sent = #clock.sent
     clock:advance(60)
     assert(#clock.sent == sent and clock:activeTimers() == 0)
+end
+
+-- A rejected periodic refresh does not restart the successful refresh clock.
+-- Its retry publishes current values, rather than replaying the failed packet.
+do
+    local values = { level = 24, xp = 1 }
+    local _, clock = statusFixture(values)
+    clock.sendResult = 11
+    clock:advance(30)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|3|F|[^|]+|2000000030|1|1=24|2=1$"))
+    values.xp, clock.sendResult = 2, 0
+    clock:advance(5)
+    assert(#clock.sent == 3 and clock.sent[3].message:match("|3|F|[^|]+|2000000035|2|1=24|2=2$"))
+    clock:advance(25)
+    assert(#clock.sent == 3)
+    clock:advance(5)
+    assert(#clock.sent == 4 and clock.sent[4].message:match("|3|F|[^|]+|2000000065|2|1=24|2=2$"))
 end
 
 -- Reconnecting after a coordinated switch starts a distinct full status session.
@@ -1652,7 +1640,7 @@ do
     assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
     values.xp = 20
     clock:advance(5)
-    assert(clock.nativeSends[2].message:match("|3|D|"))
+    assert(clock.nativeSends[2].message:match("|3|F|"))
     assert(current:SetGroupSecret("fresh-status-group"))
     clock:advance(0)
     assert(next(current.dataState.status.received) == nil and not current:IsDataConnected())
@@ -1689,8 +1677,8 @@ do
     assert(total == sent + 1 and learned[2]["Alice-TestRealm"] == "100" and learned[3]["Alice-TestRealm"] == "100")
 end
 
--- Real roster fields share the native status snapshot; idle activity heartbeats
--- preserve presence without repeating player metadata or refreshing XP samples.
+-- Real roster fields share complete native status snapshots; periodic refreshes
+-- preserve presence without resetting the age of an unchanged XP sample.
 do
     local bus = newRequestBus()
     for index, client in ipairs(bus.clients) do
@@ -1721,13 +1709,12 @@ do
         end
     end
     local function counts(client)
-        local changes, heartbeats = 0, 0
+        local snapshots = 0
         for _, packet in ipairs(client.world.nativeSends) do
             assert(#packet.message <= 255 and not packet.message:match("^1|[QR]?|?roster|"))
-            if packet.message:match("^1|status|3|[FD]|") then changes = changes + 1 end
-            if packet.message:match("^1|status|3|H|") then heartbeats = heartbeats + 1 end
+            if packet.message:match("^1|status|3|F|") then snapshots = snapshots + 1 end
         end
-        return changes, heartbeats
+        return snapshots
     end
     assert(counts(alice) == 0)
     assert(alice.addon:RegisterDataStatusProvider("activity", function() return {} end, function() end))
@@ -1739,8 +1726,7 @@ do
     assert(counts(alice) == 1 and player(bob, "Alice").xp == 420 and not alice.addon.dataState.features.activity)
     local xpStamp = player(bob, "Alice").xpUpdatedAt
     alice.world:advance(30); bus:pump()
-    local changes, heartbeats = counts(alice)
-    assert(changes == 1 and heartbeats == 1 and not player(bob, "Alice").xpStale
+    assert(counts(alice) == 2 and not player(bob, "Alice").xpStale
         and player(bob, "Alice").xpUpdatedAt == xpStamp)
     alice.world.level, alice.world.xp, alice.world.xpMax = 25, 0, 1200
     alice.world:fire("PLAYER_LEVEL_UP", 25)
@@ -1750,7 +1736,7 @@ do
         "Level and XP wait for the same coherent shared status update")
     alice.world:advance(5); bus:pump()
     assert(player(bob, "Alice").level == 25 and player(bob, "Alice").xp == 0
-        and player(bob, "Alice").xpMax == 1200 and counts(alice) == 2)
+        and player(bob, "Alice").xpMax == 1200 and counts(alice) == 3)
     alice.world:disconnect()
     assert(player(alice, "Bob").xpStale)
     alice.world:connect()

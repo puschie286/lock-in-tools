@@ -31,7 +31,7 @@ do
             "CHANNEL", name .. "-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     end
     overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
-        "1|status|3|D|peer-alpha|" .. now .. "|2|1|65000=value|2=420|3=1000|4=known",
+        "1|status|3|F|peer-alpha|" .. now .. "|2|1=21|2=420|3=1000|4=known|5=false|6=true|7=false|8=true|65000=value",
         "CHANNEL", "Alpha-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     local positions = {
         ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,

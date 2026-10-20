@@ -120,10 +120,9 @@ local function newAddon(saved, readOnly, name)
     function addon:RegisterDataFeature(feature, receive, connected)
         error("Roster must not register separate feature messages")
     end
-    function addon:RegisterDataStatusProvider(name, collect, receive, connected, contact)
+    function addon:RegisterDataStatusProvider(name, collect, receive, connected)
         assert(name == "player", "All player metadata must share the generic status transport")
-        assert(type(contact) == "function", "Shared heartbeats drive roster contact")
-        world.collectStatus, world.receiveStatus, world.statusConnected, world.contactStatus = collect, receive, connected, contact
+        world.collectStatus, world.receiveStatus, world.statusConnected = collect, receive, connected
         return true
     end
     function addon:RegisterDataRequest(feature, request, response)
@@ -187,9 +186,6 @@ local function newAddon(saved, readOnly, name)
         local decoded = {}
         for key, value in pairs(fields) do decoded[key] = tostring(value) end
         return self.receiveStatus(name, decoded, stamp or self.epoch + math.floor(self.now), sequence or 1, metadata)
-    end
-    function world:contact(name, metadata)
-        return self.contactStatus(name, self.epoch + math.floor(self.now), metadata or { kind = "heartbeat", coherent = true })
     end
     function world:find(id)
         for _, row in ipairs(addon:GetOverviewPlayers()) do if row.id == id then return row end end
@@ -371,7 +367,7 @@ do
     addon:OnRosterLogout()
     local sent, requests = #world.sent, #world.requests
     world:advance(100)
-    assert(world.collectStatus() == nil and not world:contact("Friend-TestRealm"))
+    assert(world.collectStatus() == nil and not world:peer("Friend-TestRealm", 31, true, true, false, false))
     assert(#world.sent == sent and #world.requests == requests, "Logout stops presence and discovery")
     local saved = copy(addon.db)
     saved.schemaVersion = 999
@@ -386,7 +382,7 @@ do
     assert(not guarded:PerformOverviewAction("other-testrealm", "invite"))
 end
 
--- XP remains session-only and unchanged XP stays current while shared heartbeats continue.
+-- XP remains session-only and unchanged XP stays current while full refreshes continue.
 do
     local addon, world = newAddon()
     assert(world.collectStatus() == nil, "Status collection waits for an active player lifecycle")
@@ -414,7 +410,7 @@ do
         "Missing party flags from an older status snapshot cannot invent eligibility")
     for index = 1, 5 do
         world:advance(30)
-        assert(world:contact("Friend-TestRealm"))
+        assert(world:status("Friend-TestRealm", { level = 31, xp = 125, xpMax = 500, xpState = "known" }))
         friend = world:find("friend-testrealm")
         assert(friend.xp == 125 and friend.xpUpdatedAt == world.epoch and not friend.xpStale,
             "Unchanged XP stays valid while presence continues, regardless of sample age")
@@ -441,7 +437,7 @@ do
         "Group changes clear all session progress")
 end
 
--- Full snapshots establish a sample; merged deltas and heartbeats preserve its age until XP changes.
+-- Full refreshes preserve XP age until progress changes, the sender restarts or contact resumes.
 do
     local addon, world = newAddon()
     world:login(); world:connect()
@@ -450,46 +446,43 @@ do
     assert(world:status("Friend-TestRealm", fields, nil, 1, { kind = "full", session = "first", coherent = true }))
     world:advance(5)
     fields.inParty, fields.sharing = true, true
-    assert(world:status("Friend-TestRealm", fields, nil, 2, { kind = "delta", session = "first", coherent = true }))
+    assert(world:status("Friend-TestRealm", fields, nil, 2, { kind = "full", session = "first", coherent = true }))
     local friend = world:find("friend-testrealm")
     assert(friend.level == 31 and friend.xp == 10 and friend.inParty and friend.sharing)
     assert(friend.xpUpdatedAt == world.epoch and friend.seenAt == world.epoch + 5,
-        "A party-only delta updates presence without renewing the XP sample timestamp")
+        "A party-only change updates presence without renewing the XP sample timestamp")
     world:advance(25)
-    assert(world:contact("Friend-TestRealm"))
+    assert(world:status("Friend-TestRealm", fields, nil, 3, { kind = "full", session = "first", coherent = true }))
     friend = world:find("friend-testrealm")
     assert(friend.online and not friend.xpStale and friend.xpUpdatedAt == world.epoch)
     world:advance(5)
     fields.xp = 15
-    assert(world:status("Friend-TestRealm", fields, nil, 3, { kind = "delta", session = "first", coherent = true }))
+    assert(world:status("Friend-TestRealm", fields, nil, 4, { kind = "full", session = "first", coherent = true }))
     assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 35)
     world:advance(5)
-    assert(world:status("Friend-TestRealm", fields, nil, 4, { kind = "full", session = "first", coherent = true }))
-    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 40,
-        "A requested full snapshot confirms unchanged XP freshly")
-    fields.level, fields.xp, fields.xpMax = 32, 0, 600
+    assert(world:status("Friend-TestRealm", fields, nil, 5, { kind = "full", session = "first", coherent = true }))
+    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 35,
+        "A full refresh of unchanged XP preserves the existing sample age")
     assert(world:status("Friend-TestRealm", fields, nil, 1, { kind = "full", session = "second", coherent = true }),
         "A new sender session can reset its revision in the same server second")
+    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 40,
+        "A new sender session establishes a fresh sample even when XP is unchanged")
     world:advance(5)
-    assert(world:contact("Friend-TestRealm"))
+    fields.level, fields.xp, fields.xpMax = 32, 0, 600
+    assert(world:status("Friend-TestRealm", fields, nil, 2, { kind = "full", session = "second", coherent = true }))
     friend = world:find("friend-testrealm")
     assert(friend.level == 32 and friend.xp == 0 and friend.inParty and friend.sharing)
-    assert(friend.seenAt == world.epoch + 45 and friend.xpUpdatedAt == world.epoch + 40)
-    assert(world:contact("Friend-TestRealm", { kind = "heartbeat", coherent = false }))
+    assert(friend.seenAt == world.epoch + 45 and friend.xpUpdatedAt == world.epoch + 45)
+    world:advance(91)
     friend = world:find("friend-testrealm")
-    assert(friend.online and friend.xpStale and friend.xp == 0,
-        "A heartbeat exposing a missed delta confirms activity but leaves retained XP stale")
+    assert(not friend.online and friend.xpStale and friend.xp == 0,
+        "Loss of contact retains the last progress visibly stale")
     assert(not addon:GetOverviewActionState("friend-testrealm").request,
-        "A missed status update cannot authorize actions from stale party metadata")
-    assert(world:contact("Friend-TestRealm"))
-    assert(world:find("friend-testrealm").xpStale, "Contact alone cannot resynchronize stale XP")
-    assert(world:status("Friend-TestRealm", fields, nil, 2, { kind = "full", session = "second", coherent = true }))
+        "Expired presence cannot authorize actions from old party metadata")
+    assert(world:status("Friend-TestRealm", fields, nil, 3, { kind = "full", session = "second", coherent = true }))
     assert(not world:find("friend-testrealm").xpStale and addon:GetOverviewActionState("friend-testrealm").request)
-    assert(world:contact("Friend-TestRealm", { kind = "heartbeat", coherent = false }))
-    assert(world:status("Friend-TestRealm", fields, nil, 2, { kind = "full", session = "second", coherent = true }),
-        "A centrally accepted requested full snapshot can confirm an unchanged revision in the same second")
-    assert(not world:find("friend-testrealm").xpStale)
-    assert(not world:contact("Unknown-TestRealm"), "Heartbeats cannot discover a peer without a valid player snapshot")
+    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 136,
+        "Returning after contact expires refreshes unchanged XP and clears the stale marker")
     local before = copy(addon.db)
     for _, malformed in ipairs({
         { level = 34, xp = -1, xpMax = 700, xpState = "known" },
@@ -505,7 +498,7 @@ do
     end
     assert(not world:status("SELF-TestRealm", { level = 99, xpState = "max" }))
     assert(equal(before, addon.db), "Rejected progress cannot alter saved roster data")
-    assert(world:status("Friend-TestRealm", { level = 33, xpState = "unavailable" }, nil, 3))
+    assert(world:status("Friend-TestRealm", { level = 33, xpState = "unavailable" }, nil, 4))
     friend = world:find("friend-testrealm")
     assert(friend.xp == nil and friend.xpMax == nil and friend.xpState == "unavailable",
         "Unavailable snapshots replace previously known progress")
@@ -515,7 +508,7 @@ do
 end
 
 -- A structurally valid status frame can still fail player-data validation.
--- Subsequent coherent transport contact cannot certify the rejected sample.
+-- Invalid full refreshes cannot certify the retained sample.
 do
     local addon, world = newAddon()
     world:login(); world:connect()
@@ -526,22 +519,22 @@ do
     local saved = copy(addon.db)
     world:advance(5)
     fields.level, fields.xp = 32, 1001
-    assert(not world:status("Friend-TestRealm", fields, nil, 2, { kind = "delta", coherent = true }))
+    assert(not world:status("Friend-TestRealm", fields, nil, 2, { kind = "full", coherent = true }))
     local friend = world:find("friend-testrealm")
     assert(friend.level == 31 and friend.xp == 42 and friend.xpStale and friend.statusSynchronized == false,
         "Rejected newer player data leaves the previous sample visibly stale")
     assert(friend.xpUpdatedAt == world.epoch and equal(saved, addon.db), "Invalid player fields cannot reach saved metadata")
     assert(not addon:GetOverviewActionState("friend-testrealm").request)
     world:advance(30)
-    assert(world:contact("Friend-TestRealm", { kind = "heartbeat", coherent = true }))
+    assert(not world:status("Friend-TestRealm", fields, nil, 3, { kind = "full", coherent = true }))
     friend = world:find("friend-testrealm")
     assert(friend.online and friend.xpStale and not addon:GetOverviewActionState("friend-testrealm").request,
-        "Transport heartbeats cannot make a semantically rejected player sample current")
+        "An invalid full refresh cannot make rejected player data current")
     fields.level, fields.xp = 32, 45
-    assert(world:status("Friend-TestRealm", fields, nil, 3, { kind = "delta", coherent = true }))
+    assert(world:status("Friend-TestRealm", fields, nil, 4, { kind = "full", coherent = true }))
     friend = world:find("friend-testrealm")
     assert(friend.level == 32 and friend.xp == 45 and not friend.xpStale and friend.statusSynchronized,
-        "A valid merged delta restores the current player state")
+        "A valid full refresh restores the current player state")
     assert(addon:GetOverviewActionState("friend-testrealm").request)
 end
 
