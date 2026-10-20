@@ -35,8 +35,14 @@ Run after changing addon Lua, tests or verification tooling, and before handoff 
 | `welcome.lua` | Initial Content setup, saved-key stability, generation failures and damaged/read-only profiles. |
 | `interface.lua` | Shared-window navigation, lazy views, remembered Settings pages and saved placement. |
 | `overview-ui.lua` | Scrolling, sorting, party actions, progress bars and tooltips. |
+| `ranking.lua` | Exact level/XP ordering, shared ranks, active-report eligibility, disconnects, account-wide settings and read-only preservation. |
+| `ranking-ui.lua` | Independent overlay and Settings controls, top-five/own rows, visible refreshes, saved header dragging, click-through and optional styling. |
 | `theme.lua` | Native styling, optional EllesmereUI skins, live changes and lazy-view styling. |
 | `notifications.lua` | Real AceEvent native/message dispatch, independent owners, isolated failures and batched group cleanup. |
+| `restedxp-codec.lua` | Independent export/cipher fixtures, canonical hashes, metadata, malformed input, bounded inflation and cooperative processing. |
+| `restedxp-adapter.lua` | RestedXP detection, installed versions, local personalization, verified asynchronous imports and safe cancellation. |
+| `restedxp-ui.lua` | RestedXP Settings navigation, installed guides, publisher selection, update actions and import-draft cleanup. |
+| `restedxp.lua` | Late discovery, selected sources, unchanged-version updates, missing-chunk recovery, failed imports and group isolation. |
 | `data.lua` | Shared transport, native lifecycle, request/response dispatch and status protocol. |
 | `position.lua` | Position preferences, sampling, freshness, retention and class discovery. |
 | `position-map.lua` | Native map providers, projection, pins, interpolation and filters. |

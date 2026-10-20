@@ -8,11 +8,13 @@ Left-click the minimap button to open **Content**; right-click to open **Setting
 
 ## Screens and navigation
 
-The window has two views: **Content**, currently containing only the [player overview](overview.md), and **Settings**, with **Group**, **Shared chat** and **Shared positions** pages. `/lit`, `/lit content` and `/lit overview` open Content; `/lit welcome` remains an alias for Content. `/lit options` opens Settings, initially on Group, and remembers its selected page. Chat and position preferences save immediately.
+The window has two views: **Content**, currently containing only the [player overview](overview.md), and **Settings**, with **Group**, **Shared chat**, **Shared positions**, **Ranking** and **RestedXP** pages. `/lit`, `/lit content` and `/lit overview` open Content; `/lit welcome` remains an alias for Content. `/lit options` opens Settings, initially on Group, and remembers its selected page. Chat, position and ranking preferences save immediately.
 
 The header buttons **Settings** and **Content** switch views within the window. Pages use the available height below the header. All key sharing and editing is in Settings → Group. Leaving Group, switching to Content or closing the window clears displayed key fields, drafts and pending confirmations; group changes require confirmation.
 
 The window position is saved account-wide and restored after reloads, logins and character changes. The window starts centered when no valid saved position is available. Newer-schema profiles allow temporary movement without saving it.
+
+The optional [player ranking overlay](player-ranking.md) has its own saved visibility and position. Open it from Settings → Ranking or `/lit ranking`; closing the main window or pressing Escape leaves it visible. Unlock its header to drag it; rows let clicks pass through.
 
 When enabled on an unconfigured profile, the initial login screen opens Content and saves a new group key. `/lit welcome on|off` retains control of this login behavior. Existing or invalid saved keys are preserved, and newer-schema data remains read-only.
 
@@ -23,6 +25,8 @@ A compatible EllesmereUI installation can style LockInTools with its accent and 
 ## Limits and in-game checks
 
 Unsupported skin APIs leave the native style available. Minimap placement follows shapes recognized by the bundled icon library. Newer-schema settings allow temporary icon movement without saving it. Live rendering, fonts and client compatibility remain unvalidated.
+
+Restart WoW after installing versions that add addon files, including the ranking overlay; `/reload` is enough for later edits to existing Lua files.
 
 - Check Content and Settings, unchanged position when switching views, header navigation, Settings page tabs, retained page selection, direct slash opens, immediate preference saving and draft cleanup through navigation and reopening the window.
 - Move the window, then `/reload`, relog and switch characters to check that it restores the saved position. On a newer-schema profile, check temporary movement without changing saved data.

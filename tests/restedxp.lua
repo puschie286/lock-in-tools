@@ -267,4 +267,27 @@ do
     assert(addon:GetRestedXPState().status:find("No group packs", 1, true))
 end
 
+-- Stale senders cannot permanently exhaust the peer slots, and selecting a new
+-- source must not install an unrelated old cached package while that source is offline.
+do
+    local addon, world, api = client("Beta")
+    world:connect(true)
+    local function signed(body) return body .. "|" .. addon:SignGroupMessage("restedxp", body) end
+    for index = 1, 32 do assert(world.receive("Peer" .. index .. "-TestRealm", signed("1|Q|hello"))) end
+    assert(not world.receive("Peer33-TestRealm", signed("1|Q|hello")))
+    world:advance(76)
+    assert(world.receive("Peer33-TestRealm", signed("1|Q|hello")))
+    local original = packFor(addon, api, 1)
+    publish(addon, original)
+    local group = addon.db.restedxp.groups[addon.fingerprint]
+    group.packs.leveling.source = "alpha-testrealm"
+    local hash = string.rep("a", 64)
+    assert(world.receive("Other-TestRealm", signed("1|O|leveling|" .. hash .. "|100")))
+    assert(addon:SelectRestedXPPack("leveling", "other-testrealm"))
+    world:advance(200)
+    assert(addon:UpdateRestedXPGuides())
+    world:advance(3)
+    assert(#world.installs == 0, "an unavailable newly selected publisher does not authorize the previous publisher's cache")
+end
+
 print("PASS: RestedXP pack sharing, content updates, transfer recovery and lifecycle")

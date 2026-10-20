@@ -17,11 +17,14 @@ local function loadOptions(uiAddon, uiEnvironment)
             for _, callback in ipairs(widget.hooks[script] or {}) do callback(...) end
         end
     end
-    for _, name in ipairs({ "SetFrameStrata", "SetClampedToScreen",
-        "SetMovable", "EnableMouse", "RegisterForDrag",
-        "SetJustifyH", "SetAutoFocus", "SetTextInsets", "SetMotionScriptsWhileDisabled", "Raise" }) do
+    for _, name in ipairs({ "SetJustifyH", "SetAutoFocus", "SetTextInsets", "SetMotionScriptsWhileDisabled", "Raise" }) do
         methods[name] = function() end
     end
+    function methods:SetFrameStrata(strata) self.strata = strata end
+    function methods:SetClampedToScreen(clamped) self.clamped = clamped end
+    function methods:SetMovable(movable) self.movable = movable end
+    function methods:EnableMouse(enabled) self.mouseEnabled = enabled end
+    function methods:RegisterForDrag(...) self.drags = { ... } end
     function methods:SetPoint(...) self.point = { ... } end
     function methods:GetPoint()
         local point = self.point
@@ -233,7 +236,7 @@ local function loadOptions(uiAddon, uiEnvironment)
             return unpack(result, 1, result.n)
         end
     end
-    for _, file in ipairs({ "Theme.lua", "Overview.lua", "Options.lua" }) do
+    for _, file in ipairs({ "Theme.lua", "Overview.lua", "RankingOverlay.lua", "Options.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)

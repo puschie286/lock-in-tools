@@ -25,10 +25,10 @@ do
     assert(options.selectedTab == "group" and options.tabs.group.themeTab.selected
         and not options.tabs.chat.themeTab.selected and options.pages.group:IsVisible()
         and not options.pages.chat:IsVisible() and not options.pages.position:IsVisible()
-        and not options.pages.restedxp:IsVisible()
+        and not options.pages.restedxp:IsVisible() and not options.pages.ranking:IsVisible()
         and not options.tabs.overview and not options.pages.overview
         and not options.screenTabs and not options.selectedScreen and not options.SelectScreen,
-        "Settings contains Group, Shared chat, Shared positions and RestedXP without Content navigation tabs")
+        "Settings contains Group, Shared chat, Shared positions, Ranking and RestedXP without Content navigation tabs")
     local settingsPages = 0
     for _, page in pairs(options.pages) do
         settingsPages = settingsPages + 1
@@ -36,11 +36,11 @@ do
             and -page.point[3] + page:GetHeight() == options:GetHeight() - 20,
             "every Settings page fills the available height with a small bottom margin")
     end
-    assert(settingsPages == 4 and options.content:GetText() == "Content"
+    assert(settingsPages == 5 and options.content:GetText() == "Content"
         and options.content.point[1] == "TOPRIGHT" and options.content.point[3] == -12
         and options.content:GetHeight() == 32 and options.feedback.parent == options.pages.group
         and options.feedback.point[1] == "BOTTOMLEFT",
-        "Settings has exactly four pages and its Content switch in the header")
+        "Settings has exactly five pages and its Content switch in the header")
     options.secret:UserInput(OTHER_SECRET)
     options.secret:SetFocus()
     options.applyGroup:Click()

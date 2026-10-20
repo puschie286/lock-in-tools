@@ -22,6 +22,7 @@ Data.lua
 DataStatus.lua
 Position.lua
 Roster.lua
+Ranking.lua
 RestedXPCodec.lua
 RestedXPAdapter.lua
 RestedXP.lua
@@ -29,6 +30,7 @@ PositionMap.lua
 PositionPins.xml
 Theme.lua
 Overview.lua
+RankingOverlay.lua
 Options.lua
 Minimap.lua
 Commands.lua

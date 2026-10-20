@@ -329,6 +329,7 @@ do
     assert(#resumedWorld.dataJoinCalls == 3 and not resumed:IsDataConnected(),
         "native data leave reconnects without any position sampling or settings save")
     resumedWorld:completeJoin(dataRoom, 18)
+    resumedWorld:advance(0.5) -- Finish initial guide discovery before testing an idle channel.
     assert(resumed:SendData("future", "new-state") and resumedWorld.dataSends[2].target == "18",
         "automatic reconnection refreshes the channel number for future features")
     resumedWorld.channels[dataRoom:lower()] = nil

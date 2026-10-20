@@ -101,7 +101,7 @@ local function newAddon()
             end
         end,
         C_Timer = { NewTicker = function(delay, callback)
-            assert(delay == 0.25)
+            assert(delay == 0.01)
             local timer = { callback = callback }
             function timer:Cancel() self.cancelled = true end
             world.timers[#world.timers + 1] = timer
@@ -179,8 +179,10 @@ do
     assert(not addon:InstallRestedXPPack(pack()))
     world.worker:SetScript("OnUpdate", nil)
     world.encodeFailure = true
-    local success, problem = addon:InstallRestedXPPack(pack())
-    assert(not success and problem == "bad canonical bytes" and not world.imports)
+    local result, problem
+    assert(addon:InstallRestedXPPack(pack(), function(success, failure) result, problem = success, failure end))
+    world:Step()
+    assert(result == false and problem == "bad canonical bytes" and not world.imports)
     assert(not addon:InstallRestedXPPack({ format = 50000, guides = pack().guides }))
 end
 
@@ -189,14 +191,14 @@ do
     local calls, outcome = 0
     assert(addon:InstallRestedXPPack(pack(), function(success) calls, outcome = calls + 1, success end))
     assert(not addon:InstallRestedXPPack(pack()), "simultaneous LIT imports must be refused")
-    world:Step(2)
+    world:Step(3)
     assert(calls == 0, "guide presence before worker completion must not confirm installation")
     world:Step()
     assert(calls == 1 and outcome == true and world.timers[1].cancelled)
-    world:Step(3)
+    world:Step(4)
     assert(calls == 1)
     assert(addon:InstallRestedXPPack(pack(), function(success) assert(success); calls = calls + 1 end))
-    world:Step(3)
+    world:Step(4)
     assert(calls == 2 and world.hooks == 1, "repeated installs must reuse the observer")
 end
 
@@ -213,10 +215,10 @@ end
 for _, mode in ipairs({ "reject", "throw" }) do
     local addon, world = newAddon()
     world.mode = mode
-    local calls = 0
-    assert(not addon:InstallRestedXPPack(pack(), function() calls = calls + 1 end))
+    local calls, result = 0
+    assert(addon:InstallRestedXPPack(pack(), function(success) calls, result = calls + 1, success end))
     world:Step(3)
-    assert(calls == 0, "synchronous rejection returns an error without also invoking the completion callback")
+    assert(calls == 1 and result == false, "native rejection is reported after asynchronous preparation")
 end
 
 do
@@ -225,7 +227,7 @@ do
     world.expected = expected
     local result
     assert(addon:InstallRestedXPPack(pack({ expected, { key = "Retail||Other", name = "Other", group = "Retail", version = 20, retail = "" } }), function(success) result = success end))
-    world:Step(3)
+    world:Step(4)
     assert(result == true, "version zero is supported and guides for another game are not expected locally")
 end
 
@@ -234,7 +236,7 @@ do
     world.expected = { key = "Test||01-06 Start", name = "01-06 Start", group = "Test", version = 2 }
     local result
     assert(addon:InstallRestedXPPack(pack({ { key = "Test||1-6 Start", name = "1-6 Start", group = "Test", version = 2 } }), function(success) result = success end))
-    world:Step(3)
+    world:Step(4)
     assert(result == true, "native normalization of level-range names must be recognized")
 end
 
@@ -244,17 +246,18 @@ do
     assert(addon:InstallRestedXPPack(pack(), function() calls = calls + 1 end))
     assert(addon:CancelRestedXPInstallation())
     world:Step(5)
-    assert(calls == 0 and world.aborts == 1 and not addon:CancelRestedXPInstallation())
+    assert(calls == 0 and not world.aborts and not addon:CancelRestedXPInstallation())
     assert(addon:InstallRestedXPPack(pack(), function() calls = calls + 1 end))
-    world:Step()
+    world:Step(2)
     addon:CancelRestedXPInstallation()
-    assert(world.aborts == 2, "cancellation also stops the owned guide-parsing phase")
+    assert(world.aborts == 1, "cancellation also stops the owned guide-parsing phase")
 end
 
 do
     local addon, world = newAddon()
     local result, failure
     assert(addon:InstallRestedXPPack(pack(), function(success, problem) result, failure = success, problem end))
+    world:Step()
     world.importer:ImportString("personalized export")
     world:Step()
     assert(result == false and failure:find("Another RestedXP import", 1, true))
@@ -266,6 +269,7 @@ do
     world.mode = "stuck"
     local result
     assert(addon:InstallRestedXPPack(pack(), function(success) result = success end))
+    world:Step()
     world.now = 301
     world:Step()
     assert(result == false and world.aborts == 1)
@@ -280,7 +284,7 @@ do
         contentHash = addon.Crypto.Hex(addon.Crypto.SHA256(raw)), classic = "" }
     local result
     assert(addon:InstallRestedXPPack(pack({ expected }), function(success) result = success end))
-    world:Step(3)
+    world:Step(4)
     assert(result == true, "exact source content plus a fresh native cache write confirms conditional metadata")
 end
 
@@ -291,7 +295,7 @@ do
     world.rawGuide = "different guide content"
     local result
     assert(addon:InstallRestedXPPack(pack({ expected }), function(success) result = success end))
-    world:Step(3)
+    world:Step(4)
     assert(result == false, "matching guide versions cannot replace exact source confirmation")
 end
 
@@ -303,8 +307,49 @@ do
     world.rxp.db.profile.guides["Test||Guide|old"] = { key = expected.key, version = 1 }
     local result
     assert(addon:InstallRestedXPPack(pack({ expected }), function(success) result = success end))
-    world:Step(3)
+    world:Step(4)
     assert(result == false, "observing a skipped guide input must not confirm installation without a fresh cache write")
+end
+
+do
+    local addon, world = newAddon()
+    function addon.RestedXPCodec.Encode()
+        coroutine.yield()
+        coroutine.yield()
+        return "personalized export"
+    end
+    local result
+    assert(addon:InstallRestedXPPack(pack(), function(success) result = success end))
+    world:Step(2)
+    assert(not world.imports and result == nil, "personalization yields cooperatively before the native importer starts")
+    world.combat = true
+    world:Step(2)
+    assert(not world.imports, "combat beginning during preparation must postpone native installation")
+    world.combat = false
+    world:Step(4)
+    assert(world.imports == 1 and result == true)
+end
+
+do
+    local addon, world = newAddon()
+    local calls = 0
+    assert(addon:InstallRestedXPPack(pack(), function() calls = calls + 1 end))
+    world.importer:ImportString("personalized export")
+    world:Step()
+    assert(world.imports == 1, "a user import starting during preparation must not be replaced")
+    assert(addon:CancelRestedXPInstallation())
+    assert(not world.aborts and world.worker:GetScript("OnUpdate"), "canceling preparation must preserve an unrelated native import")
+    world:Step(3)
+    assert(calls == 0 and world.imports == 1)
+end
+
+do
+    local addon, world = newAddon()
+    function addon.RestedXPCodec.Encode() coroutine.yield(); error("synthetic preparation failure") end
+    local result
+    assert(addon:InstallRestedXPPack(pack(), function(success) result = success end))
+    world:Step(2)
+    assert(result == false and not world.imports and not world.aborts)
 end
 
 print("PASS: RestedXP installation detection, guide versions, local identity and verified asynchronous imports")

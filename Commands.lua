@@ -4,6 +4,7 @@ function addon:ShowHelp()
     self:Print("/lit or /lit content - Open Content and your player overview.")
     self:Print("/lit options - Open Settings for your group and features.")
     self:Print("/lit overview - Show group players and party actions.")
+    self:Print("/lit ranking [on|off|lock|unlock] - Toggle or arrange the player ranking overlay.")
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
@@ -29,6 +30,27 @@ function addon:ShowStatus()
     end
 end
 
+function addon:HandleRankingCommand(argument)
+    if not self.initialized or not self.ready then
+        self:Print("Still loading. Please try again after login.")
+        return
+    end
+    local settings = self:GetRankingSettings()
+    local success, message
+    if argument == "lock" or argument == "unlock" then
+        success, message = self:SetRankingLocked(argument == "lock")
+    else
+        local enabled = argument == "on" or (argument == "" and not (settings.enabled and not self.rankingOverlayDismissed))
+        if self.savedDataReadOnly and settings.enabled then
+            -- A read-only saved overlay can still be dismissed/reopened for this session.
+            self.rankingOverlayDismissed = not enabled
+            self:Notify("RANKING_CHANGED")
+            success = true
+        else success, message = self:SetRankingEnabled(enabled) end
+    end
+    if not success then self:Print(message or "Unable to change the ranking overlay.") end
+end
+
 function addon:HandleCommand(message)
     local command, argument = (message or ""):match("^%s*(%S*)%s*(.-)%s*$")
     command = command:lower()
@@ -42,6 +64,9 @@ function addon:HandleCommand(message)
         self:OpenOptions()
     elseif command == "overview" and argument == "" then
         self:OpenOverview()
+    elseif command == "ranking" and (argument == "" or argument == "on" or argument == "off"
+        or argument == "lock" or argument == "unlock") then
+        self:HandleRankingCommand(argument)
     elseif command == "help" and argument == "" then
         self:ShowHelp()
     elseif command == "chat" and argument == "" then

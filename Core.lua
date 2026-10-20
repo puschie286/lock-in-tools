@@ -67,6 +67,7 @@ function addon:Initialize()
     self:InitializeData()
     self:InitializePositions()
     self:InitializeRoster()
+    self:InitializeRanking()
     self:InitializeRestedXP()
 
     -- Also support loading after login through an addon manager.

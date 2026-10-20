@@ -11,11 +11,19 @@ local dataEntry = manifest:find("\nData.lua\n", 1, true)
 local statusEntry = manifest:find("\nDataStatus.lua\n", 1, true)
 local positionEntry = manifest:find("\nPosition.lua\n", 1, true)
 local rosterEntry = manifest:find("\nRoster.lua\n", 1, true)
+local rankingEntry = manifest:find("\nRanking.lua\n", 1, true)
+local themeEntry = manifest:find("\nTheme.lua\n", 1, true)
+local overlayEntry = manifest:find("\nRankingOverlay.lua\n", 1, true)
+local optionsEntry = manifest:find("\nOptions.lua\n", 1, true)
 assert(channelEntry and dataEntry and channelEntry < dataEntry,
     "the native addon manifest must load channel management before the data transport")
 assert(dataEntry and statusEntry and positionEntry and rosterEntry
     and dataEntry < statusEntry and statusEntry < positionEntry and statusEntry < rosterEntry,
     "the native addon manifest must load status synchronization after transport and before its consumers")
+assert(rankingEntry and themeEntry and overlayEntry and optionsEntry
+    and rosterEntry < rankingEntry and rankingEntry < themeEntry
+    and themeEntry < overlayEntry and overlayEntry < optionsEntry,
+    "the native manifest must load the ranking model after its data and the overlay after its theme")
 
 -- Startup, migration, commands, reload and saved-variable preservation.
 local addon, environment, messages, fire, world = loadAddon(nil, false)

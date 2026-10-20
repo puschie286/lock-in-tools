@@ -693,6 +693,36 @@ local function CreateOptionsPanel()
         return addon:GetPositionStatusText() .. "\n\nTo hide player icons while sharing continues, use the world map's LockInTools filter."
     end)
 
+    local ranking = UI:Section(panel, 20, 116, 680, 414, "Player ranking")
+    panel.pages.ranking = ranking
+    local rankingIntroduction = UI:Label(ranking,
+        "Keep your group's level and XP standings visible while you play.", 14)
+    rankingIntroduction:SetPoint("TOPLEFT", 16, -50)
+    rankingIntroduction:SetWidth(648)
+
+    panel.rankingEnabled = UI:Checkbox(ranking)
+    panel.rankingEnabled:SetPoint("TOPLEFT", 12, -94)
+    panel.rankingEnabled:SetSize(28, 28)
+    BindPreference(panel, panel.rankingEnabled, function() return addon:GetRankingSettings().enabled end,
+        addon.SetRankingEnabled)
+    PreferenceLabel(ranking, panel.rankingEnabled, "Show player ranking overlay",
+        "Show the top five current reports, plus your own position when outside the top five.\n\n"
+            .. "Higher levels rank first, then exact XP progress. Equal progress shares a rank. "
+            .. "Retained or incomplete reports stay unranked. Chat and position sharing can remain off.")
+
+    panel.rankingLocked = UI:Checkbox(ranking)
+    panel.rankingLocked:SetPoint("TOPLEFT", 12, -130)
+    panel.rankingLocked:SetSize(28, 28)
+    BindPreference(panel, panel.rankingLocked, function() return addon:GetRankingSettings().locked end,
+        addon.SetRankingLocked)
+    PreferenceLabel(ranking, panel.rankingLocked, "Lock overlay position",
+        "Unlock to drag the overlay by its title bar. Locking prevents movement; rows always let clicks pass through.\n\n"
+            .. "Visibility and position save across reloads and characters.")
+    local rankingHint = UI:Label(ranking,
+        "Use /lit ranking to toggle the overlay. The full roster remains in Content > Overview.", 12, "muted")
+    rankingHint:SetPoint("TOPLEFT", 16, -182)
+    rankingHint:SetSize(648, 40)
+
     CreateRestedXPPage(panel)
 
     for _, page in pairs(panel.pages) do
@@ -720,8 +750,8 @@ local function CreateOptionsPanel()
         addon:RefreshOptions()
     end
     panel.SelectTab = SelectTab
-    local categories = { { "group", "Group", 116 }, { "chat", "Shared chat", 148 },
-        { "position", "Shared positions", 166 }, { "restedxp", "RestedXP", 136 } }
+    local categories = { { "group", "Group", 88 }, { "chat", "Shared chat", 128 },
+        { "position", "Shared positions", 148 }, { "ranking", "Ranking", 126 }, { "restedxp", "RestedXP", 110 } }
     local tabX = 20
     for _, category in ipairs(categories) do
         local name = category[1]
@@ -785,6 +815,11 @@ function addon:RefreshOptions()
     panel.autoJoin:SetEnabled(editable)
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
+    local ranking = self:GetRankingSettings()
+    panel.rankingEnabled:SetChecked(ranking.enabled and not self.rankingOverlayDismissed)
+    panel.rankingLocked:SetChecked(ranking.locked)
+    panel.rankingEnabled:SetEnabled(editable)
+    panel.rankingLocked:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup and not switching)
     panel.leave:SetEnabled(self.ready and hasGroup and not switching)
     RefreshRestedXP(panel)
@@ -887,7 +922,7 @@ function addon:OpenWelcome()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED" }) do
+for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
 end
 addon:RegisterNotification("GROUP_CHANGED", function() RefreshContentFeedback(addon) end)
