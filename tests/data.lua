@@ -360,7 +360,7 @@ assert(#world.sent == 0 and addon:GetPositionStatusText():find("Waiting", 1, tru
 world:connect()
 world:advance(2)
 assert(#world.sent == 1 and world.sent[1].prefix == "LockInToolsData"
-    and world.sent[1].message:match("^1|position|1|P|"))
+    and world.sent[1].message:match("^1|position|2|P|"))
 world:advance(14)
 assert(#world.sent == 1)
 world:advance(2)
@@ -368,7 +368,7 @@ assert(#world.sent == 1, "An unchanged position has no separate heartbeat")
 world.x = 0.4
 world:advance(2)
 assert(#world.sent == 2 and world.sent[2].message:find("|0.40000|", 1, true))
-assert(addon:ReceiveData("Friend-TestRealm", "1|position|1|P|2000000022|37|0.3|0.7"))
+assert(addon:ReceiveData("Friend-TestRealm", "1|position|2|P|2000000022|37|30000|70000"))
 assert(addon:GetSharedPositions()["friend-testrealm"].x == 0.3)
 local positionSends = #world.sent
 addon:SetGroupSecret("new-position-group")
@@ -431,7 +431,7 @@ do
     first:advance(2)
     second:advance(2)
     local fromLeft, fromRight = first.nativeSends[#first.nativeSends], second.nativeSends[#second.nativeSends]
-    assert(fromLeft.message:match("^1|position|1|P|") and fromRight.message:match("^1|position|1|P|"))
+    assert(fromLeft.message:match("^1|position|2|P|") and fromRight.message:match("^1|position|2|P|"))
     second:incoming(fromLeft.message, "Left-TestRealm", { id = 19 })
     first:incoming(fromRight.message, "Right-TestRealm", { id = 9 })
     assert(left:GetSharedPositions()["right-testrealm"].x == 0.6 and right:GetSharedPositions()["left-testrealm"].x == 0.4,
@@ -850,13 +850,22 @@ do
 end
 
 -- Real channel fan-out: every client sees the request and response broadcasts, including its own echoes.
-local function newRequestBus(withPositions)
+local function newRequestBus(withPositions, sharing, classes, beforeConnect)
     local bus = { clients = {}, queue = {}, delivered = 0 }
     function bus:add(name, now)
         local profile = withPositions and {
-            schemaVersion = 3, group = { secret = "otter-4827" }, position = { sharing = true },
+            schemaVersion = 3, group = { secret = "otter-4827" }, position = { sharing = sharing ~= false },
         } or nil
-        local current, clock = newAddon(profile, false, withPositions, { playerName = name })
+        local current, clock = newAddon(profile, false, withPositions, { playerName = name,
+            configure = function(environment)
+                if classes then
+                    environment.UnitClass = function(unit)
+                        assert(unit == "player")
+                        return classes[name], classes[name]
+                    end
+                end
+            end,
+        })
         clock.now = now or 0
         local client = { addon = current, world = clock, name = name, requests = {}, responses = {} }
         bus.clients[#bus.clients + 1] = client
@@ -875,6 +884,7 @@ local function newRequestBus(withPositions)
             end
             return result
         end
+        if beforeConnect then beforeConnect(client) end
         clock:login()
         clock:member(7)
         return client
@@ -1164,7 +1174,7 @@ local function statusFixture(values, accepted, native)
 end
 
 local function full(session, stamp, revision, body)
-    return "4|F|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. body
+    return "5|F|" .. session .. "|" .. stamp .. "|" .. revision .. "|" .. body
 end
 
 local function receive(current, sender, payload)
@@ -1175,10 +1185,25 @@ local function positionStatusFixture(values, sharing)
     local profile = { schemaVersion = 3, group = { secret = "otter-4827" }, position = { sharing = sharing ~= false } }
     local current, clock = newAddon(profile, false, true)
     local samples = {}
-    clock:connect()
     assert(current:RegisterDataStatusProvider("player", function() return values end,
         function(sender, fields) samples[#samples + 1] = { sender = sender, fields = fields } end))
+    clock:connect()
     return current, clock, samples
+end
+
+-- Class uses a compact status enum; future numeric codes preserve compatible
+-- snapshot decoding without inventing a supported player class.
+do
+    for code, class in pairs({ [0] = "unknown", [1] = "WARRIOR", [2] = "PALADIN", [3] = "HUNTER",
+        [4] = "ROGUE", [5] = "PRIEST", [6] = "SHAMAN", [7] = "MAGE", [8] = "WARLOCK", [9] = "DRUID" }) do
+        local current, clock, samples = statusFixture({ class = class })
+        assert(clock.sent[1].message:match("|11=" .. code .. "$"), "Class is encoded as its permanent numeric ID")
+        assert(receive(current, "Friend", full("peer", 2000000000, 1, "11=" .. code)))
+        assert(samples[1].fields.class == class)
+    end
+    local current, _, samples = statusFixture({ class = "UNSUPPORTED" })
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "11=65535")))
+    assert(samples[1].fields.class == "unknown", "Future class IDs decode to unknown")
 end
 
 -- Status carries a fresh optional position without making movement dirty the
@@ -1187,35 +1212,34 @@ do
     local values = { level = 24 }
     local current, clock = positionStatusFixture(values)
     assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|")
-        and clock.sent[1].message:find("1=24|9=P,2000000000,37,0.25000,0.75000", 1, true))
+        and clock.sent[1].message:find("1=24|9=P,37,25000,75000", 1, true))
     clock:advance(2)
     assert(#clock.sent == 1, "The public initial snapshot also supplies the first position")
     clock.x = 0.4
     clock:advance(2)
-    assert(#clock.sent == 2 and clock.sent[2].message == "1|position|1|P|2000000004|37|0.40000|0.75000")
+    assert(#clock.sent == 2 and clock.sent[2].message == "1|position|2|P|2000000004|37|40000|75000")
     clock:advance(1)
     assert(#clock.sent == 2, "Movement alone must not send a five-second full status report")
     values.level = 25
     clock:advance(4)
     clock.x = 0.65
     clock:advance(1)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|4|F|[^|]+|2000000010|2|")
-        and clock.sent[3].message:find("1=25|9=P,2000000010,37,0.65000,0.75000", 1, true),
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|5|F|[^|]+|2000000010|2|")
+        and clock.sent[3].message:find("1=25|9=P,37,65000,75000", 1, true),
         "A due status report samples current coordinates and suppresses duplicate movement at that tick")
     clock:advance(30)
-    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|4|F|[^|]+|2000000040|2|")
-        and clock.sent[4].message:find("9=P,2000000040,37,0.65000,0.75000", 1, true))
+    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|5|F|[^|]+|2000000040|2|")
+        and clock.sent[4].message:find("9=P,37,65000,75000", 1, true))
 end
 
 -- All idle peers remain online beyond the position timeout using only status
 -- refreshes. A stationary late join discovers positions in its initial exchange.
 do
-    local bus = newRequestBus(true)
     local function register(client)
         assert(client.addon:RegisterDataStatusProvider("player", function() return { level = 24 } end,
             function() end))
     end
-    for _, client in ipairs(bus.clients) do register(client) end
+    local bus = newRequestBus(true, nil, nil, register)
     bus:pump()
     for _ = 1, 35 do
         for _, client in ipairs(bus.clients) do client.world:advance(2) end
@@ -1229,8 +1253,7 @@ do
             end
         end
     end
-    local newcomer = bus:add("Dave", 70)
-    register(newcomer)
+    bus:add("Dave", 70)
     bus:pump()
     for _, client in ipairs(bus.clients) do
         for _, other in ipairs(bus.clients) do
@@ -1243,23 +1266,99 @@ do
     end
 end
 
--- The position attachment has independent timestamps. Status refreshes can
--- change it at the same core revision, but cannot overwrite newer movement.
+-- Class belongs to ordinary status even when neither endpoint shares locations.
+-- Native fan-out supplies existing and late peers without a second discovery
+-- exchange; enabling positions then reuses those cached classes immediately.
+do
+    local classes = { Alice = "MAGE", Bob = "WARRIOR", Carol = "DRUID", Dave = "HUNTER" }
+    local bus = newRequestBus(true, false, classes)
+    bus:pump()
+    local function CheckClasses()
+        for _, client in ipairs(bus.clients) do
+            assert(next(client.addon:GetSharedPositions()) == nil,
+                "Class sharing must not enable coordinates or invent a position peer")
+            for _, other in ipairs(bus.clients) do
+                if client ~= other then
+                    assert(client.addon.positionState.classes[other.name:lower() .. "-testrealm"] == classes[other.name],
+                        "Initial status exchange discovers classes even with position sharing off")
+                end
+            end
+            for _, packet in ipairs(client.world.sent) do
+                assert(not packet.message:find("position-class", 1, true)
+                    and not packet.message:match("^1|position|"),
+                    "Class discovery uses only ordinary status snapshots")
+                assert(#packet.message <= 255)
+            end
+        end
+    end
+    CheckClasses()
+    bus:add("Dave", 1)
+    bus:pump()
+    CheckClasses()
+    local alice, bob = bus.clients[1], bus.clients[2]
+    local before = #alice.world.sent + #bob.world.sent
+    assert(alice.addon:SetPositionSharing(true) and bob.addon:SetPositionSharing(true))
+    assert(#alice.world.sent + #bob.world.sent == before,
+        "Enabling coordinates needs no class-specific request or status discovery")
+    alice.world:advance(2)
+    bob.world:advance(2)
+    bus:pump()
+    assert(alice.addon:GetSharedPositions()["bob-testrealm"].class == "WARRIOR"
+        and bob.addon:GetSharedPositions()["alice-testrealm"].class == "MAGE",
+        "The first movement update uses the class cached while coordinates were disabled")
+    for _, client in ipairs(bus.clients) do
+        assert(not client.addon.dataState.requests["position-class"],
+            "The separate class request/response handler is removed")
+    end
+end
+
+-- Class status is independent of coordinates: it may arrive before coordinates,
+-- with an unavailable attachment, or after a retained position has gone stale.
+do
+    local current, clock = positionStatusFixture({ level = 24 })
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|11=7")))
+    assert(current.positionState.classes["friend-testrealm"] == "MAGE"
+        and current:GetSharedPositions()["friend-testrealm"] == nil)
+    assert(current:ReceiveData("Friend", "1|position|2|P|2000000001|37|30000|70000"))
+    assert(current:GetSharedPositions()["friend-testrealm"].class == "MAGE")
+    assert(current:SetPositionRetention(true))
+    assert(receive(current, "Unavailable", full("other", 2000000002, 1, "9=U|11=3")))
+    assert(current.positionState.classes["unavailable-testrealm"] == "HUNTER"
+        and current:GetSharedPositions()["unavailable-testrealm"] == nil,
+        "Unavailable map coordinates do not prevent receiving class")
+    clock:advance(65)
+    local peer = current.positionState.peers["friend-testrealm"]
+    local stamp, positionStamp = peer.stamp, peer.positionStamp
+    assert(not current:GetSharedPositions()["friend-testrealm"].online)
+    assert(receive(current, "Friend", full("peer", 2000000065, 2, "1=25|11=1")))
+    assert(peer.class == "WARRIOR" and peer.stamp == stamp and peer.positionStamp == positionStamp
+        and not current:GetSharedPositions()["friend-testrealm"].online,
+        "Class changes update the icon without refreshing coordinate age or position presence")
+    assert(receive(current, "Friend", full("peer", 2000000066, 3, "1=25|11=65535")))
+    assert(current.positionState.classes["friend-testrealm"] == "WARRIOR" and peer.class == "WARRIOR",
+        "An unknown future class leaves a known cached class usable")
+    assert(not current:ReceiveData("Friend", "1|position|1|C|2000000067|MAGE"))
+    assert(current.positionState.classes["friend-testrealm"] == "WARRIOR" and peer.stamp == stamp,
+        "Retired class packets cannot update metadata or position freshness")
+end
+
+-- Attachments inherit the envelope timestamp. They can change at the same core
+-- revision, but delayed status cannot overwrite a newer standalone movement.
 do
     local current, clock, samples = positionStatusFixture({ level = 24 })
     assert(receive(current, "Friend", full("peer", 2000000000, 1,
-        "1=25|9=P,2000000000,37,0.30000,0.70000")))
+        "1=25|9=P,37,30000,70000")))
     assert(equal(samples[1].fields, { level = "25" }))
-    assert(current:ReceiveData("Friend", "1|position|1|P|2000000010|37|0.8|0.7"))
-    assert(receive(current, "Friend", full("peer", 2000000011, 1,
-        "1=25|9=P,2000000005,37,0.40000,0.70000")))
+    assert(current:ReceiveData("Friend", "1|position|2|P|2000000010|37|80000|70000"))
+    assert(receive(current, "Friend", full("peer", 2000000005, 1,
+        "1=25|9=P,37,40000,70000")))
     assert(current:GetSharedPositions()["friend-testrealm"].x == 0.8,
-        "A delayed attachment must not replace a later movement sample")
+        "A delayed envelope must not replace a later movement sample")
     assert(receive(current, "Friend", full("peer", 2000000012, 1,
-        "1=25|9=P,2000000012,37,0.60000,0.70000")))
+        "1=25|9=P,37,60000,70000")))
     assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6 and #samples == 3)
     assert(not receive(current, "Friend", full("peer", 2000000013, 1,
-        "1=99|9=P,2000000013,37,0.90000,0.70000")))
+        "1=99|9=P,37,90000,70000")))
     assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6,
         "Rejected status frames must not partially apply their position")
     assert(receive(current, "Friend", full("peer", 2000000014, 1, "1=25")))
@@ -1273,23 +1372,23 @@ do
     local current, clock = positionStatusFixture({ level = 24 }, false)
     assert(not clock.sent[1].message:find("|9=", 1, true))
     assert(receive(current, "Friend", full("peer", 2000000000, 1,
-        "1=25|9=P,2000000000,37,0.30000,0.70000")))
+        "1=25|9=P,37,30000,70000")))
     assert(next(current:GetSharedPositions()) == nil and next(current.positionState.peers) == nil)
     clock:advance(30)
     assert(#clock.sent == 2 and not clock.sent[2].message:find("|9=", 1, true))
     assert(current:SetPositionSharing(true))
     assert(current:SetPositionRetention(true))
     assert(receive(current, "Friend", full("peer", 2000000031, 1,
-        "1=25|9=P,2000000031,37,0.30000,0.70000")))
+        "1=25|9=P,37,30000,70000")))
     clock.map = nil
     clock:advance(30)
-    assert(clock.sent[#clock.sent].message:find("9=U,2000000060", 1, true))
-    assert(receive(current, "Friend", full("peer", 2000000061, 1, "1=25|9=U,2000000061")))
+    assert(clock.sent[#clock.sent].message:find("9=U", 1, true))
+    assert(receive(current, "Friend", full("peer", 2000000061, 1, "1=25|9=U")))
     local peer = assert(current:GetSharedPositions()["friend-testrealm"])
     assert(peer.online and peer.positionAvailable == false and peer.x == 0.3 and peer.positionStamp == 2000000031
         and current.db.position.peers["friend-testrealm"].positionStamp == 2000000031)
     assert(current:SetPositionRetention(false))
-    assert(receive(current, "Friend", full("peer", 2000000062, 1, "1=25|9=U,2000000062")))
+    assert(receive(current, "Friend", full("peer", 2000000062, 1, "1=25|9=U")))
     assert(current:GetSharedPositions()["friend-testrealm"] == nil)
     assert(current:SetPositionSharing(false))
     clock:advance(30)
@@ -1304,15 +1403,15 @@ do
     clock.x = 0.8
     assert(current:ReceiveData("Friend", "1|Q|status|initial|" .. full("peer", 2000000001, 1, "1=25")))
     assert(#clock.sent == 2 and clock.sent[2].message:match("^1|R|status|initial|friend%-testrealm|")
-        and clock.sent[2].message:find("9=P,2000000001,37,0.80000,0.75000", 1, true))
+        and clock.sent[2].message:find("9=P,37,80000,75000", 1, true))
     clock:advance(1)
-    assert(#clock.sent == 3 and clock.sent[3].message == "1|position|1|P|2000000002|37|0.80000|0.75000")
+    assert(#clock.sent == 3 and clock.sent[3].message == "1|position|2|P|2000000002|37|80000|75000")
 end
 
 -- Attachments respect the full native envelope budget. A long targeted reply
 -- preserves core status and omits position; the same core still fits publicly.
 do
-    local values = { xpMax = "x" }
+    local values = { xpMax = "x", class = "MAGE" }
     local current, clock = positionStatusFixture(values)
     local request = full("peer", 2000000000, 1, "1=25")
     local function requestSnapshot(id)
@@ -1320,7 +1419,7 @@ do
     end
     assert(requestSnapshot("a"))
     local combined = clock.sent[#clock.sent].message
-    assert(combined:find("|9=P,", 1, true))
+    assert(combined:find("|9=P,", 1, true) and combined:find("|11=7", 1, true))
     values.xpMax = string.rep("x", 256 - #combined)
     assert(requestSnapshot("b"))
     local reply = clock.sent[#clock.sent].message
@@ -1328,7 +1427,8 @@ do
     values.xpMax = values.xpMax .. "x"
     assert(requestSnapshot("c"))
     reply = clock.sent[#clock.sent].message
-    assert(#reply < 255 and not reply:find("|9=", 1, true) and reply:find("3=" .. values.xpMax, 1, true),
+    assert(#reply < 255 and not reply:find("|9=", 1, true) and reply:find("3=" .. values.xpMax, 1, true)
+        and reply:find("|11=7", 1, true),
         "An attachment must not prevent a valid core response")
     clock:advance(5)
     local public = clock.sent[#clock.sent].message
@@ -1420,7 +1520,7 @@ do
     assert(receive(current, "Friend", full("peer", 2000000000, 20, "2=99")))
     values.xp, clock.sendResult = 2, 0
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|Q|status|[^|]+|4|F|[^|]+|2000000005|2|2=2$"),
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|Q|status|[^|]+|5|F|[^|]+|2000000005|2|2=2$"),
         "The initial request retries with current values")
     clock:advance(5)
     assert(#clock.sent == 2, "An accepted full snapshot needs no recovery request")
@@ -1434,11 +1534,11 @@ do
     clock:advance(25)
     values.xp = 2
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|4|F|[^|]+|2000000030|2|1=24|2=2$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000030|2|1=24|2=2$"))
     clock:advance(25)
     assert(#clock.sent == 2, "An accepted change restarts the refresh interval")
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|4|F|[^|]+|2000000060|2|1=24|2=2$"))
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|5|F|[^|]+|2000000060|2|1=24|2=2$"))
 end
 
 -- Rejected sends never count as successful broadcasts. Retry the latest whole
@@ -1448,16 +1548,16 @@ for _, latest in ipairs({ 3, 1 }) do
     local _, clock = statusFixture(values)
     values.xp, clock.sendResult = 2, 11
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("|4|F|[^|]+|2000000005|2|2=2$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|5|F|[^|]+|2000000005|2|2=2$"))
     values.xp, clock.sendResult = latest, 0
     clock:advance(5)
-    local expected = "|4|F|[^|]+|2000000010|3|2=" .. latest .. "$"
+    local expected = "|5|F|[^|]+|2000000010|3|2=" .. latest .. "$"
     assert(#clock.sent == 3 and clock.sent[3].message:match(expected),
         "Retries publish current values without any dependency on earlier packets")
     clock:advance(25)
     assert(#clock.sent == 3, "A successfully retried sample clears unpublished state")
     clock:advance(5)
-    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|4|F|[^|]+|2000000040|3|2=" .. latest .. "$"))
+    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|5|F|[^|]+|2000000040|3|2=" .. latest .. "$"))
 end
 
 -- These IDs are permanent protocol assignments. Collectors and consumers retain
@@ -1470,7 +1570,7 @@ do
     local current, clock, samples = statusFixture(values)
     local body = "1=24|2=420|3=1000|4=1|8=1|10=1"
     local named = "level=24|xp=420|xpMax=1000|xpState=known|inParty=true|canInvite=false|partyFull=false|sharing=true"
-    assert(clock.sent[1].message:match("|4|F|[^|]+|2000000000|1|(.+)$") == body)
+    assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == body)
     assert(#named - #body == 68)
     assert(receive(current, "Friend", full("peer", 2000000000, 1, body)))
     for name, value in pairs(values) do
@@ -1498,7 +1598,7 @@ for mask = 0, 7 do
         partyFull = math.floor(mask / 4) % 2 == 1,
     }
     local current, clock, samples = statusFixture(values)
-    assert(clock.sent[1].message:match("|4|F|[^|]+|2000000000|1|(.+)$") == "10=" .. mask)
+    assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == "10=" .. mask)
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "10=" .. mask)))
     assert(equal(samples[1].fields, values), "Party mask round trip: " .. mask)
     assert(receive(current, "Friend", full("peer", 2000000001, 2, "")))
@@ -1510,7 +1610,7 @@ end
 do
     local values = { xpState = "unavailable", sharing = false, xpMax = "known" }
     local current, clock, samples = statusFixture(values)
-    assert(clock.sent[1].message:match("|4|F|[^|]+|2000000000|1|(.+)$") == "3=known|4=0|8=0")
+    assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == "3=known|4=0|8=0")
     local states = { "unavailable", "known", "max" }
     for code = 0, 2 do
         assert(receive(current, "Friend", full("peer", 2000000000 + code, code + 1,
@@ -1551,7 +1651,7 @@ do
     assert(current:RegisterDataStatusProvider("invalid", function() return values end, function() end))
     assert(current:RegisterDataStatusProvider("healthy", function() return { level = 24 } end, function() end))
     clock:connect()
-    assert(clock.sent[1].message:match("|4|F|[^|]+|2000000000|1|(.+)$") == "1=24")
+    assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == "1=24")
     for _, invalid in ipairs({
         { xp = "discard", inParty = true },
         { xp = "discard", inParty = false, canInvite = true },
@@ -1603,13 +1703,13 @@ do
         assert(received.sequence == revision and equal(received.fields, expected))
         assert(contacts[#contacts].metadata.synchronized)
     end
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|11=future|65535=edge")))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|12=future|65535=edge")))
     sample(1, { level = "25" })
-    assert(receive(current, "Friend", full("peer", 2000000001, 5, "1=25|11=changed|12=|65535=edge")))
+    assert(receive(current, "Friend", full("peer", 2000000001, 5, "1=25|12=changed|13=|65535=edge")))
     sample(5, { level = "25" })
-    assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25|11=conflict|12=|65535=edge")))
+    assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25|12=conflict|13=|65535=edge")))
     assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25")))
-    assert(receive(current, "Friend", full("peer", 2000000002, 5, "1=25|11=changed|12=|65535=edge")))
+    assert(receive(current, "Friend", full("peer", 2000000002, 5, "1=25|12=changed|13=|65535=edge")))
     sample(5, { level = "25" })
     assert(receive(current, "Friend", full("peer", 2000000003, 8, "1=25|2=10")))
     sample(8, { level = "25", xp = "10" })
@@ -1624,7 +1724,7 @@ end
 do
     local values = { xpState = "known", xpMax = 100, xp = 10, level = 24 }
     local current, clock, samples, connections = statusFixture(values)
-    assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|4|F|[^|]+|2000000000|1|"))
+    assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|5|F|[^|]+|2000000000|1|"))
     assert(clock.sent[1].message:find("1=24|2=10|3=100|4=1", 1, true))
     current:JoinDataChannel(false)
     current:OnDataLogin()
@@ -1632,10 +1732,10 @@ do
     assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 2, "One membership check and one shared status timer")
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].at == 30
-        and clock.sent[2].message:match("^1|status|4|F|[^|]+|2000000030|1|1=24|2=10|3=100|4=1$"))
+        and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000030|1|1=24|2=10|3=100|4=1$"))
     values.xp = 20
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("|4|F|[^|]+|2000000035|2|1=24|2=20|3=100|4=1$"),
+    assert(#clock.sent == 3 and clock.sent[3].message:match("|5|F|[^|]+|2000000035|2|1=24|2=20|3=100|4=1$"),
         "A changed field sends the complete independently usable status")
     values.xp = 21
     clock:advance(1)
@@ -1643,22 +1743,22 @@ do
     values.xp = 29
     clock:advance(4)
     assert(#clock.sent == 4 and clock.sent[4].at == 40
-        and clock.sent[4].message:match("|4|F|[^|]+|2000000040|3|1=24|2=29|3=100|4=1$"))
+        and clock.sent[4].message:match("|5|F|[^|]+|2000000040|3|1=24|2=29|3=100|4=1$"))
     values.xp = 30
     assert(current:ReceiveData("Friend", "1|Q|status|joined|" .. full("friend-1", 2000000040, 1,
         "1=25|2=5|3=200|4=1")))
     assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.xp == "5"
         and samples[1].metadata.kind == "full")
-    assert(#clock.sent == 5 and clock.sent[5].message:match("^1|R|status|joined|friend%-testrealm|4|F|"))
+    assert(#clock.sent == 5 and clock.sent[5].message:match("^1|R|status|joined|friend%-testrealm|5|F|"))
     assert(clock.sent[5].message:find("2=30", 1, true))
     clock:advance(5)
-    assert(#clock.sent == 6 and clock.sent[6].message:match("^1|status|4|F|")
+    assert(#clock.sent == 6 and clock.sent[6].message:match("^1|status|5|F|")
         and clock.sent[6].message:find("2=30", 1, true),
         "A targeted reply does not consume the public change")
     clock:advance(25)
     assert(#clock.sent == 6)
     clock:advance(5)
-    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|4|F|")
+    assert(#clock.sent == 7 and clock.sent[7].message:match("^1|status|5|F|")
         and clock.sent[7].message:find("1=24|2=30|3=100|4=1", 1, true))
 end
 
@@ -1672,7 +1772,7 @@ do
     assert(clock.sent[2].message:find("2=2", 1, true))
     values.xp = 1
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|4|F|")
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|5|F|")
         and clock.sent[3].message:match("|3|2=1$"))
 end
 
@@ -1694,7 +1794,7 @@ do
     assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, true))
     assert(not current:RegisterDataStatusProvider("bad", function() end, function() end, nil, true))
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|4|F|")
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|")
         and clock.sent[2].message:find("2=a%7Cb%3Dc%25|8=1", 1, true)
         and clock.sent[2].message:find("1=24", 1, true))
     assert(clock:activeTimers() == 2 and current.dataState.features.status and current.dataState.requests.status
@@ -1794,7 +1894,7 @@ do
     clock:advance(10)
     assert(current:ReceiveData("Friend", "1|Q|status|second|" .. full("peer", 2000000020, 1, "1=25")))
     clock:advance(10)
-    assert(clock.sent[#clock.sent].message:match("^1|status|4|F|[^|]+|2000000030|1|1=24$"))
+    assert(clock.sent[#clock.sent].message:match("^1|status|5|F|[^|]+|2000000030|1|1=24$"))
     current.savedDataReadOnly = true
     local sent = #clock.sent
     clock:advance(60)
@@ -1826,38 +1926,42 @@ do
     for index, payload in ipairs({
         "1|2000000000|1|level=25", "2|F|peer|2000000000|1|level=25",
         "2|F|peer|2000000000|1|1=25", "3|F|peer|2000000000|1|1=25",
-        "5|F|peer|2000000000|1|1=25",
+        "4|F|peer|2000000000|1|1=25", "6|F|peer|2000000000|1|1=25",
         "2|D|peer|2000000000|2|1|1=25", "2|H|peer|2000000000|1", "2|S",
-        "4|D|peer|2000000000|2|1|1=25", "4|H|peer|2000000000|1", "4|S",
-        "4|F|peer|10000000000|1|1=25", "4|F|peer|0200000000|1|1=25",
-        "4|F|peer|2000000000|0|1=25", "4|F|peer|2000000000|1000000000|1=25",
-        "4|F|peer|2000000000|01|1=25", "4|F||2000000000|1|1=25",
-        "4|F|peer|2000000000|1|1=25|1=26", "4|F|peer|2000000000|1|1=25|",
-        "4|F|peer|2000000000|1||1=25", "4|F|peer|2000000000|1|1bad=x",
-        "4|F|peer|2000000000|1|level=25", "4|F|peer|2000000000|1|1",
-        "4|F|peer|2000000000|1|1=25=26", "4|F|peer|2000000000|1|=25",
-        "4|F|peer|2000000000|1|1=25|4=known", "4|F|peer|2000000000|1|1=25|4=",
-        "4|F|peer|2000000000|1|1=25|4=-1", "4|F|peer|2000000000|1|1=25|4=+1",
-        "4|F|peer|2000000000|1|1=25|4=01", "4|F|peer|2000000000|1|1=25|4=1.0",
-        "4|F|peer|2000000000|1|1=25|4=1e0", "4|F|peer|2000000000|1|1=25|4=65536",
-        "4|F|peer|2000000000|1|1=25|8=true", "4|F|peer|2000000000|1|1=25|8=false",
-        "4|F|peer|2000000000|1|1=25|8=", "4|F|peer|2000000000|1|1=25|8=2",
-        "4|F|peer|2000000000|1|1=25|8=00", "4|F|peer|2000000000|1|1=25|8=1.0",
-        "4|F|peer|2000000000|1|1=25|10=", "4|F|peer|2000000000|1|1=25|10=true",
-        "4|F|peer|2000000000|1|1=25|10=-1", "4|F|peer|2000000000|1|1=25|10=+1",
-        "4|F|peer|2000000000|1|1=25|10=01", "4|F|peer|2000000000|1|1=25|10=1.0",
-        "4|F|peer|2000000000|1|1=25|10=1e0", "4|F|peer|2000000000|1|1=25|10=4294967296",
-        "4|F|peer|2000000000|1|0=x", "4|F|peer|2000000000|1|01=x",
-        "4|F|peer|2000000000|1|00=x", "4|F|peer|2000000000|1|-1=x",
-        "4|F|peer|2000000000|1|+1=x", "4|F|peer|2000000000|1|1.0=x",
-        "4|F|peer|2000000000|1|1e0=x", "4|F|peer|2000000000|1|65536=x",
-        "4|F|peer|2000000000|1|99999999999999999999=x",
-        "4|F|peer|2000000000|1|10=first|10=second",
-        "4|F|peer|2000000000|1|1=%", "4|F|peer|2000000000|1|1=%GG",
-        "4|F|peer|2000000000|1|1=%0A", "4|F|peer|2000000000|1|1=bad\nvalue",
-        "4|F|peer|2000000000|1|1=%7F",
-        "4|F|peer\n|2000000000|1|1=25", "4|F|peer|2000000000\n|1|1=25",
-        "4|F|peer|2000000000|1\n|1=25", "4|F|peer|2000000000|1|1\n=25",
+        "5|D|peer|2000000000|2|1|1=25", "5|H|peer|2000000000|1", "5|S",
+        "5|F|peer|10000000000|1|1=25", "5|F|peer|0200000000|1|1=25",
+        "5|F|peer|2000000000|0|1=25", "5|F|peer|2000000000|1000000000|1=25",
+        "5|F|peer|2000000000|01|1=25", "5|F||2000000000|1|1=25",
+        "5|F|peer|2000000000|1|1=25|1=26", "5|F|peer|2000000000|1|1=25|",
+        "5|F|peer|2000000000|1||1=25", "5|F|peer|2000000000|1|1bad=x",
+        "5|F|peer|2000000000|1|level=25", "5|F|peer|2000000000|1|1",
+        "5|F|peer|2000000000|1|1=25=26", "5|F|peer|2000000000|1|=25",
+        "5|F|peer|2000000000|1|1=25|4=known", "5|F|peer|2000000000|1|1=25|4=",
+        "5|F|peer|2000000000|1|1=25|4=-1", "5|F|peer|2000000000|1|1=25|4=+1",
+        "5|F|peer|2000000000|1|1=25|4=01", "5|F|peer|2000000000|1|1=25|4=1.0",
+        "5|F|peer|2000000000|1|1=25|4=1e0", "5|F|peer|2000000000|1|1=25|4=65536",
+        "5|F|peer|2000000000|1|1=25|8=true", "5|F|peer|2000000000|1|1=25|8=false",
+        "5|F|peer|2000000000|1|1=25|8=", "5|F|peer|2000000000|1|1=25|8=2",
+        "5|F|peer|2000000000|1|1=25|8=00", "5|F|peer|2000000000|1|1=25|8=1.0",
+        "5|F|peer|2000000000|1|1=25|10=", "5|F|peer|2000000000|1|1=25|10=true",
+        "5|F|peer|2000000000|1|1=25|10=-1", "5|F|peer|2000000000|1|1=25|10=+1",
+        "5|F|peer|2000000000|1|1=25|10=01", "5|F|peer|2000000000|1|1=25|10=1.0",
+        "5|F|peer|2000000000|1|1=25|10=1e0", "5|F|peer|2000000000|1|1=25|10=4294967296",
+        "5|F|peer|2000000000|1|1=25|11=", "5|F|peer|2000000000|1|1=25|11=MAGE",
+        "5|F|peer|2000000000|1|1=25|11=-1", "5|F|peer|2000000000|1|1=25|11=+1",
+        "5|F|peer|2000000000|1|1=25|11=01", "5|F|peer|2000000000|1|1=25|11=1.0",
+        "5|F|peer|2000000000|1|1=25|11=1e0", "5|F|peer|2000000000|1|1=25|11=65536",
+        "5|F|peer|2000000000|1|0=x", "5|F|peer|2000000000|1|01=x",
+        "5|F|peer|2000000000|1|00=x", "5|F|peer|2000000000|1|-1=x",
+        "5|F|peer|2000000000|1|+1=x", "5|F|peer|2000000000|1|1.0=x",
+        "5|F|peer|2000000000|1|1e0=x", "5|F|peer|2000000000|1|65536=x",
+        "5|F|peer|2000000000|1|99999999999999999999=x",
+        "5|F|peer|2000000000|1|10=first|10=second",
+        "5|F|peer|2000000000|1|1=%", "5|F|peer|2000000000|1|1=%GG",
+        "5|F|peer|2000000000|1|1=%0A", "5|F|peer|2000000000|1|1=bad\nvalue",
+        "5|F|peer|2000000000|1|1=%7F",
+        "5|F|peer\n|2000000000|1|1=25", "5|F|peer|2000000000\n|1|1=25",
+        "5|F|peer|2000000000|1\n|1=25", "5|F|peer|2000000000|1|1\n=25",
     }) do
         assert(not receive(current, "Friend", payload), payload)
         assert(not current:ReceiveData("Friend", "1|Q|status|direct-" .. index .. "|" .. payload), payload)
@@ -1923,7 +2027,7 @@ do
     assert(#clock.sent == 1 and clock.sent[1].message:find("8=0", 1, true))
     values = nil
     clock:advance(5)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("|4|F|[^|]+|%d+|2|$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|5|F|[^|]+|%d+|2|$"))
 end
 
 -- Initial failures retry at the five-second cadence; reconnecting resets peer
@@ -1957,31 +2061,31 @@ do
     local _, clock = statusFixture(values)
     clock.sendResult = 11
     clock:advance(30)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("|4|F|[^|]+|2000000030|1|1=24|2=1$"))
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|5|F|[^|]+|2000000030|1|1=24|2=1$"))
     values.xp, clock.sendResult = 2, 0
     clock:advance(5)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("|4|F|[^|]+|2000000035|2|1=24|2=2$"))
+    assert(#clock.sent == 3 and clock.sent[3].message:match("|5|F|[^|]+|2000000035|2|1=24|2=2$"))
     clock:advance(25)
     assert(#clock.sent == 3)
     clock:advance(5)
-    assert(#clock.sent == 4 and clock.sent[4].message:match("|4|F|[^|]+|2000000065|2|1=24|2=2$"))
+    assert(#clock.sent == 4 and clock.sent[4].message:match("|5|F|[^|]+|2000000065|2|1=24|2=2$"))
 end
 
 -- Reconnecting after a coordinated switch starts a distinct full status session.
 do
     local values = { level = 24, xp = 10 }
     local current, clock = statusFixture(values, nil, {})
-    local oldSession = assert(clock.nativeSends[1].message:match("|4|F|([^|]+)|"))
+    local oldSession = assert(clock.nativeSends[1].message:match("|5|F|([^|]+)|"))
     assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
     values.xp = 20
     clock:advance(5)
-    assert(clock.nativeSends[2].message:match("|4|F|"))
+    assert(clock.nativeSends[2].message:match("|5|F|"))
     assert(current:SetGroupSecret("fresh-status-group"))
     clock:advance(0)
     assert(next(current.dataState.status.received) == nil and not current:IsDataConnected())
     clock:member(12)
     local snapshot = clock.nativeSends[#clock.nativeSends].message
-    local session = assert(snapshot:match("|4|F|([^|]+)|%d+|1|"))
+    local session = assert(snapshot:match("|5|F|([^|]+)|%d+|1|"))
     assert(session ~= oldSession and snapshot:find("1=24|2=20", 1, true),
         "New group revisions restart only under a fresh session and complete snapshot")
 end
@@ -2047,7 +2151,7 @@ do
         local snapshots = 0
         for _, packet in ipairs(client.world.nativeSends) do
             assert(#packet.message <= 255 and not packet.message:match("^1|[QR]?|?roster|"))
-            if packet.message:match("^1|status|4|F|") then snapshots = snapshots + 1 end
+            if packet.message:match("^1|status|5|F|") then snapshots = snapshots + 1 end
         end
         return snapshots
     end

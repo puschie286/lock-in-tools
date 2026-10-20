@@ -43,6 +43,8 @@ local STATUS_FIELD_REGISTRY = {
     { 8, "sharing", boolean = true },
     { POSITION_FIELD_ID, false }, -- Position is independent of status revisions.
     { 10, "partyFlags", flags = { { "inParty", 1 }, { "canInvite", 2 }, { "partyFull", 4 } } },
+    { 11, "class", enum = { [0] = "unknown", [1] = "WARRIOR", [2] = "PALADIN", [3] = "HUNTER",
+        [4] = "ROGUE", [5] = "PRIEST", [6] = "SHAMAN", [7] = "MAGE", [8] = "WARLOCK", [9] = "DRUID" } },
 }
 local STATUS_FIELDS, STATUS_FIELD_IDS, STATUS_FIELD_ORDER = {}, {}, {}
 local statusNames = {}
@@ -184,8 +186,8 @@ local function NamedStatus(fields)
                 end
             elseif field.boolean then named[field[2]] = value == "1"
             elseif field.enum then
-                -- A future state must not make XP look known or discard the
-                -- other independently useful player fields.
+                -- Future values use the field's unknown state while the other
+                -- independently useful player fields remain available.
                 named[field[2]] = field.enum[tonumber(value)] or field.enum[0]
             else named[field[2]] = value end
         end

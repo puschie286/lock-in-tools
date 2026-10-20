@@ -100,6 +100,10 @@ end
 do
     local connected, connectedEnvironment, connectedMessages, connectedEvent, connectedWorld =
         loadAddon(settings(nil, false), false)
+    connectedEnvironment.UnitClass = function(unit)
+        assert(unit == "player")
+        return "Mage", "MAGE"
+    end
     connectedEvent("ADDON_LOADED", "LockInTools")
     assert(#connectedWorld.dataJoinCalls == 0 and not connected:IsDataConnected(),
         "do not join data before login")
@@ -113,22 +117,26 @@ do
         and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
     local presence = assert(connectedWorld.statusSends[1], "shared status broadcasts while position sharing is off")
     assert(presence.prefix == connected:GetDataPrefix() and presence.target == "7"
-        and presence.message:match("^1|Q|status|[^|]+|4|F|[^|]+|%d+|%d+|")
+        and presence.message:match("^1|Q|status|[^|]+|5|F|[^|]+|%d+|%d+|")
         and presence.message:find("|1=12", 1, true) and presence.message:find("|2=0", 1, true)
         and presence.message:find("|3=1000", 1, true) and presence.message:find("|4=1", 1, true)
         and presence.message:find("|8=0", 1, true) and presence.message:find("|10=0", 1, true)
+        and presence.message:find("|11=7", 1, true) and not presence.message:find("|9=", 1, true)
         and not presence.message:match("|[567]=")
         and not presence.message:match("|[%a_][%w_]*=")
         and #connectedWorld.rosterSends == 0,
-        "production startup shares compact v4 player metadata once without retired fields or roster packets")
+        "production startup shares compact v5 player metadata once without retired fields or roster packets")
     connectedEvent("CHAT_MSG_ADDON", presence.prefix, presence.message, "CHANNEL", "RosterFriend", nil, 0, 7, dataRoom)
     local rosterFriend
     for _, player in ipairs(connected:GetOverviewPlayers()) do
         if player.id == "rosterfriend-testrealm" then rosterFriend = player end
     end
     assert(rosterFriend and rosterFriend.online and rosterFriend.level == 12 and not rosterFriend.map
-        and connected.db.roster.peers["rosterfriend-testrealm"],
-        "production shared-status delivery discovers and retains peers while position sharing is off")
+        and connected.db.roster.peers["rosterfriend-testrealm"]
+        and connected.positionState.classes["rosterfriend-testrealm"] == "MAGE"
+        and next(connected:GetSharedPositions()) == nil,
+        "production status shares class and roster presence while coordinates stay disabled")
+    assert(not connected.dataState.requests["position-class"], "production registers no separate class discovery")
     assert(connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("7. " .. dataRoom)
         == "7. LockInTools Data" and connected:GetGroupDataChannelName() == dataRoom,
         "the data alias changes its displayed label while retaining the native route")
@@ -140,9 +148,15 @@ do
     connectedWorld:advance(2)
     local sent = assert(connectedWorld.dataSends[1], "enabling positions starts native broadcasts")
     assert(sent.prefix == connected:GetDataPrefix() and sent.target == "7"
-        and sent.message:find("1|position|1|P|", 1, true) == 1)
+        and sent.message:match("^1|position|2|P|%d+|37|25000|75000$"),
+        "production movement sends scaled integers rather than decimal coordinates")
     connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "Self", nil, 0, 7, dataRoom)
     assert(next(connected:GetSharedPositions()) == nil, "production route excludes own position echoes")
+    connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "RosterFriend", nil, 0, 7, dataRoom)
+    assert(connected:GetSharedPositions()["rosterfriend-testrealm"].class == "MAGE"
+        and connected:GetSharedPositions()["rosterfriend-testrealm"].x == 0.25
+        and connected:GetSharedPositions()["rosterfriend-testrealm"].y == 0.75,
+        "the first location uses the class already learned from status with sharing disabled")
     connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "Friend", nil, 0, 7, dataRoom)
     assert(connected:GetSharedPositions()["friend-testrealm"].online
         and connected.db.position.peers["friend-testrealm"], "production route delivers and retains peer positions")
@@ -195,10 +209,13 @@ do
     assert(connected:IsDataConnected() and not connectedWorld.channels[dataRoom:lower()],
         "a late old-channel join cannot disconnect the new position transport")
     connectedWorld:advance(1)
-    local switchedSend = assert(connectedWorld.dataSends[3], "positions resume automatically after the new group joins")
-    assert(switchedSend.target == "18"
+    local switchedSend = assert(connectedWorld.statusSends[#connectedWorld.statusSends],
+        "the initial new-group status supplies the resumed position")
+    assert(switchedSend.target == "18" and switchedSend.message:find("|9=P,37,25000,75000", 1, true)
+        and #connectedWorld.dataSends == 2
         and connectedEnvironment.ChatFrameUtil.ResolvePrefixedChannelName("18. " .. newDataRoom)
-            == "18. LockInTools Data", "positions use the new native number while the readable alias stays the same")
+            == "18. LockInTools Data",
+        "the new-group snapshot uses the new route and suppresses a duplicate stationary position broadcast")
     connectedEvent("CHAT_MSG_ADDON", switchedSend.prefix, switchedSend.message, "CHANNEL", "OldRoute", nil, 0, 14, dataRoom)
     connectedEvent("CHAT_MSG_ADDON", switchedSend.prefix, switchedSend.message, "CHANNEL", "NewFriend", nil, 0, 18, newDataRoom)
     assert(connected:GetSharedPositions()["oldroute-testrealm"].online

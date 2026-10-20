@@ -24,14 +24,14 @@ do
     local now = api.GetServerTime()
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
         overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
-            "1|status|4|F|peer-" .. name:lower() .. "|" .. now .. "|1|1="
+            "1|status|5|F|peer-" .. name:lower() .. "|" .. now .. "|1|1="
             .. (name == "Bravo" and 0 or 20 + index) .. "|4=0|8="
             .. (name == "Alpha" and "1" or "0") .. "|10="
             .. (name == "Bravo" and "3" or "2"),
             "CHANNEL", name .. "-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     end
     overviewEvent("CHAT_MSG_ADDON", overview:GetDataPrefix(),
-        "1|status|4|F|peer-alpha|" .. now .. "|2|1=21|2=420|3=1000|4=1|8=1|10=2|65000=value",
+        "1|status|5|F|peer-alpha|" .. now .. "|2|1=21|2=420|3=1000|4=1|8=1|10=2|65000=value",
         "CHANNEL", "Alpha-TestRealm", nil, 0, 7, overview:GetGroupDataChannelName())
     local positions = {
         ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,
