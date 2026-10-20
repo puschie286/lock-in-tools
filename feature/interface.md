@@ -18,17 +18,13 @@ The optional [player ranking overlay](player-ranking.md) has its own saved visib
 
 When enabled on an unconfigured profile, the initial login screen opens Content and saves a new group key. `/lit welcome on|off` retains control of this login behavior. Existing or invalid saved keys are preserved, and newer-schema data remains read-only.
 
-## Optional EllesmereUI skin
-
-A compatible EllesmereUI installation can style LockInTools with its accent and fonts. Enable it in EllesmereUI's skin controls; reload after disabling it to restore the native style.
-
 ## Limits and in-game checks
 
-Unsupported skin APIs leave the native style available. Minimap placement follows shapes recognized by the bundled icon library. Newer-schema settings allow temporary icon movement without saving it. Live rendering, fonts and client compatibility remain unvalidated.
+The interface uses native WoW styling. Minimap placement follows shapes recognized by the bundled icon library. Newer-schema settings allow temporary icon movement without saving it. Live rendering, fonts and client compatibility remain unvalidated.
 
 Restart WoW after installing versions that add addon files, including the ranking overlay; `/reload` is enough for later edits to existing Lua files.
 
 - Check Content and Settings, unchanged position when switching views, header navigation, Settings page tabs, retained page selection, direct slash opens, immediate preference saving and draft cleanup through navigation and reopening the window.
 - Move the window, then `/reload`, relog and switch characters to check that it restores the saved position. On a newer-schema profile, check temporary movement without changing saved data.
-- Check the window and icons remain readable at smaller UI scales, with EllesmereUI absent, disabled and enabled, including views first opened after a style change.
+- Check the window, icons and each view remain readable at smaller UI scales.
 - Check minimap clicks and dragging on round and square minimaps, then reload or switch characters to confirm its saved position. With a DataBroker display installed, check its shortcuts and tooltip too.

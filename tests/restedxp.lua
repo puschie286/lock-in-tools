@@ -314,6 +314,21 @@ do
         "an already installed local publication finishes with an explicit up-to-date result")
 end
 
+-- Explicit import results must not be overwritten by an earlier login check.
+do
+    local addon, world = client("Importer")
+    world:connect(true)
+    assert(addon:ImportRestedXPPack("invalid", "bad", "Source#1234"))
+    world:advance(0.1)
+    assert(not addon.restedxpState.job, "malformed exports finish validation without a long-running job")
+    local failure = addon:GetRestedXPState().status
+    assert(failure ~= "Checking available group guides..." and failure ~= "Validating invalid...",
+        "an invalid export reports its validation failure")
+    world:advance(4)
+    assert(addon:GetRestedXPState().status == failure and not addon:GetRestedXPState().busy,
+        "a login discovery timeout cannot replace the result of an explicitly started import")
+end
+
 -- Stale senders cannot permanently exhaust the peer slots, and selecting a new
 -- source must not install an unrelated old cached package while that source is offline.
 do

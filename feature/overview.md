@@ -23,7 +23,7 @@ The roster is a list of locally discovered characters, not every key holder. Dis
 ## In-game checks
 
 - Open Overview directly, switch to Settings and back to Content in the same window, and check that Settings retains its selected page and the window stays in place.
-- With two clients sharing a key, check discovery, XP gains and party actions while chat and position sharing are off. Check level-up resets, exact-XP tooltips, zero/unknown/MAX states and both interface themes. Then enable positions and check region names without coordinates or ages.
+- With two clients sharing a key, check discovery, XP gains and party actions while chat and position sharing are off. Check level-up resets, exact-XP tooltips and zero/unknown/MAX states. Then enable positions and check region names without coordinates or ages.
 - Stay at unchanged XP, then reconnect or reload; check that periodic refreshes keep players **Active**, loss of contact shows an elapsed time and retained progress, and saved XP stays marked stale until a fresh report arrives. Delivery, level-cap detection and rendering require in-game validation.
 - With more than eight players, check wheel and scrollbar navigation, fixed headers and both sort directions. Check retained inactive players and the previous character's XP after reload, re-login and character changes, and roster clearing after a group change.
 - Check the Actions dropdown, disabled reasons and native confirmations with eligible and unavailable players. Check dismissal on scrolling, sorting, outside clicks, Escape and window close. Actual delivery, native eligibility and rendering remain unvalidated.

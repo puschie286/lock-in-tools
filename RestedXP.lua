@@ -280,7 +280,7 @@ local function CheckCompleteMessage(self)
         for id, source in pairs(group.sources) do
             local offer = state.offers[id] and state.offers[id][source]
             if not offer or GetTime() - offer.seen > OFFER_AGE then
-                return "Guide check complete. Some followed publishers are offline; their latest packs could not be checked."
+                return "Some followed publishers are offline. Their latest packs could not be checked."
             end
         end
         return "Followed guide packs are up to date. No download needed."
@@ -290,13 +290,13 @@ local function CheckCompleteMessage(self)
     for id in pairs(group.packs) do
         local saved = SavedPack(self, id)
         if saved and saved.source == identity then
-            if installed[id] ~= saved.hash then return "Your shared packs are available. Use Update guides to install them locally." end
+            if installed[id] ~= saved.hash then return "Your shared packs are ready. Use Update guides to install them locally." end
             shared = true
         end
     end
     if shared then return "Your shared guide packs are up to date. No download needed." end
     if next(state.offers) then return "Choose Follow beside a publisher, then use Update guides." end
-    return "No LIT-shared packs found. One member must use Share export first; installed guides alone are not shared."
+    return "No LIT-shared packs found. One member must use Share export first."
 end
 
 local function Tick(self)
@@ -474,6 +474,8 @@ function addon:ImportRestedXPPack(id, raw, sourceBattleTag)
     if not PackID(id) then return false, "Use a pack ID of up to 40 letters, numbers, hyphens or underscores." end
     if type(raw) ~= "string" or #raw == 0 or #raw > MAX_BYTES then return false, "Paste an export no larger than 2 MiB." end
     local source = LocalIdentity(self)
+    -- An explicit import owns the status even if login discovery is still finishing.
+    self.restedxpState.updateAt = nil
     return StartJob(self, "Validating " .. id .. "...", function()
         return self.RestedXPCodec.Decode(raw, sourceBattleTag)
     end, function(pack, problem)

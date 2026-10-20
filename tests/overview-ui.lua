@@ -320,18 +320,12 @@ do
         and page.rows[7].progressFill.textureColor[4] == 0.35
         and page.rows[8].progress:GetText() == "· ~75%",
         "explicit stale progress and inactive players have a visible marker and subdued fill")
-    progressAddon.Theme.skin = { GetAccentColor = function() return 0.8, 0.2, 0.4 end }
-    progressAddon:RefreshOverview()
-    assert(row.progressFill.textureColor[1] == 0.8 and row.progressFill.textureColor[3] == 0.4,
-        "visible progress uses the current optional skin accent")
-    progressAddon.Theme.skin.GetAccentColor = function() return 0 / 0, 0.2, 0.4 end
-    progressAddon:RefreshOverview()
-    assert(row.progressFill.textureColor[1] == 0.27, "nonfinite skin accents safely fall back to native colors")
-    progressWorld.secretValue = 0.8
-    progressAddon.Theme.skin.GetAccentColor = function() return 0.8, 0.2, 0.4 end
-    progressAddon:RefreshOverview()
-    assert(row.progressFill.textureColor[1] == 0.27, "secret skin colors do not enter progress arithmetic")
-    progressAddon.Theme.skin, progressWorld.secretValue = nil, nil
+    assert(row.progressFill.textureColor[1] == 0.27 and row.progressFill.textureColor[2] == 0.65
+        and row.progressFill.textureColor[3] == 1 and row.progressFill.textureColor[4] == 1
+        and page.rows[7].progressFill.textureColor[1] == 0.27
+        and page.rows[7].progressFill.textureColor[2] == 0.65
+        and page.rows[7].progressFill.textureColor[3] == 1,
+        "fresh and stale progress share the fixed native blue accent with different opacity")
     row.levelCell.scripts.OnEnter(row.levelCell)
     assert(tooltip.shown and tooltip.owner == row.levelCell and tooltip.text == "Alpha — level 24"
         and tooltip.lines[1] == "XP: 420 / 1000" and tooltip.lines[2] == "To next level: 580 XP"

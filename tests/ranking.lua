@@ -1,4 +1,4 @@
--- Ranking model checks use current Overview reports without a native UI or transport.
+-- Ranking checks use current and saved Overview reports without a native UI or transport.
 local loadNotifications = dofile("tests/support/notifications.lua")
 
 local function loadModule(file, addon, environment)
@@ -44,6 +44,7 @@ local function newAddon(saved, readOnly, skipInitialization)
     end
     local environment = setmetatable({}, { __index = _G })
     environment._G = environment
+    world.environment = environment
     world.errors = loadNotifications(addon, environment)
     loadModule("Ranking.lua", addon, environment)
     if not skipInitialization then addon:InitializeRanking() end
@@ -62,6 +63,30 @@ local function ids(players)
     local result = {}
     for _, row in ipairs(players) do result[#result + 1] = row.id end
     return table.concat(result, ",")
+end
+
+local function newRosterAddon(saved)
+    local addon, world = newAddon(saved)
+    local environment = world.environment
+    world.now, world.connected = 0, false
+    environment.GetTime = function() return world.now end
+    environment.GetServerTime = function() return 2000000000 + math.floor(world.now) end
+    environment.GetNormalizedRealmName = function() return "TestRealm" end
+    environment.UnitFullName = function() return "Self", "TestRealm" end
+    environment.UnitLevel = function() return 29 end
+    environment.UnitXP = function() return 25 end
+    environment.UnitXPMax = function() return 100 end
+    environment.GetMaxPlayerLevel = function() return 60 end
+    function addon:GetGroupFingerprint() return "first-group" end
+    function addon:IsDataSelf(name) return name:lower() == "self-testrealm" end
+    function addon:RegisterDataStatusProvider(name, collect, receive, connected)
+        assert(name == "player")
+        world.statusConnected = connected
+    end
+    loadModule("Roster.lua", addon, environment)
+    addon:InitializeRoster()
+    addon:OnRosterLogin()
+    return addon, world
 end
 
 -- Levels take precedence over every XP value, and the model retains the full standings.
@@ -89,6 +114,7 @@ do
         player("z-third", 30, 1, 3), player("a-third", 30, 3, 9),
         player("last", 30, 0, 1000),
     }
+    world.players[3].xpStale, world.players[4].online = true, false
     local ranking = addon:GetPlayerRanking()
     assert(ids(ranking.players) == "z-higher,a-lower,a-third,z-third,last",
         "Exact XP fractions sort independently of rounded display percentages and input order")
@@ -96,6 +122,7 @@ do
     for index, row in ipairs(ranking.players) do
         assert(row.rank == expected[index], "Equal progress must use shared competition ranks")
     end
+    assert(ranking.stale == 2, "Saved and current reports use the same exact ordering and shared ranks")
     world.players = { world.players[4], world.players[5], world.players[1], world.players[3], world.players[2] }
     assert(ids(addon:GetPlayerRanking().players) == "z-higher,a-lower,a-third,z-third,last",
         "Character IDs keep equal progress in a stable order across roster refreshes")
@@ -126,7 +153,7 @@ do
         and ranking.players[3].rank == 3, "Maximum-level ties must consume the shared ranks")
 end
 
--- Discovery is not an XP report, and cached progress does not become current from contact alone.
+-- Saved complete progress remains ranked; discovery without XP cannot invent progress.
 do
     local addon, world = newAddon()
     local missing = player("missing", 30)
@@ -142,14 +169,34 @@ do
     world.players = { missing, stale, unsynchronized, inactive, own, player("current", 28, 50, 100) }
     local before = copy(world.players)
     local ranking = addon:GetPlayerRanking()
-    assert(ids(ranking.players) == "current", "Only complete current reports receive ranks")
-    assert(ranking.awaiting == 2 and ranking.stale == 2 and ranking.inactive == 1,
-        "Unavailable active reports, stale contacts and inactive characters need distinct counts")
+    assert(ids(ranking.players) == "inactive,contact-only,stale,current",
+        "Offline and unsynchronized players retain ranks from their last complete progress")
+    assert(ranking.awaiting == 2 and ranking.stale == 3 and ranking.inactive == 1,
+        "Stale counts describe ranked snapshots; missing XP stays awaiting")
+    for index, row in ipairs(ranking.players) do
+        assert(row.stale == (index ~= 4) and row.xpStale == row.stale,
+            "Each saved ranking row must explicitly identify its stale progress")
+    end
     assert(ranking.own and ranking.own.id == "self" and ranking.own.rank == nil,
         "Your missing XP remains available for the Waiting for XP row without an invented rank")
     assert(equal(world.players, before), "Ranking must never annotate or reorder Overview's cached reports")
-    ranking.players[1].rank = 99
-    assert(world.players[6].rank == nil, "Rank annotations must belong to detached rows")
+    ranking.players[1].rank, ranking.players[1].stale = 99, false
+    assert(world.players[4].rank == nil and world.players[4].stale == nil,
+        "Rank and stale annotations must belong to detached rows")
+end
+
+-- Missing progress stays awaiting even when the player is offline or has an old stale flag.
+do
+    local addon, world = newAddon()
+    local legacy = player("legacy", 32)
+    legacy.online, legacy.xpStale, legacy.xpState = false, true, "unavailable"
+    local noLevel = player("no-level", nil, 10, 100)
+    noLevel.online, noLevel.statusSynchronized = false, false
+    world.players = { legacy, noLevel, player("zero-xp", 31, 0, 100) }
+    local ranking = addon:GetPlayerRanking()
+    assert(ids(ranking.players) == "zero-xp" and ranking.players[1].rank == 1)
+    assert(ranking.awaiting == 2 and ranking.stale == 0 and ranking.inactive == 2,
+        "Missing saved XP must not become a ranked zero-XP value or count as ranked stale progress")
 end
 
 -- An apparently known report is incomplete unless level and XP form a valid complete value.
@@ -167,20 +214,23 @@ do
         "Malformed or incomplete progress must remain unranked rather than looking like zero XP")
 end
 
--- Disconnecting immediately drops peers; the live local character keeps progress without a group rank.
+-- Disconnecting retains saved standings while marking every peer snapshot stale.
 do
     local addon, world = newAddon()
     world.players = { player("friend", 30, 50, 100), player("self", 29, 25, 100, true) }
     assert(addon:GetPlayerRanking().own.rank == 2)
     world.connected = false
     local ranking = addon:GetPlayerRanking()
-    assert(not ranking.connected and ranking.grouped and #ranking.players == 0,
-        "Connection loss must remove every group standing immediately")
-    assert(ranking.own and ranking.own.id == "self" and ranking.own.xp == 25 and ranking.own.rank == nil,
-        "Disconnected local progress must never claim a valid group rank")
+    assert(not ranking.connected and ranking.grouped and #ranking.players == 2 and ranking.stale == 1,
+        "Connection loss retains standings using the peers' last saved progress")
+    assert(ranking.players[1].stale and ranking.players[1].xpStale)
+    assert(ranking.own and ranking.own.id == "self" and ranking.own.xp == 25 and ranking.own.rank == 2
+        and ranking.own.stale == false and ranking.own.xpStale == false,
+        "Live local progress remains current and comparable against the last peer reports")
     world.connected = true
     local recovered = addon:GetPlayerRanking()
-    assert(#recovered.players == 2 and recovered.own.rank == 2)
+    assert(#recovered.players == 2 and recovered.own.rank == 2 and recovered.stale == 0
+        and recovered.players[1].stale == false)
     world.switching = true
     ranking = addon:GetPlayerRanking()
     assert(ranking.switching and #ranking.players == 0 and ranking.own == nil,
@@ -189,6 +239,43 @@ do
     ranking = addon:GetPlayerRanking()
     assert(not ranking.grouped and #ranking.players == 0 and ranking.own == nil,
         "Leaving the group must clear every ranking row")
+end
+
+-- Real Roster reports survive a SavedVariables reload and rank before peers reconnect.
+do
+    local saved = { schemaVersion = 3 }
+    local addon, world = newRosterAddon(saved)
+    world.connected = true
+    world.statusConnected(true)
+    assert(addon:ReceivePlayerStatus("Friend-TestRealm", {
+        level = 31, xp = 700, xpMax = 1000, xpState = "known",
+    }, 1, 1))
+    assert(addon:ReceivePlayerStatus("Maximum-TestRealm", { level = 60, xpState = "max" }, 1, 1))
+    assert(saved.roster.peers["friend-testrealm"].xp == 700
+        and saved.roster.peers["self-testrealm"].xp == 25,
+        "Current local and peer progress must be saved by the real Roster implementation")
+    saved.roster.peers["legacy-testrealm"] = { name = "Legacy-TestRealm", level = 32, seenAt = 1999999990 }
+    local reloaded, restored = newRosterAddon(copy(saved))
+    local ranking = reloaded:GetPlayerRanking()
+    assert(not ranking.connected and ranking.awaiting == 1 and ranking.stale == 2 and ranking.inactive == 3)
+    assert(ids(ranking.players) == "maximum-testrealm,friend-testrealm,self-testrealm"
+        and ranking.own.rank == 3, "Saved XP and maximum-level records remain ranked before reconnection")
+    assert(ranking.players[1].xpState == "max" and ranking.players[1].stale
+        and ranking.players[2].xp == 700 and ranking.players[2].xpMax == 1000 and ranking.players[2].stale)
+    restored.connected = true
+    restored.statusConnected(true)
+    ranking = reloaded:GetPlayerRanking()
+    assert(ranking.stale == 2, "Reconnecting alone cannot make saved reports current")
+    assert(reloaded:ReceivePlayerStatus("Friend-TestRealm", {
+        level = 31, xp = 750, xpMax = 1000, xpState = "known",
+    }, 2, 1))
+    ranking = reloaded:GetPlayerRanking()
+    assert(ranking.stale == 1 and ranking.players[2].xp == 750 and not ranking.players[2].stale,
+        "A fresh status replaces saved XP and clears only that player's stale marker")
+    restored.now = 91
+    ranking = reloaded:GetPlayerRanking()
+    assert(ranking.stale == 2 and ranking.players[2].xp == 750,
+        "Expired contact keeps the last valid XP ranked and marks it stale again")
 end
 
 -- Login guards prevent restored progress from claiming standings before native data is ready.

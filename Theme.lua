@@ -1,6 +1,6 @@
-local addonName, addon = ...
+local _, addon = ...
 
-local Theme = { windows = {} }
+local Theme = {}
 addon.Theme = Theme
 
 local colors = {
@@ -11,6 +11,7 @@ local colors = {
     muted = { 0.60, 0.67, 0.76 },
     heading = { 0.96, 0.98, 1 },
     accent = { 0.27, 0.65, 1 },
+    danger = { 1, 0.47, 0.47 },
 }
 
 local function Texture(parent, layer, color)
@@ -45,55 +46,8 @@ local function Border(edges, color)
     for _, edge in ipairs(edges) do edge:SetColorTexture(unpack(color)) end
 end
 
-local function Track(parent, kind, widget)
-    local owner = parent.themeOwner or parent
-    widget.themeOwner = owner
-    local entry = { kind = kind, widget = widget }
-    owner.themeElements[#owner.themeElements + 1] = entry
-    return entry
-end
-
-local function Try(skin, method, ...)
-    if type(skin[method]) ~= "function" then return false end
-    return pcall(skin[method], ...)
-end
-
-local function RefreshSkin(entry, skin)
-    if entry.kind == "font" then
-        Try(skin, "Font", entry.widget)
-    elseif entry.kind == "edit" then
-        -- EditBoxes are FontInstances; keep their native padding and behavior.
-        Try(skin, "Font", entry.widget)
-    elseif entry.kind == "checkbox" and type(skin.GetAccentColor) == "function" then
-        local ok, red, green, blue = pcall(skin.GetAccentColor)
-        if ok and type(red) == "number" and type(green) == "number" and type(blue) == "number" then
-            entry.widget:GetCheckedTexture():SetVertexColor(red, green, blue)
-        end
-    elseif entry.kind == "tab" and entry.skinned then
-        Try(skin, "SetTabSelection", entry.widget, entry.selected == true)
-    end
-end
-
-local skinMethods = { window = "Shell", section = "Panel", button = "Button",
-    close = "CloseButton", edit = "EditBox", checkbox = "Checkbox", tab = "Tab" }
-
-local function SkinWindow(panel, skin)
-    for _, entry in ipairs(panel.themeElements) do
-        if not entry.skinned then
-            local method = skinMethods[entry.kind]
-            -- Older EUI skins cannot select custom tabs; keep our native indicator.
-            if entry.kind == "tab" and type(skin.SetTabSelection) ~= "function" then method = nil end
-            if method then entry.skinned = Try(skin, method, entry.widget) end
-            if entry.kind == "button" and entry.skinned then
-                entry.widget:GetFontString():SetAlpha(1)
-                Try(skin, "StateButtonLabel", entry.widget)
-            elseif (entry.kind == "close" or entry.kind == "tab") and entry.skinned then
-                -- These primitives supply their own glyph/label.
-                entry.widget:GetFontString():SetAlpha(0)
-            end
-        end
-        RefreshSkin(entry, skin)
-    end
+function Theme:GetAccentColor()
+    return unpack(colors.accent)
 end
 
 function Theme:Label(parent, text, size, role)
@@ -103,13 +57,12 @@ function Theme:Label(parent, text, size, role)
     label:SetJustifyH("LEFT")
     label:SetTextColor(unpack(colors[role or "text"]))
     label:SetText(text or "")
-    Track(parent, "font", label)
     return label
 end
 
 function Theme:Button(parent, text, style)
     local button = CreateFrame("Button", nil, parent)
-    local entry = Track(parent, style == "tab" and "tab" or "button", button)
+    local entry = {}
     if style == "tab" then button.themeTab = entry end
     local fill, edges = Surface(button, colors.surface)
     local label = self:Label(button, "", 13)
@@ -117,13 +70,11 @@ function Theme:Button(parent, text, style)
     button:SetFontString(label)
     button:SetText(text or "")
     local function Paint()
-        if entry.kind == "tab" and entry.skinned then return end
         local enabled = button:IsEnabled()
         local color = not enabled and colors.muted
-            or (not entry.skinned and style == "danger" and { 1, 0.47, 0.47 } or colors.text)
+            or (style == "danger" and colors.danger or colors.text)
         label:SetTextColor(unpack(color))
-        label:SetAlpha((enabled or entry.skinned) and 1 or 0.5)
-        if entry.skinned then return end
+        label:SetAlpha(enabled and 1 or 0.5)
         local primary = style == "primary" or entry.selected
         local hover = enabled and entry.hover
         local light = hover and 0.04 or 0
@@ -144,12 +95,11 @@ function Theme:SetTabSelected(button, selected)
     local entry = button.themeTab
     entry.selected = selected == true
     entry.paint()
-    if self.skin then RefreshSkin(entry, self.skin) end
 end
 
 function Theme:EditBox(parent)
     local edit = CreateFrame("EditBox", nil, parent)
-    local entry = Track(parent, "edit", edit)
+    local focused = false
     local _, edges = Surface(edit, { 0.025, 0.035, 0.05, 1 })
     edit:SetFontObject("GameFontHighlight")
     local font = edit:GetFont()
@@ -159,18 +109,16 @@ function Theme:EditBox(parent)
     edit:SetAutoFocus(false)
     local function Paint()
         edit:SetTextColor(unpack(edit:IsEnabled() and colors.text or colors.muted))
-        if entry.skinned then return end
-        Border(edges, entry.focused and colors.accent or colors.border)
+        Border(edges, focused and colors.accent or colors.border)
     end
-    edit:HookScript("OnEditFocusGained", function() entry.focused = true; Paint() end)
-    edit:HookScript("OnEditFocusLost", function() entry.focused = false; Paint() end)
+    edit:HookScript("OnEditFocusGained", function() focused = true; Paint() end)
+    edit:HookScript("OnEditFocusLost", function() focused = false; Paint() end)
     hooksecurefunc(edit, "SetEnabled", Paint)
     return edit
 end
 
 function Theme:Checkbox(parent)
     local checkbox = CreateFrame("CheckButton", nil, parent)
-    local entry = Track(parent, "checkbox", checkbox)
     local _, edges = Surface(checkbox, { 0.025, 0.035, 0.05, 1 }, 4)
     local checked = checkbox:CreateTexture(nil, "ARTWORK")
     checked:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
@@ -183,17 +131,16 @@ function Theme:Checkbox(parent)
     disabled:SetVertexColor(unpack(colors.muted))
     checkbox:SetDisabledCheckedTexture(disabled)
     checkbox:HookScript("OnEnter", function()
-        if not entry.skinned and checkbox:IsEnabled() then Border(edges, colors.accent) end
+        if checkbox:IsEnabled() then Border(edges, colors.accent) end
     end)
     checkbox:HookScript("OnLeave", function()
-        if not entry.skinned then Border(edges, colors.border) end
+        Border(edges, colors.border)
     end)
     return checkbox
 end
 
 function Theme:Window(name, width, height)
     local panel = CreateFrame("Frame", name, UIParent)
-    panel.themeOwner, panel.themeElements = panel, {}
     panel:SetSize(width, height)
     panel:SetPoint("CENTER")
     panel:SetFrameStrata("DIALOG")
@@ -204,23 +151,18 @@ function Theme:Window(name, width, height)
     panel:SetScript("OnDragStart", panel.StartMoving)
     panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
     panel:Hide()
-    Track(panel, "window", panel)
     Surface(panel, colors.background)
     local stripe = Texture(panel, "ARTWORK", colors.accent)
     stripe:SetPoint("TOPLEFT", 1, -1)
     stripe:SetPoint("TOPRIGHT", -1, -1)
     stripe:SetHeight(2)
-    -- Keep the icon in a child frame so optional skins do not strip its texture.
-    local iconFrame = CreateFrame("Frame", nil, panel)
-    iconFrame:SetSize(32, 32)
-    iconFrame:SetPoint("TOPLEFT", 24, -12)
-    panel.TitleIcon = iconFrame:CreateTexture(nil, "OVERLAY")
-    panel.TitleIcon:SetAllPoints(iconFrame)
+    panel.TitleIcon = panel:CreateTexture(nil, "OVERLAY")
+    panel.TitleIcon:SetSize(32, 32)
+    panel.TitleIcon:SetPoint("TOPLEFT", 24, -12)
     panel.TitleIcon:SetTexture("Interface\\AddOns\\LockInTools\\Media\\Icon.tga")
     panel.TitleText = self:Label(panel, "LockInTools", 16, "heading")
-    panel.TitleText:SetPoint("LEFT", iconFrame, "RIGHT", 10, 0)
+    panel.TitleText:SetPoint("LEFT", panel.TitleIcon, "RIGHT", 10, 0)
     panel.CloseButton = CreateFrame("Button", nil, panel)
-    Track(panel, "close", panel.CloseButton)
     panel.CloseButton:SetSize(32, 32)
     panel.CloseButton:SetPoint("TOPRIGHT", -10, -10)
     local close = self:Label(panel.CloseButton, "\195\151", 24, "muted")
@@ -229,24 +171,17 @@ function Theme:Window(name, width, height)
     panel.CloseButton:HookScript("OnEnter", function() close:SetTextColor(unpack(colors.text)) end)
     panel.CloseButton:HookScript("OnLeave", function() close:SetTextColor(unpack(colors.muted)) end)
     panel.CloseButton:SetScript("OnClick", function() panel:Hide() end)
-    self.windows[#self.windows + 1] = panel
     return panel
 end
 
 function Theme:Section(parent, x, y, width, height, title)
     local section = CreateFrame("Frame", nil, parent)
-    Track(parent, "section", section)
     section:SetPoint("TOPLEFT", x, -y)
     section:SetSize(width, height)
     Surface(section, colors.surface)
     local heading = self:Label(section, title, 18, "heading")
     heading:SetPoint("TOPLEFT", 16, -16)
     return section
-end
-
-function Theme:Finish(panel)
-    panel.themeFinished = true
-    if self.skin then SkinWindow(panel, self.skin) end
 end
 
 function Theme:Fit(panel)
@@ -256,19 +191,3 @@ function Theme:Fit(panel)
     end
 end
 
--- EUI owns the opt-in and dispatch timing. Keep native visuals until it calls us.
--- Turning a skin off is reload-bound; do not undo its installed visual hooks.
-if type(EllesmereUI) == "table" and type(EllesmereUI.RegisterSkin) == "function" then
-    pcall(EllesmereUI.RegisterSkin, addonName, function(skin)
-        if type(skin) ~= "table" then return end
-        Theme.skin = skin
-        for _, panel in ipairs(Theme.windows) do
-            if panel.themeFinished then SkinWindow(panel, skin) end
-        end
-        Try(skin, "OnLooksChanged", function()
-            for _, panel in ipairs(Theme.windows) do
-                if panel.themeFinished then SkinWindow(panel, skin) end
-            end
-        end)
-    end)
-end

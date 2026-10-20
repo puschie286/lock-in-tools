@@ -3,19 +3,6 @@ local UI = addon.Theme
 local WIDTH, ROW_WIDTH, ROW_HEIGHT, ROW_TOP = 326, 302, 42, 82
 local VISIBLE_ROWS = 5
 
-local function Accent()
-    local skin = UI.skin
-    if skin and type(skin.GetAccentColor) == "function" then
-        local ok, red, green, blue = pcall(skin.GetAccentColor)
-        local function Valid(value)
-            if type(issecretvalue) == "function" and issecretvalue(value) then return false end
-            return type(value) == "number" and value == value and value >= 0 and value <= 1
-        end
-        if ok and Valid(red) and Valid(green) and Valid(blue) then return red, green, blue end
-    end
-    return 0.27, 0.65, 1
-end
-
 local function Label(parent, text, x, y, width, size, role)
     local label = UI:Label(parent, text, size or 12, role)
     label:SetPoint("TOPLEFT", x, -y)
@@ -26,7 +13,6 @@ end
 
 local function CreateRow(panel)
     local row = CreateFrame("Frame", nil, panel)
-    row.themeOwner = panel
     row:SetSize(ROW_WIDTH, ROW_HEIGHT)
     row:EnableMouse(false)
     row.highlight = row:CreateTexture(nil, "BACKGROUND")
@@ -47,9 +33,10 @@ local function CreateRow(panel)
     return row
 end
 
-local function PaintRow(row, player, connected)
+local function PaintRow(row, player)
     row.player = player
     if not player then
+        row:SetAlpha(1)
         row.rank:SetText("")
         row.name:SetText("")
         row.level:SetText("")
@@ -61,10 +48,12 @@ local function PaintRow(row, player, connected)
         return
     end
 
-    local red, green, blue = Accent()
-    local rank = connected and player.rank or nil
+    local red, green, blue = UI:GetAccentColor()
+    local rank = player.rank
+    local stale = player.stale == true
+    row:SetAlpha(stale and 0.65 or 1)
     row.rank:SetText(rank and tostring(rank) or "—")
-    row.name:SetText(player.name .. (player.isSelf and " (you)" or ""))
+    row.name:SetText(player.name .. (player.isSelf and " (you)" or "") .. (stale and " (stale)" or ""))
     row.level:SetText(player.level and tostring(player.level) or "—")
     row.highlight:SetColorTexture(red, green, blue, 0.14)
     if player.isSelf then
@@ -91,7 +80,7 @@ local function PaintRow(row, player, connected)
         row.progress:SetPoint("TOPLEFT", 210, -23)
         row.progress:SetWidth(50)
         row.progress:SetJustifyH("RIGHT")
-        row.progress:SetText(maximum and "MAX" or percentage .. "%")
+        row.progress:SetText((stale and "~" or "") .. (maximum and "MAX" or percentage .. "%"))
         if not player.isSelf then
             if maximum then red, green, blue = 0.68, 0.61, 0.45
             else red, green, blue = 0.40, 0.51, 0.61 end
@@ -149,7 +138,7 @@ local function CreateOverlay()
     panel.TitleIcon:Hide()
     panel.TitleText:ClearAllPoints()
     panel.TitleText:SetPoint("TOPLEFT", 12, -13)
-    panel.TitleText:SetSize(204, 18)
+    panel.TitleText:SetSize(168, 18)
     local font, _, flags = panel.TitleText:GetFont()
     panel.TitleText:SetFont(font, 14, flags)
     panel.TitleText:SetText("Player ranking")
@@ -165,7 +154,7 @@ local function CreateOverlay()
 
     panel.header = CreateFrame("Frame", nil, panel)
     panel.header:SetPoint("TOPLEFT", 1, -1)
-    panel.header:SetSize(220, 34)
+    panel.header:SetSize(180, 34)
     panel.header:RegisterForDrag("LeftButton")
     panel.header:SetScript("OnDragStart", function()
         if addon:GetRankingSettings().locked then return end
@@ -179,6 +168,23 @@ local function CreateOverlay()
     panel.lock:SetScript("OnClick", function()
         addon:SetRankingLocked(not addon:GetRankingSettings().locked)
     end)
+    panel.help = UI:Button(panel, "Info")
+    panel.help:SetPoint("TOPRIGHT", -102, -8)
+    panel.help:SetSize(36, 23)
+    local function ShowHelp(button)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Ranking values")
+        GameTooltip:AddLine(addon:GetRankingHelpText(), 1, 1, 1, true)
+        GameTooltip:Show()
+    end
+    local function HideHelp(button)
+        if GameTooltip and GameTooltip:IsOwned(button) then GameTooltip:Hide() end
+    end
+    panel.help:HookScript("OnEnter", ShowHelp)
+    panel.help:HookScript("OnLeave", HideHelp)
+    panel.help:HookScript("OnHide", HideHelp)
+    panel.help:SetScript("OnClick", ShowHelp)
     panel.subtitle = Label(panel, "", 12, 38, ROW_WIDTH, 10, "muted")
     panel.subtitle:SetHeight(24)
     if panel.subtitle.SetWordWrap then panel.subtitle:SetWordWrap(true) end
@@ -215,7 +221,6 @@ local function CreateOverlay()
         panel:SetScript("OnUpdate", nil)
         if panel.moving then addon:SaveRankingPosition() end
     end)
-    UI:Finish(panel)
     return panel
 end
 
@@ -233,8 +238,8 @@ function addon:RefreshRankingOverlay()
     panel.lock:SetEnabled(not self.savedDataReadOnly)
     if settings.locked and panel.moving then self:SaveRankingPosition() end
 
-    local connected = ranking.connected and ranking.grouped and not ranking.switching
-    local players, own = connected and ranking.players or {}, ranking.own
+    local hasStandings = ranking.grouped and not ranking.switching
+    local players, own = hasStandings and ranking.players or {}, ranking.own
     if ranking.switching then
         panel.subtitle:SetText("Switching groups...")
         panel.empty:SetText("Waiting for the new group.")
@@ -243,43 +248,40 @@ function addon:RefreshRankingOverlay()
         panel.subtitle:SetText("Choose a group in Settings > Group")
         panel.empty:SetText("Your group standings will appear here.")
         own = nil
-    elseif not connected then
-        panel.subtitle:SetText("Connection lost — your progress only")
-        panel.empty:SetText("Waiting for your character's progress.")
+    elseif not ranking.connected then
+        panel.subtitle:SetText("Connection lost — showing last reports")
+        panel.empty:SetText("Waiting for usable player progress.")
     else
-        panel.subtitle:SetText("Active reports")
-        panel.empty:SetText("Waiting for current player reports.")
+        panel.subtitle:SetText("Last reported standings")
+        panel.empty:SetText("Waiting for usable player progress.")
     end
 
     local count, ownVisible = 0, false
     for index, row in ipairs(panel.rows) do
         local player = players[index]
-        if not connected and index == 1 then player = own end
-        PaintRow(row, player, connected)
+        PaintRow(row, player)
         if player then
             count = count + 1
             if own and (player.isSelf or player.id == own.id) then ownVisible = true end
         end
     end
     local bottom = ROW_TOP + math.max(1, count) * ROW_HEIGHT
-    if connected and own and not ownVisible then
+    if hasStandings and own and not ownVisible then
         panel.separator:ClearAllPoints()
         panel.separator:SetPoint("TOPLEFT", 12, -bottom - 4)
         panel.separator:Show()
         panel.ownRow:ClearAllPoints()
         panel.ownRow:SetPoint("TOPLEFT", 12, -bottom - 24)
-        PaintRow(panel.ownRow, own, connected)
+        PaintRow(panel.ownRow, own)
         bottom = bottom + 24 + ROW_HEIGHT
     else
         panel.separator:Hide()
-        PaintRow(panel.ownRow, nil, connected)
+        PaintRow(panel.ownRow, nil)
     end
     if count == 0 then panel.empty:Show() else panel.empty:Hide() end
-    if connected then
-        panel.summary:SetText(#players .. " ranked · " .. (ranking.awaiting or 0) .. " awaiting XP\n"
-            .. (ranking.stale or 0) .. " stale · " .. (ranking.inactive or 0) .. " inactive")
-    elseif ranking.grouped and not ranking.switching then
-        panel.summary:SetText("Group rank unavailable")
+    if hasStandings then
+        panel.summary:SetText(#players .. " ranked · " .. (ranking.stale or 0) .. " stale\n"
+            .. (ranking.awaiting or 0) .. " awaiting XP")
     else panel.summary:SetText("") end
     panel.summary:ClearAllPoints()
     panel.summary:SetPoint("TOPLEFT", 12, -bottom - 10)

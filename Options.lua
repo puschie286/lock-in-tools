@@ -108,7 +108,6 @@ local function CreateView()
         tinsert(UISpecialFrames, "LockInToolsWindow")
     end
     local panel = CreateFrame("Frame", nil, window)
-    panel.themeOwner = window
     panel:SetAllPoints(window)
     panel:Hide()
     return panel
@@ -189,7 +188,6 @@ end
 
 local function RestedXPList(parent, y, count, rowHeight, makeRow, render)
     local list = CreateFrame("Frame", nil, parent)
-    list.themeOwner = parent.themeOwner
     list:SetPoint("TOPLEFT", 16, -y)
     list:SetSize(648, count * rowHeight)
     list.offset, list.rows = 0, {}
@@ -198,7 +196,6 @@ local function RestedXPList(parent, y, count, rowHeight, makeRow, render)
     list.empty:SetSize(616, rowHeight * count)
     for index = 1, count do
         local row = CreateFrame("Frame", nil, list)
-        row.themeOwner = list.themeOwner
         row:SetPoint("TOPLEFT", 0, -(index - 1) * rowHeight)
         row:SetSize(620, rowHeight)
         makeRow(row)
@@ -249,11 +246,9 @@ local function CreateRestedXPPage(panel)
     local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP")
     panel.pages.restedxp = page
     local main = CreateFrame("Frame", nil, page)
-    main.themeOwner = page.themeOwner
     main:SetAllPoints(page)
     page.main = main
     local publish = CreateFrame("Frame", nil, page)
-    publish.themeOwner = page.themeOwner
     publish:SetAllPoints(page)
     publish:Hide()
     page.publish = publish
@@ -332,6 +327,7 @@ local function CreateRestedXPPage(panel)
     end)
     OptionTooltip(page, panel.restedxpUpdate, "Update guides",
         "Discover available group packs and install changed content from publishers you follow. "
+            .. "One member must use Share export first; installed guides alone are not shared. "
             .. "Guide versions are displayed above; pack content identifies changes.")
     panel.restedxpShare = UI:Button(main, "Share export")
     panel.restedxpShare:SetPoint("TOPRIGHT", -16, -12)
@@ -706,9 +702,10 @@ local function CreateOptionsPanel()
     BindPreference(panel, panel.rankingEnabled, function() return addon:GetRankingSettings().enabled end,
         addon.SetRankingEnabled)
     PreferenceLabel(ranking, panel.rankingEnabled, "Show player ranking overlay",
-        "Show the top five current reports, plus your own position when outside the top five.\n\n"
+        "Show the top five last reported standings, plus your own position when outside the top five.\n\n"
             .. "Higher levels rank first, then exact XP progress. Equal progress shares a rank. "
-            .. "Retained or incomplete reports stay unranked. Chat and position sharing can remain off.")
+            .. "Offline players use saved progress marked stale. Only incomplete reports stay unranked. "
+            .. "Chat and position sharing can remain off.")
 
     panel.rankingLocked = UI:Checkbox(ranking)
     panel.rankingLocked:SetPoint("TOPLEFT", 12, -130)
@@ -722,6 +719,11 @@ local function CreateOptionsPanel()
         "Use /lit ranking to toggle the overlay. The full roster remains in Content > Overview.", 12, "muted")
     rankingHint:SetPoint("TOPLEFT", 16, -182)
     rankingHint:SetSize(648, 40)
+    local rankingHelpTitle = UI:Label(ranking, "How to read the ranking", 13)
+    rankingHelpTitle:SetPoint("TOPLEFT", 16, -229)
+    local rankingHelp = UI:Label(ranking, addon:GetRankingHelpText(), 12, "muted")
+    rankingHelp:SetPoint("TOPLEFT", 16, -251)
+    rankingHelp:SetSize(648, 110)
 
     CreateRestedXPPage(panel)
 
@@ -784,7 +786,6 @@ local function CreateOptionsPanel()
         ClearGroupKeys(panel)
     end)
 
-    UI:Finish(addon.mainPanel)
     return panel
 end
 
@@ -874,7 +875,6 @@ local function CreateContentPanel()
     panel:SetScript("OnHide", function()
         panel.overviewPage:Deactivate()
     end)
-    UI:Finish(addon.mainPanel)
     return panel
 end
 

@@ -52,19 +52,6 @@ local function ProgressTooltip(cell)
     GameTooltip:Show()
 end
 
-local function ProgressColor()
-    local skin = UI.skin
-    if skin and type(skin.GetAccentColor) == "function" then
-        local ok, red, green, blue = pcall(skin.GetAccentColor)
-        local function Valid(value)
-            if type(issecretvalue) == "function" and issecretvalue(value) then return false end
-            return type(value) == "number" and value == value and value >= 0 and value <= 1
-        end
-        if ok and Valid(red) and Valid(green) and Valid(blue) then return red, green, blue end
-    end
-    return 0.27, 0.65, 1
-end
-
 local function RefreshProgress(row, player)
     local cell = row.levelCell
     cell.player = player
@@ -79,7 +66,7 @@ local function RefreshProgress(row, player)
             local fraction = math.max(0, math.min(1, player.xp / player.xpMax))
             row.progress:SetText("· " .. (stale and "~" or "") .. math.floor(fraction * 100) .. "%")
             row.progress:SetAlpha(stale and 0.55 or 1)
-            local red, green, blue = ProgressColor()
+            local red, green, blue = UI:GetAccentColor()
             row.progressTrack:SetColorTexture(red * 0.25, green * 0.25, blue * 0.25, 0.8)
             row.progressFill:SetColorTexture(red, green, blue, stale and 0.35 or 1)
             row.progressTrack:Show()
@@ -137,7 +124,6 @@ end
 
 local function CreateActionMenu(page, panel)
     local menu = CreateFrame("Button", "LockInToolsOverviewActions", page)
-    menu.themeOwner = page.themeOwner
     menu:SetAllPoints(UIParent)
     menu:SetFrameStrata("FULLSCREEN_DIALOG")
     menu:EnableMouse(true)
@@ -213,14 +199,12 @@ function addon:CreateOverviewPage(panel)
     page.actionMenu = CreateActionMenu(page, panel)
     for index = 1, VISIBLE_ROWS do
         local row = CreateFrame("Frame", nil, page)
-        row.themeOwner = page.themeOwner
         row:SetPoint("TOPLEFT", 16, -48 - (index - 1) * ROW_HEIGHT)
         row:SetSize(626, ROW_HEIGHT)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
         row.name:SetSize(164, 30)
         row.levelCell = CreateFrame("Frame", nil, row)
-        row.levelCell.themeOwner = row.themeOwner
         row.levelCell:SetPoint("TOPLEFT", 172, -2)
         row.levelCell:SetSize(80, 36)
         row.levelCell:EnableMouse(true)
