@@ -90,7 +90,7 @@ function addon:OnLogin()
     end
 
     if self.db.showWelcome then
-        self:Print("Loaded. Type /lit to open Content.")
+        self:Print("Loaded version " .. self.version .. ". Type /lit to open Content.")
     end
 
     self:OnChatLogin()

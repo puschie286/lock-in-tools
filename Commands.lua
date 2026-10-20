@@ -5,10 +5,8 @@ function addon:ShowHelp()
     self:Print("/lit options - Open Settings for your group and features.")
     self:Print("/lit overview - Show group players and party actions.")
     self:Print("/lit ranking [on|off|lock|unlock] - Toggle or arrange the player ranking overlay.")
-    self:Print("/lit rxp test [player] [pack-id] - Test remote discovery, download and native re-import, even matching versions.")
-    self:Print("/lit rxp test random - Choose a random publisher, then one of their packs.")
-    self:Print("/lit rxp test local|cancel - Measure local guide ID/version checks, or cancel a peer test.")
-    self:Print("/lit rxp stats - Show recent RestedXP timings and group traffic counts.")
+    self:Print("/lit rxp [import] - Open the local RestedXP import helper.")
+    self:Print("/lit rxp cleanup - Remove old RestedXP data from LockInTools settings.")
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
@@ -56,20 +54,7 @@ function addon:HandleRankingCommand(argument)
 end
 
 function addon:HandleRestedXPCommand(argument)
-    local arguments = {}
-    for word in argument:gmatch("%S+") do arguments[#arguments + 1] = word end
-    local method, source, packID, options
-    if arguments[1] == "stats" and #arguments == 1 then method = "ShowRestedXPPerformance"
-    elseif arguments[1] == "test" then
-        if #arguments == 2 and arguments[2] == "local" then method = "StartRestedXPBenchmark"
-        elseif #arguments == 2 and arguments[2] == "cancel" then method = "CancelRestedXPPeerTest"
-        elseif #arguments == 2 and arguments[2] == "random" then
-            method, options = "StartRestedXPPeerTest", { random = true }
-        elseif #arguments <= 3 and arguments[2] ~= "local" and arguments[2] ~= "cancel" and arguments[2] ~= "random" then
-            method, source, packID = "StartRestedXPPeerTest", arguments[2], arguments[3]
-        end
-    end
-    if not method then
+    if argument ~= "" and argument ~= "import" and argument ~= "cleanup" then
         self:Print("Unknown command. Type /lit help for commands.")
         return
     end
@@ -77,13 +62,10 @@ function addon:HandleRestedXPCommand(argument)
         self:Print("Still loading. Please try again after login.")
         return
     end
-    local action = self[method]
-    if type(action) ~= "function" then
-        self:Print("RestedXP diagnostics are unavailable. Reload LockInTools and try again.")
-        return
-    end
-    local success, message = action(self, source, packID, options)
-    if success == false then self:Print(message or "Unable to run RestedXP diagnostics.") end
+    if argument == "cleanup" then
+        local _, message = self:CleanupRestedXPData()
+        self:Print(message)
+    else self:OpenOptions("restedxp") end
 end
 
 function addon:HandleCommand(message)

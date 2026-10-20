@@ -44,6 +44,8 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetHeight(height) self.height = height end
     function methods:SetMultiLine(multiline) self.multiline = multiline end
     function methods:SetMaxLetters(maximum) self.maxLetters = maximum end
+    function methods:SetMaxBytes(maximum) self.maxBytes = maximum end
+    function methods:GetMaxBytes() return self.maxBytes or 0 end
     function methods:GetNumLines()
         local lines = 0
         for line in (self:GetText() .. "\n"):gmatch("([^\n]*)\n") do
@@ -103,9 +105,14 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:GetFont() return unpack(self.font or { "Fonts\\FRIZQT__.TTF", 12, "" }) end
     function methods:SetFontObject(fontObject) self.fontObject = fontObject end
     function methods:SetAlpha(alpha) self.alpha = alpha end
+    local function nativeText(widget, text)
+        if widget.maxLetters and widget.maxLetters > 0 then text = text:sub(1, widget.maxLetters) end
+        if widget.maxBytes and widget.maxBytes > 0 then text = text:sub(1, widget.maxBytes) end
+        widget.maxNativeTextBytes = math.max(widget.maxNativeTextBytes or 0, #text)
+        return text
+    end
     function methods:SetText(text)
-        if self.maxLetters then text = text:sub(1, self.maxLetters) end
-        self.text = text
+        self.text = nativeText(self, text)
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
     function methods:GetText() return self.text or "" end
@@ -162,12 +169,12 @@ local function loadOptions(uiAddon, uiEnvironment)
     end
     function methods:CreateFontString()
         local fontString = makeWidget()
-        fontString.parent = self
+        fontString:SetParent(self)
         return fontString
     end
     function methods:CreateTexture()
         local texture = makeWidget()
-        texture.parent = self
+        texture:SetParent(self)
         return texture
     end
     function methods:IsShown() return self.shown end
@@ -199,8 +206,29 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:UserInput(text)
         assert(self.enabled, "disabled fields do not accept user input")
         assert(self:IsVisible(), "hidden fields do not accept user input")
-        self.text = self.maxLetters and text:sub(1, self.maxLetters) or text
+        self.text = nativeText(self, text)
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
+    end
+    function methods:Paste(text, chunkSize)
+        assert(self.enabled, "disabled fields do not accept pasted input")
+        assert(self:IsVisible(), "hidden fields do not accept pasted input")
+        chunkSize = chunkSize or 1
+        assert(chunkSize >= 1 and chunkSize == math.floor(chunkSize), "paste chunks need a positive integer size")
+        self:SetFocus()
+        -- Native clipboard input dispatches OnChar per character, including text
+        -- beyond the byte cap. A single callback for a multi-MiB string conceals
+        -- the callback and table-growth costs that make real pastes slow.
+        -- Optional larger chunks also exercise multi-byte OnChar callbacks.
+        for position = 1, #text, chunkSize do
+            local character = text:sub(position, position + chunkSize - 1)
+            self.text = nativeText(self, (self.text or "") .. character)
+            if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
+            -- Handlers may switch during a paste; never cache a callback here.
+            if self.scripts.OnChar then self.scripts.OnChar(self, character) end
+        end
+    end
+    function methods:AdvanceFrame(elapsed)
+        if self:IsVisible() and self.scripts.OnUpdate then self.scripts.OnUpdate(self, elapsed) end
     end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
         if frameType == "Button" and name == "LibDBIcon10_LockInTools" then

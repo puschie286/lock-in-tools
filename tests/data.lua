@@ -976,13 +976,6 @@ do
     assert(not current:RegisterDataRequest("missing", function() end, false))
     assert(not current:RequestData("missing", "") and not current:RequestData("snapshot", nil))
     assert(current:IsDataSelf("SELF-TestRealm") and current:IsDataSelf("Native-TestRealm"))
-    local identities = current:GetDataSelfIdentities()
-    assert(identities["self-testrealm"] and identities["native-testrealm"],
-        "public self identities include both native full-name APIs")
-    identities["self-testrealm"], identities["forged-testrealm"] = nil, true
-    local fresh = current:GetDataSelfIdentities()
-    assert(fresh["self-testrealm"] and not fresh["forged-testrealm"],
-        "returned self identity sets cannot mutate trusted alias detection")
     local accepted, id = current:RequestData("snapshot", "")
     assert(accepted)
     local prefix = "1|R|snapshot|" .. id .. "|"
@@ -1004,41 +997,6 @@ do
     assert(not current:ReceiveData("LateFriend", prefix .. "self-testrealm|expired"),
         "The response window is closed at ten seconds even without another request")
     assert(#responses == 1)
-end
-
--- Native addon-message senders can use an unmodified alias different from the
--- name returned by UnitFullName, including character names containing spaces.
-do
-    local current, clock = newAddon(nil, nil, nil, { configure = function(environment)
-        environment.UnitFullName = function() return "Milchtute", "Classic Beta PvP" end
-        environment.NameUtil = { GetUnmodifiedUnitFullName = function() return "Milch Tute-Classic Beta PvP" end }
-    end })
-    local identities = current:GetDataSelfIdentities()
-    assert(identities["milchtute-classicbetapvp"] and identities["milch tute-classicbetapvp"],
-        "self alias routing preserves character spaces and normalizes realm spaces consistently")
-    local environment = clock.environment
-    environment.UnitFullName = function() return "Milchtute", nil end
-    environment.NameUtil.GetUnmodifiedUnitFullName = function() return "Milch Tute" end
-    environment.GetNormalizedRealmName = function() return "Classic Beta PvP" end
-    identities = current:GetDataSelfIdentities()
-    assert(identities["milchtute-classicbetapvp"] and identities["milch tute-classicbetapvp"],
-        "bare self aliases use the available normalized realm fallback")
-    local state = current.dataState
-    current.dataState = nil
-    assert(next(current:GetDataSelfIdentities()) == nil, "self aliases are empty before data initialization")
-    current.dataState = state
-    local secret = {}
-    environment.issecretvalue = function(value) return rawequal(value, secret) end
-    environment.UnitFullName = function() return secret, secret end
-    environment.NameUtil.GetUnmodifiedUnitFullName = function() return secret end
-    assert(next(current:GetDataSelfIdentities()) == nil, "secret names never enter public identity sets")
-    environment.UnitFullName = function() return "Milchtute", nil end
-    environment.NameUtil.GetUnmodifiedUnitFullName = function() return "Milch Tute" end
-    environment.GetNormalizedRealmName = function() return secret end
-    assert(next(current:GetDataSelfIdentities()) == nil, "secret fallback realms cannot be concatenated into identities")
-    environment.UnitFullName = function() error("native name unavailable") end
-    environment.NameUtil.GetUnmodifiedUnitFullName = function() error("native alias unavailable") end
-    assert(next(current:GetDataSelfIdentities()) == nil, "unavailable native name APIs leave an empty identity set")
 end
 
 -- Both kinds of frames obey the same NUL and byte limits as streaming data.

@@ -40,6 +40,8 @@ assert(addon.db.schemaVersion == 3 and addon.db.showWelcome == true)
 assert(addon.db.chat.autoJoin == true and not addon:HasGroup())
 fire("PLAYER_LOGIN")
 assert(addon.ready and #messages == 1, "announce once at login")
+assert(messages[1]:find("Loaded version 0.2.0. Type /lit to open Content.", 1, true),
+    "the initial loading message includes the version from addon metadata")
 assert(world.contentOpened == 1 and world.welcomeOpened == 0,
     "show Content after login when initial setup is enabled and no group is configured")
 fire("PLAYER_LOGIN")
@@ -126,100 +128,45 @@ for _, damaged in ipairs({ false, "invalid", { schemaVersion = "bad", showWelcom
     assert(type(repaired.db.chat) == "table" and not repaired:HasGroup())
 end
 
--- Peer-test commands select exactly one backend action. The backend owns
--- discovery, traffic and progress output; parsing must not perform those itself.
+-- RestedXP commands open only the local import helper and require no group.
 do
-    local diagnostics, api, output, _, diagnosticWorld = loadAddon(settings(SECRET, false), false)
-    local invoke = api.SlashCmdList.LOCKINTOOLS
-    local calls = { peer = {}, localTests = 0, cancel = 0, stats = 0 }
-    local failures = {}
-    function diagnostics:StartRestedXPPeerTest(source, packID, options)
-        calls.peer[#calls.peer + 1] = { source = source, packID = packID, options = options }
-        if failures.peer then return false, failures.peer end
-        return true
-    end
-    function diagnostics:StartRestedXPBenchmark()
-        calls.localTests = calls.localTests + 1
-        if failures.localTests then return false, failures.localTests end
-        return true
-    end
-    function diagnostics:CancelRestedXPPeerTest()
-        calls.cancel = calls.cancel + 1
-        if failures.cancel then return false, failures.cancel end
-        return true
-    end
-    function diagnostics:ShowRestedXPPerformance()
-        calls.stats = calls.stats + 1
-        self:Print("Local RestedXP performance report.")
-    end
-    for _, pending in ipairs({ "rxp test", "rxp test random", "rxp test local", "rxp test cancel", "rxp stats" }) do
-        invoke(pending)
-        assert(output[#output]:find("Still loading", 1, true), "valid RestedXP diagnostics wait for initialization and login")
-    end
-    assert(#calls.peer == 0 and calls.localTests == 0 and calls.cancel == 0 and calls.stats == 0,
-        "loading commands invoke no peer, local, cancellation or reporting backend")
-    diagnosticWorld:initialize()
-    local guideSends, dataSends, statusSends = #diagnosticWorld.guideSends, #diagnosticWorld.dataSends,
-        #diagnosticWorld.statusSends
-    invoke("  RXp TeST  ")
-    invoke("rxp test Alpha-TestRealm")
-    invoke("restedxp test Alpha-TestRealm Leveling")
-    invoke("rxp test local")
-    invoke("restedxp test cancel")
-    invoke("restedxp stats")
-    assert(#calls.peer == 3 and calls.peer[1].source == nil and calls.peer[1].packID == nil
-        and calls.peer[2].source == "alpha-testrealm" and calls.peer[2].packID == nil
-        and calls.peer[3].source == "alpha-testrealm" and calls.peer[3].packID == "leveling",
-        "default, player-targeted and player-plus-pack peer tests forward their optional selection exactly once")
-    invoke("  RXp TeST RaNDoM  ")
-    invoke("restedxp test random")
-    invoke("rxp test Random-TestRealm")
-    assert(#calls.peer == 6 and calls.peer[4].source == nil and calls.peer[4].packID == nil
-        and calls.peer[4].options.random and calls.peer[5].source == nil and calls.peer[5].packID == nil
-        and calls.peer[5].options.random and calls.peer[6].source == "random-testrealm"
-        and calls.peer[6].options == nil and calls.peer[1].options == nil,
-        "random mode forwards only its option through aliases and casing while realm-qualified players remain explicit targets")
-    assert(calls.localTests == 1 and calls.cancel == 1 and calls.stats == 1
-        and output[#output]:find("performance report", 1, true),
-        "local, cancel and passive stats route independently through the RestedXP alias")
-    failures.peer = "A RestedXP peer test is already running."
-    invoke("rxp test")
-    assert(#calls.peer == 7 and output[#output]:find(failures.peer, 1, true), "peer test rejection reports its actionable error")
-    failures.localTests = "Local metadata timing is unavailable."
-    invoke("rxp test local")
-    assert(calls.localTests == 2 and output[#output]:find(failures.localTests, 1, true), "local benchmark failures remain visible")
-    failures.cancel = "There is no active peer test."
-    invoke("rxp test cancel")
-    assert(calls.cancel == 2 and output[#output]:find(failures.cancel, 1, true), "cancellation failure remains visible")
-    local previousStats = diagnostics.ShowRestedXPPerformance
-    diagnostics.ShowRestedXPPerformance = nil
-    invoke("rxp stats")
-    assert(output[#output]:find("diagnostics are unavailable", 1, true) and calls.stats == 1,
-        "missing diagnostics fail with reload guidance instead of a Lua error")
-    diagnostics.ShowRestedXPPerformance = previousStats
-    local previousTest = diagnostics.StartRestedXPPeerTest
-    diagnostics.StartRestedXPPeerTest = nil
-    invoke("rxp test")
-    assert(output[#output]:find("diagnostics are unavailable", 1, true) and calls.stats == 1 and calls.localTests == 2,
-        "a missing peer-test implementation cannot accidentally run local timing or passive stats")
-    diagnostics.StartRestedXPPeerTest = previousTest
-    for _, invalid in ipairs({ "rxp", "rxp update", "rxp test alpha pack extra", "rxp test local extra",
-        "rxp test cancel extra", "rxp test random extra", "restedxp stats extra" }) do
+    local helper, api, output, _, helperWorld = loadAddon(
+        { schemaVersion = 3, showWelcome = false, chat = { autoJoin = false } }, false)
+    local invoke, opened = api.SlashCmdList.LOCKINTOOLS, {}
+    function helper:OpenOptions(category) opened[#opened + 1] = category end
+    function helper:ImportRestedXPString() error("Opening the helper must not start an import") end
+    invoke("rxp")
+    assert(#opened == 0 and output[#output]:find("Still loading", 1, true), "the helper waits for addon loading")
+    invoke("restedxp import")
+    assert(#opened == 0 and output[#output]:find("Still loading", 1, true), "the import alias also waits for login")
+    invoke("rxp cleanup")
+    assert(output[#output]:find("Still loading", 1, true), "cleanup waits for saved data initialization")
+    helperWorld:initialize()
+    assert(not helper:HasGroup(), "the import command fixture has no group")
+    local guideSends, dataSends, statusSends = #(helperWorld.guideSends or {}), #helperWorld.dataSends, #helperWorld.statusSends
+    for _, valid in ipairs({ "rxp", "  RXp IMPORT  ", "restedxp", "restedxp import" }) do invoke(valid) end
+    assert(#opened == 4, "both command names open the helper with an optional import verb")
+    for _, category in ipairs(opened) do assert(category == "restedxp", "the command selects the RestedXP settings tab") end
+    helper.db.restedxp = { groups = { old = { data = "old export" } } }
+    invoke("  RESTEDXP CLEANUP  ")
+    assert(helper.db.restedxp == nil and #opened == 4 and output[#output]:find("/reload", 1, true),
+        "cleanup removes obsolete saved data without opening the form and explains when the file is saved")
+    for _, invalid in ipairs({ "rxp import extra", "rxp test", "rxp test random", "rxp test local",
+        "rxp stats", "rxp cancel", "restedxp update", "rxp share", "rxp cleanup extra" }) do
         invoke(invalid)
-        assert(output[#output]:find("Unknown command", 1, true), "unsupported diagnostic verbs remain invalid")
+        assert(output[#output]:find("Unknown command", 1, true), "removed sharing and diagnostics commands remain unavailable")
     end
-    assert(#calls.peer == 7 and calls.localTests == 2 and calls.cancel == 2 and calls.stats == 1
-        and #diagnosticWorld.guideSends == guideSends
-        and #diagnosticWorld.dataSends == dataSends and #diagnosticWorld.statusSends == statusSends,
-        "command parsing and rejected argument shapes add no group traffic outside the selected backend")
+    assert(#opened == 4 and #(helperWorld.guideSends or {}) == guideSends
+        and #helperWorld.dataSends == dataSends and #helperWorld.statusSends == statusSends,
+        "helper navigation and rejected commands do not import or initiate group traffic")
     local first = #output + 1
     invoke("help")
-    assert(contains(output, "/lit rxp test", first) and contains(output, "/lit rxp stats", first),
-        "help lists the peer test and passive statistics commands")
-    assert(contains(output, "test [player] [pack-id]", first) and contains(output, "test local|cancel", first)
-        and contains(output, "native re-import", first) and contains(output, "test random", first),
-        "help describes remote testing, random selection and explicit local/cancel variants")
+    assert(contains(output, "/lit rxp [import]", first)
+        and contains(output, "/lit rxp cleanup", first)
+        and not contains(output, "/lit rxp test", first) and not contains(output, "/lit rxp stats", first)
+        and not contains(output, "/lit rxp cancel", first), "help exposes only the local import entry point")
 end
+
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
 print("PASS: startup, migrations, commands and saved-data compatibility")

@@ -186,250 +186,175 @@ local function GuideText(value)
     return tostring(value or ""):gsub("|", "||")
 end
 
-local function RestedXPList(parent, y, count, rowHeight, makeRow, render)
-    local list = CreateFrame("Frame", nil, parent)
-    list:SetPoint("TOPLEFT", 16, -y)
-    list:SetSize(648, count * rowHeight)
-    list.offset, list.rows = 0, {}
-    list.empty = UI:Label(list, "", 12, "muted")
-    list.empty:SetPoint("TOPLEFT", 0, -4)
-    list.empty:SetSize(616, rowHeight * count)
-    for index = 1, count do
-        local row = CreateFrame("Frame", nil, list)
-        row:SetPoint("TOPLEFT", 0, -(index - 1) * rowHeight)
-        row:SetSize(620, rowHeight)
-        makeRow(row)
-        list.rows[index] = row
-    end
-    local scrollbar = CreateFrame("Slider", nil, list)
-    list.scrollbar = scrollbar
-    scrollbar:SetPoint("TOPRIGHT", 0, 0)
-    scrollbar:SetSize(14, count * rowHeight)
-    scrollbar:SetOrientation("VERTICAL")
-    scrollbar:SetValueStep(1)
-    scrollbar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
-    scrollbar:GetThumbTexture():SetSize(20, 24)
-    function list:Refresh(entries)
-        self.entries = entries or {}
-        self.maxOffset = math.max(0, #self.entries - count)
-        self.offset = math.max(0, math.min(self.offset, self.maxOffset))
-        self.refreshing = true
-        scrollbar:SetMinMaxValues(0, math.max(1, self.maxOffset))
-        scrollbar:SetValue(self.offset)
-        self.refreshing = false
-        if self.maxOffset > 0 then scrollbar:Show() else scrollbar:Hide() end
-        if #self.entries == 0 then self.empty:Show() else self.empty:Hide() end
-        for index, row in ipairs(self.rows) do
-            local entry = self.entries[self.offset + index]
-            if entry then render(row, entry); row:Show() else row:Hide() end
-        end
-    end
-    local function SetOffset(value)
-        for _, row in ipairs(list.rows) do
-            HideTooltip(row)
-            if row.follow then HideTooltip(row.follow) end
-        end
-        list.offset = math.max(0, math.min(math.floor(value + 0.5), list.maxOffset or 0))
-        list:Refresh(list.entries)
-    end
-    scrollbar:SetScript("OnValueChanged", function(_, value)
-        if not list.refreshing then SetOffset(value) end
-    end)
-    list:EnableMouseWheel(true)
-    scrollbar:EnableMouseWheel(true)
-    list:SetScript("OnMouseWheel", function(_, delta) SetOffset(list.offset - delta) end)
-    scrollbar:SetScript("OnMouseWheel", function(_, delta) SetOffset(list.offset - delta) end)
-    return list
-end
-
 local function CreateRestedXPPage(panel)
-    local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP")
+    local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP import")
     panel.pages.restedxp = page
-    local main = CreateFrame("Frame", nil, page)
-    main:SetAllPoints(page)
-    page.main = main
-    local publish = CreateFrame("Frame", nil, page)
-    publish:SetAllPoints(page)
-    publish:Hide()
-    page.publish = publish
+    panel.restedxpNotice = UI:Label(page, "", 12, "muted")
+    panel.restedxpNotice:SetPoint("TOPLEFT", 16, -48)
+    panel.restedxpNotice:SetSize(648, 36)
 
-    local summary = CreateFrame("Frame", nil, main)
-    summary:SetPoint("TOPLEFT", 16, -48)
-    summary:SetSize(648, 64)
-    summary:EnableMouse(true)
-    panel.restedxpSummary = summary
-    local heading = UI:Label(summary, "Guide status", 12, "muted")
-    heading:SetPoint("TOPLEFT", 0, 0)
-    panel.restedxpStatus = UI:Label(summary, "", 20)
-    panel.restedxpStatus:SetPoint("TOPLEFT", 0, -20)
-    panel.restedxpStatus:SetSize(648, 30)
-    OptionTooltip(page, summary, "Guide status", function() return page.guideDetails or "" end)
-
-    local available = UI:Label(main, "Publishers", 13)
-    available:SetPoint("TOPLEFT", 16, -128)
-    panel.restedxpPublishers = RestedXPList(main, 152, 4, 40, function(row)
-        row.name = UI:Label(row, "", 12)
-        row.name:SetPoint("TOPLEFT", 0, 0)
-        row.name:SetSize(514, 19)
-        row.detail = UI:Label(row, "", 11, "muted")
-        row.detail:SetPoint("TOPLEFT", 0, -18)
-        row.detail:SetSize(514, 18)
-        row.follow = UI:Button(row, "Follow")
-        row.follow:SetPoint("TOPRIGHT", 0, -2)
-        row.follow:SetSize(96, 30)
-        row.follow:SetScript("OnClick", function()
-            if not row.publisher then return end
-            local success, message = addon:SelectRestedXPPublisher(row.publisher.source)
-            SetFeedback(panel, success and "Publisher selected. Click Update guides to download." or message, not success)
-            addon:RefreshOptions()
-        end)
-        OptionTooltip(page, row.follow, "Follow publisher",
-            "Follow all guides currently shared by this player. Future updates follow their published content. "
-                .. "Only follow a publisher whose guides you trust.")
-    end, function(row, publisher)
-        row.publisher = publisher
-        row.name:SetText(GuideText(publisher.source or "You") .. (publisher.localPack and " (you)" or ""))
-        row.detail:SetText(GuideText(publisher.status))
-        row.follow:SetText(publisher.localPack and "Shared" or publisher.selected and "Following"
-            or publisher.canFollow and "Follow" or "Offline")
-        row.follow:SetEnabled(not page.readOnly and not page.busy and publisher.canFollow and not publisher.selected)
-    end)
-    panel.restedxpPublishers.empty:SetText("No publishers found. Imported guides are shared automatically with your LIT group.")
-    panel.restedxpUpdate = UI:Button(main, "Update guides", "primary")
-    panel.restedxpUpdate:SetPoint("TOPLEFT", 16, -338)
-    panel.restedxpUpdate:SetSize(160, 32)
-    panel.restedxpUpdate:SetScript("OnClick", function()
-        local success, message = addon:UpdateRestedXPGuides()
-        SetFeedback(panel, not success and message or nil, not success)
-        addon:RefreshOptions()
-    end)
-    OptionTooltip(page, panel.restedxpUpdate, "Update guides",
-        "Find publishers in your group and install updates from those you follow. "
-            .. "Imported guides are shared automatically on login and refreshed after RestedXP imports. "
-            .. "Hover over Guide status for installation and sharing details.")
-    local hint = UI:Label(main, "Follow a publisher, then click Update guides.\nHover over Guide status for details.", 11, "muted")
-    hint:SetPoint("TOPLEFT", 192, -338)
-    hint:SetSize(472, 32)
-    panel.restedxpShare = UI:Button(main, "Share export")
-    panel.restedxpShare:SetPoint("TOPRIGHT", -16, -12)
-    panel.restedxpShare:SetSize(128, 28)
-    OptionTooltip(page, panel.restedxpShare, "Share export",
-        "Imported guides are shared automatically when their complete source is available. "
-            .. "Use this form to share an export that cannot be recovered from installed guides.")
-
-    local packLabel = UI:Label(publish, "Pack ID", 12, "muted")
-    packLabel:SetPoint("TOPLEFT", 16, -52)
-    panel.restedxpPackID = UI:EditBox(publish)
-    panel.restedxpPackID:SetPoint("TOPLEFT", 16, -74)
-    panel.restedxpPackID:SetSize(300, 30)
-    panel.restedxpPackID:SetMaxLetters(40)
-    OptionTooltip(page, panel.restedxpPackID, "Pack ID",
-        "Choose a short name using letters, numbers, hyphens or underscores. "
-            .. "Use the same ID when publishing updated content so followers receive the update.")
-    local tagLabel = UI:Label(publish, "Export's source BattleTag", 12, "muted")
-    tagLabel:SetPoint("TOPLEFT", 332, -52)
-    panel.restedxpBattleTag = UI:EditBox(publish)
-    panel.restedxpBattleTag:SetPoint("TOPLEFT", 332, -74)
-    panel.restedxpBattleTag:SetSize(332, 30)
+    local sourceLabel = UI:Label(page, "Export's source BattleTag", 12, "muted")
+    sourceLabel:SetPoint("TOPLEFT", 16, -100)
+    panel.restedxpBattleTag = UI:EditBox(page)
+    panel.restedxpBattleTag:SetPoint("TOPLEFT", 16, -122)
+    panel.restedxpBattleTag:SetSize(648, 30)
     panel.restedxpBattleTag:SetMaxLetters(128)
+    panel.restedxpBattleTag:SetMaxBytes(128)
     OptionTooltip(page, panel.restedxpBattleTag, "Export's source BattleTag",
-        "Enter the BattleTag this export was created for. It is used only to read this export; "
-            .. "each recipient uses their own BattleTag locally.")
-    local exportLabel = UI:Label(publish, "Paste a RestedXP export (Ctrl+V)", 12, "muted")
-    exportLabel:SetPoint("TOPLEFT", 16, -120)
-    local scroll = CreateFrame("ScrollFrame", nil, publish)
-    scroll:SetPoint("TOPLEFT", 16, -142)
-    scroll:SetSize(622, 164)
-    panel.restedxpExport = UI:EditBox(publish)
-    panel.restedxpExport:SetParent(scroll)
+        "Enter the BattleTag this import string was originally created for. Your entry is saved automatically; pasted guide text is never saved.")
+
+    local exportLabel = UI:Label(page, "Guide export", 12, "muted")
+    exportLabel:SetPoint("TOPLEFT", 16, -164)
+    panel.restedxpPaste = UI:Button(page, "Paste export")
+    panel.restedxpPaste:SetPoint("TOPLEFT", 16, -186)
+    panel.restedxpPaste:SetSize(148, 32)
+    -- A focused EditBox is still required for native Ctrl+V. Keep it shown but
+    -- transparent, with no visible text or surface; only the byte count is shown.
+    panel.restedxpExport = CreateFrame("EditBox", nil, page)
+    panel.restedxpExport:SetPoint("TOPLEFT", panel.restedxpPaste, "TOPLEFT", 0, 0)
+    panel.restedxpExport:SetFontObject("GameFontHighlight")
+    panel.restedxpExport:SetAutoFocus(false)
     panel.restedxpExport:SetMultiLine(true)
-    panel.restedxpExport:SetMaxLetters(2 * 1024 * 1024)
-    panel.restedxpExport:SetSize(620, 164)
-    panel.restedxpExport:SetTextInsets(10, 10, 8, 8)
-    scroll:SetScrollChild(panel.restedxpExport)
-    local exportScroll = CreateFrame("Slider", nil, publish)
-    exportScroll:SetPoint("TOPLEFT", 648, -142)
-    exportScroll:SetSize(14, 164)
-    exportScroll:SetOrientation("VERTICAL")
-    exportScroll:SetValueStep(16)
-    exportScroll:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
-    exportScroll:GetThumbTexture():SetSize(20, 24)
-    exportScroll:SetMinMaxValues(0, 0)
-    exportScroll:SetScript("OnValueChanged", function(_, value) scroll:SetVerticalScroll(value) end)
-    scroll:EnableMouseWheel(true)
-    scroll:SetScript("OnMouseWheel", function(_, delta)
-        exportScroll:SetValue(exportScroll:GetValue() - delta * 32)
-    end)
+    panel.restedxpExport:SetMaxBytes(1)
+    panel.restedxpExport:SetSize(1, 1)
+    panel.restedxpExport:SetAlpha(0)
+    panel.restedxpExport:EnableMouse(false)
+    panel.restedxpExportStatus = UI:Label(page, "No export loaded (0 bytes).", 12, "muted")
+    panel.restedxpExportStatus:SetPoint("TOPLEFT", 180, -186)
+    panel.restedxpExportStatus:SetSize(380, 32)
+    panel.restedxpClearExport = UI:Button(page, "Clear")
+    panel.restedxpClearExport:SetPoint("TOPLEFT", 572, -186)
+    panel.restedxpClearExport:SetSize(92, 32)
+    local pasteHint = UI:Label(page, "Click Paste export, then press Ctrl+V. Pasting again replaces the loaded export.", 12, "muted")
+    pasteHint:SetPoint("TOPLEFT", 16, -228)
+    pasteHint:SetSize(648, 32)
+
+    panel.restedxpImport = UI:Button(page, "Import", "primary")
+    panel.restedxpImport:SetPoint("TOPLEFT", 16, -278)
+    panel.restedxpImport:SetSize(128, 32)
+    local raw, buffer, bufferSize, quietTime, oversized = "", nil, 0, 0, false
+    local pending, pendingCount, blockCount = nil, 0, 0
+    local maxData, concat = addon.RestedXPCodec.MAX_DATA, table.concat
+    local StartPaste
     local function RefreshDraft()
-        panel.restedxpImport:SetEnabled(not page.readOnly and not page.busy
-            and panel.restedxpPackID:GetText():find("%S") ~= nil
-            and panel.restedxpBattleTag:GetText():find("%S") ~= nil
-            and panel.restedxpExport:GetText():find("%S") ~= nil)
+        local hasSource = panel.restedxpBattleTag:GetText():find("%S") ~= nil
+        local hasExport = raw:find("%S") ~= nil
+        panel.restedxpImport:SetEnabled(page.canImport and not page.readOnly and not page.busy
+            and buffer == nil and hasSource and hasExport)
+        panel.restedxpPaste:SetEnabled(not page.readOnly and not page.busy)
+        panel.restedxpClearExport:SetEnabled(not page.readOnly and not page.busy
+            and (buffer ~= nil or raw ~= "" or oversized))
     end
-    for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
+    local function ShowExportStatus()
+        panel.restedxpExportStatus:SetText(oversized and "Export is larger than 2 MiB. Paste a smaller export."
+            or raw ~= "" and string.format("%d bytes loaded.", #raw)
+            or "No export loaded (0 bytes).")
+    end
+    local function FinishPaste()
+        if not buffer then return end
+        panel.restedxpExport:SetScript("OnUpdate", nil)
+        if not oversized then
+            if pendingCount > 0 then buffer[blockCount + 1] = concat(pending, "", 1, pendingCount) end
+            raw = concat(buffer)
+        end
+        buffer, bufferSize = nil, 0
+        pending, pendingCount, blockCount = nil, 0, 0
+        panel.restedxpExport:SetScript("OnChar", StartPaste)
+        panel.restedxpExport:ClearFocus()
+        ShowExportStatus()
+        RefreshDraft()
+    end
+    for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
         edit:SetScript("OnEscapePressed", function(widget) widget:ClearFocus() end)
-        edit:SetScript("OnTextChanged", RefreshDraft)
     end
-    panel.restedxpExport:HookScript("OnTextChanged", function(edit)
-        local _, fontSize = edit:GetFont()
-        edit:SetHeight(math.max(164, edit:GetNumLines() * ((fontSize or 14) + 2) + 16))
-        scroll:UpdateScrollChildRect()
-        exportScroll:SetMinMaxValues(0, math.max(0, edit:GetHeight() - scroll:GetHeight()))
+    panel.restedxpBattleTag:SetScript("OnTextChanged", function(edit, userInput)
+        -- Hiding or reopening the page also sets this text; only user edits save.
+        if userInput and not page.readOnly and not page.busy then
+            addon:SetRestedXPSourceBattleTag(edit:GetText())
+        end
+        RefreshDraft()
     end)
-    panel.restedxpExport:SetScript("OnCursorChanged", function(_, _, y, _, height)
-        local top, bottom = -y, -y + height
-        local offset = scroll:GetVerticalScroll()
-        if top < offset then exportScroll:SetValue(top)
-        elseif bottom > offset + scroll:GetHeight() then exportScroll:SetValue(bottom - scroll:GetHeight()) end
+    -- Match RestedXP's bulk-paste handling: OnChar receives input beyond the
+    -- native byte limit. Keep the export in Lua without rendering its contents;
+    -- laying out a multi-megabyte EditBox can crash the client before Import.
+    panel.restedxpExport:HookScript("OnEditFocusGained", function(edit)
+        edit:SetText("")
+        panel.restedxpPaste:SetText("Press Ctrl+V")
     end)
-    panel.restedxpImport = UI:Button(publish, "Import & share", "primary")
-    panel.restedxpImport:SetPoint("TOPLEFT", 16, -338)
-    panel.restedxpImport:SetSize(160, 32)
+    panel.restedxpExport:HookScript("OnEditFocusLost", function(edit)
+        if buffer then FinishPaste() end
+        edit:SetText("")
+        panel.restedxpPaste:SetText("Paste export")
+    end)
+    panel.restedxpPaste:SetScript("OnClick", function() panel.restedxpExport:SetFocus() end)
+    local function DiscardCharacter()
+        quietTime = 0
+    end
+    -- WoW can deliver one OnChar per pasted character. Keep this hot path free
+    -- of widget calls and repeated draft checks, and reuse a small staging array
+    -- instead of retaining millions of table entries until the paste completes.
+    local function CaptureCharacter(edit, character)
+        quietTime, bufferSize = 0, bufferSize + #character
+        if bufferSize > maxData then
+            oversized, buffer, pending = true, {}, nil
+            pendingCount, blockCount = 0, 0
+            edit:SetScript("OnChar", DiscardCharacter)
+            return
+        end
+        pendingCount = pendingCount + 1
+        pending[pendingCount] = character
+        if pendingCount == 4096 then
+            blockCount = blockCount + 1
+            buffer[blockCount] = concat(pending, "", 1, pendingCount)
+            pendingCount = 0
+        end
+    end
+    StartPaste = function(edit, character)
+        if page.readOnly or page.busy or type(character) ~= "string" or character == "" then return end
+        raw, buffer, bufferSize, oversized, page.actionError = "", {}, 0, false, nil
+        pending, pendingCount, blockCount = {}, 0, 0
+        panel.restedxpExportStatus:SetText("Receiving export...")
+        RefreshDraft()
+        edit:SetScript("OnChar", CaptureCharacter)
+        edit:SetScript("OnUpdate", function(_, elapsed)
+            quietTime = quietTime + elapsed
+            if quietTime >= 0.1 then FinishPaste() end
+        end)
+        CaptureCharacter(edit, character)
+    end
+    panel.restedxpExport:SetScript("OnChar", StartPaste)
+    local function ClearExport()
+        panel.restedxpExport:SetScript("OnUpdate", nil)
+        raw, buffer, bufferSize, oversized = "", nil, 0, false
+        pending, pendingCount, blockCount = nil, 0, 0
+        panel.restedxpExport:SetScript("OnChar", StartPaste)
+        panel.restedxpExport:ClearFocus()
+        panel.restedxpExport:SetText("")
+        ShowExportStatus()
+        RefreshDraft()
+    end
+    panel.restedxpClearExport:SetScript("OnClick", ClearExport)
     local function ClearDraft()
-        for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
+        ClearExport()
+        for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
             edit:ClearFocus()
             edit:SetText("")
         end
-        exportScroll:SetValue(0)
+        RefreshDraft()
     end
-    page.ClearDraft = ClearDraft
+    page.ClearDraft, page.RefreshDraft = ClearDraft, RefreshDraft
+    page.GetExport = function() return raw end
     panel.restedxpImport:SetScript("OnClick", function()
-        local success, message = addon:ImportRestedXPPack(panel.restedxpPackID:GetText(),
-            panel.restedxpExport:GetText(), panel.restedxpBattleTag:GetText())
-        if success then
-            ClearDraft()
-            publish:Hide()
-            main:Show()
-        end
-        SetFeedback(panel, not success and message or nil, not success)
+        if buffer then return end
+        local success, message = addon:ImportRestedXPString(raw, panel.restedxpBattleTag:GetText())
+        page.actionError = not success and (message or "Unable to import this RestedXP string.") or nil
         addon:RefreshOptions()
     end)
-    local back = UI:Button(publish, "Back")
-    page.back = back
-    back:SetPoint("TOPRIGHT", -16, -12)
-    back:SetSize(96, 28)
-    back:SetScript("OnClick", function()
-        ClearDraft()
-        publish:Hide()
-        main:Show()
-        SetFeedback(panel)
+    page:SetScript("OnShow", function()
+        local state = type(addon.GetRestedXPState) == "function" and addon:GetRestedXPState() or {}
+        panel.restedxpBattleTag:SetText(type(state.sourceBattleTag) == "string" and state.sourceBattleTag or "")
     end)
-    panel.restedxpShare:SetScript("OnClick", function()
-        main:Hide()
-        publish:Show()
-        if type(addon.GetRestedXPBattleTag) == "function" then
-            panel.restedxpBattleTag:SetText(addon:GetRestedXPBattleTag() or "")
-        end
-        panel.restedxpPackID:SetFocus()
-        SetFeedback(panel)
-        RefreshDraft()
-    end)
-    page.RefreshDraft = RefreshDraft
-    page:SetScript("OnHide", function()
-        ClearDraft()
-        publish:Hide()
-        main:Show()
-    end)
+    page:SetScript("OnHide", function() page.actionError = nil; ClearDraft() end)
     RefreshDraft()
 end
 
@@ -437,23 +362,17 @@ local function RefreshRestedXP(panel)
     local page = panel.pages.restedxp
     if not page or not page:IsVisible() then return end
     local state = type(addon.GetRestedXPState) == "function" and addon:GetRestedXPState() or {}
-    page.readOnly, page.busy = addon.savedDataReadOnly or state.readOnly, state.busy
-    local status = not state.installed and "RestedXP is not installed."
-        or (state.loaded and "RestedXP is installed" or "RestedXP is installed but not loaded")
-            .. (state.version and (" (" .. GuideText(state.version) .. ")") or "") .. "."
-    if state.installationProblem then status = status .. " " .. GuideText(state.installationProblem) end
-    if state.status and state.status ~= "" then status = status .. "\n" .. GuideText(state.status) end
-    page.guideDetails = status .. "\n" .. tostring(#(state.guides or {})) .. " installed guides.\n"
-        .. GuideText(state.sharingStatus or "Imported guides are shared automatically with your LIT group.")
-    panel.restedxpStatus:SetText(GuideText(state.guideStatus or "Loading"))
-    panel.restedxpPublishers:Refresh(state.publishers)
-    panel.restedxpUpdate:SetEnabled(not page.readOnly and not page.busy and state.canUpdate == true)
-    panel.restedxpShare:SetEnabled(not page.readOnly and not page.busy)
-    for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
+    page.readOnly, page.busy, page.canImport = addon.savedDataReadOnly or state.readOnly, state.busy, state.canImport == true
+    local notice = not state.installed and "RestedXP is required. Install and enable RestedXP to import guides."
+        or state.problem or (not state.loaded and "Enable RestedXP to import guides.") or ""
+    panel.restedxpNotice:SetText(GuideText(notice))
+    for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
         edit:SetEnabled(not page.readOnly and not page.busy)
     end
     page.RefreshDraft()
+    SetFeedback(panel, page.actionError or state.status, page.actionError ~= nil or state.error == true)
 end
+
 
 local function CreateOptionsPanel()
     local panel = CreateView()

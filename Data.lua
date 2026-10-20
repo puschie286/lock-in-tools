@@ -51,11 +51,6 @@ function addon:GetDataSenderIdentity(sender)
     return normalized, IsSelfName(self, normalized)
 end
 
-function addon:GetDataSelfIdentities()
-    if not self.dataState then return {} end
-    return SelfNames(self)
-end
-
 local function ResetRequests(state)
     state.pendingRequests, state.repliedRequests = {}, {}
 end
