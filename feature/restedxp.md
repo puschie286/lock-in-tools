@@ -8,6 +8,8 @@ Choose **Share export**, enter a stable pack ID, paste a RestedXP export and sup
 
 Members choose **Follow** beside a pack's publisher, then **Update guides**. Subsequent announcements from that publisher automatically fetch changed content. Pack hashes detect changes even when the embedded guide versions are unchanged. Each recipient personalizes the pack using their own local BattleTag before passing it to RestedXP. The displayed guide versions are informational.
 
+Installing RestedXP guides alone does not make a pack available in LIT; one member must first use **Share export**. Login and manual checks finish with a result even when no packs are shared. If LIT has already installed the same pack content, checking again downloads and installs nothing. An offline followed publisher is reported separately because its latest content cannot be checked.
+
 Availability is announced when the data channel connects and when a pack is imported or received. New arrivals request existing members' packs. Verified cached packs can be served by their current holder; follow that holder explicitly to use them as your publisher. Installation is confirmed separately from download completion. Combat, an unavailable importer or another import can defer installation. A failed update retains the previous package for recovery; it does not promise rollback of changes RestedXP has already applied.
 
 ## Limits
@@ -20,6 +22,7 @@ The feature limits export size to 2 MiB, cached packages to eight per group and 
 
 - On two Forever clients, inspect the installed/disabled/missing RestedXP states and installed guide versions. Verify the new tab, scrolling, draft cleanup and read-only controls at different UI scales.
 - Share a small test export, log the recipient in later, follow its publisher and update. Confirm recipient-side BattleTag handling, successful native import and the last-installed state.
+- With the same shared content installed, update again and confirm a finished, up-to-date result without another import. With no shared exports, login and update checks should finish and explain how to share the first pack.
 - Publish changed content with unchanged guide versions and confirm the follower receives it. Test multiple packs, unavailable publishers, throttling, reconnects, combat and an import already running in RestedXP.
 - Switch groups during transfer and confirm no old-group packets or imports continue. Confirm installed guides survive leaving LIT and failed imports are not reported as installed.
 

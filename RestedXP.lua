@@ -223,7 +223,7 @@ TryInstall = function(self)
     end
 end
 
-Reconcile = function(self, force)
+Reconcile = function(self, retryFailed)
     local state, group = self.restedxpState, CurrentGroup(self)
     if not group or state.incoming or state.installing or state.job then return end
     Prune(state)
@@ -234,7 +234,7 @@ Reconcile = function(self, force)
         local source = group.sources[id]
         local offer = state.offers[id] and state.offers[id][source]
         local saved = SavedPack(self, id)
-        if force then state.failed[id] = nil end
+        if retryFailed then state.failed[id] = nil end
         if offer and GetTime() - offer.seen <= OFFER_AGE and (not saved or saved.hash ~= offer.hash)
             and state.failed[id] ~= offer.hash then
             state.incoming = { id = id, source = source, hash = offer.hash, size = offer.size,
@@ -243,7 +243,7 @@ Reconcile = function(self, force)
             RequestWindow(self)
             return
         elseif saved and (saved.source == source or offer and offer.hash == saved.hash)
-            and (force or Installed(self)[id] ~= saved.hash) and state.failed[id] ~= saved.hash then
+            and Installed(self)[id] ~= saved.hash and state.failed[id] ~= saved.hash then
             state.pending[id] = true
         end
     end
@@ -271,6 +271,32 @@ local function FinishDownload(self)
     Announce(self)
     TryInstall(self)
     end)
+end
+
+local function CheckCompleteMessage(self)
+    local state, group = self.restedxpState, CurrentGroup(self)
+    if next(state.failed) then return "Some guide updates failed. Use Update guides to retry." end
+    if next(group.sources) then
+        for id, source in pairs(group.sources) do
+            local offer = state.offers[id] and state.offers[id][source]
+            if not offer or GetTime() - offer.seen > OFFER_AGE then
+                return "Guide check complete. Some followed publishers are offline; their latest packs could not be checked."
+            end
+        end
+        return "Followed guide packs are up to date. No download needed."
+    end
+    local identity, installed = LocalIdentity(self), Installed(self)
+    local shared = false
+    for id in pairs(group.packs) do
+        local saved = SavedPack(self, id)
+        if saved and saved.source == identity then
+            if installed[id] ~= saved.hash then return "Your shared packs are available. Use Update guides to install them locally." end
+            shared = true
+        end
+    end
+    if shared then return "Your shared guide packs are up to date. No download needed." end
+    if next(state.offers) then return "Choose Follow beside a publisher, then use Update guides." end
+    return "No LIT-shared packs found. One member must use Share export first; installed guides alone are not shared."
 end
 
 local function Tick(self)
@@ -310,12 +336,8 @@ local function Tick(self)
     if state.updateAt and now >= state.updateAt then
         state.updateAt = nil
         Reconcile(self, true)
-        if not state.incoming and not state.installing and not next(state.pending) then
-            local group = CurrentGroup(self)
-            local message = next(group.sources) and "Guide check complete. Followed packs are current or their publishers are offline."
-                or next(state.offers) and "Choose Follow beside a publisher, then use Update guides."
-                or "No group packs found. An online member can share an export."
-            Changed(self, message)
+        if not state.incoming and not state.installing and not state.job and not next(state.pending) then
+            Changed(self, CheckCompleteMessage(self))
         else Changed(self) end
     end
     if state.installRetry and now >= state.installRetry then state.installRetry = nil; TryInstall(self) end
@@ -419,6 +441,7 @@ function addon:InitializeRestedXP()
         Reset(self, false)
         if connected and Available(self) then
             CurrentGroup(self)
+            self.restedxpState.updateAt = GetTime() + 2
             Queue(self, "1|Q|" .. self.dataState.requestSession, "query")
             Announce(self)
             Changed(self, "Checking available group guides...")
@@ -489,7 +512,9 @@ function addon:UpdateRestedXPGuides()
     local group, identity = CurrentGroup(self), LocalIdentity(self)
     for id in pairs(group.packs) do
         local saved = SavedPack(self, id)
-        if saved and saved.source == identity then state.pending[id] = true end
+        if saved and saved.source == identity and Installed(self)[id] ~= saved.hash then
+            state.failed[id], state.pending[id] = nil, true
+        end
     end
     Changed(self, "Checking guides from followed group sources...")
     Schedule(self)

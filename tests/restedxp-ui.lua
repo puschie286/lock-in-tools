@@ -9,6 +9,7 @@ local function Fixture(state)
     function addon:GetRestedXPBattleTag() return "Local#1234" end
     function addon:UpdateRestedXPGuides()
         calls.update = calls.update + 1
+        if calls.updateError then return false, calls.updateError end
         return true
     end
     function addon:SelectRestedXPPack(id, source)
@@ -87,10 +88,23 @@ do
         "the missing-version sentinel is displayed as unversioned")
     panel.restedxpUpdate:Click()
     assert(calls.update == 1, "Update guides triggers feature discovery and updates exactly once")
+    assert(panel.feedback:GetText() == "", "accepted updates use live feature status without a permanent footer message")
     state.busy, state.status = true, "Downloading test pack (50%)."
     addon:Notify("RESTEDXP_CHANGED")
     assert(not panel.restedxpUpdate:IsEnabled() and not panel.restedxpShare:IsEnabled()
         and panel.restedxpStatus:GetText():find("50%", 1, true), "in-progress work updates status and prevents duplicate actions")
+    state.busy, state.status = false, "All followed guides are up to date."
+    addon:Notify("RESTEDXP_CHANGED")
+    assert(panel.feedback:GetText() == "" and panel.restedxpUpdate:IsEnabled()
+        and panel.restedxpStatus:GetText():find("up to date", 1, true),
+        "completed updates display their result without stale checking feedback")
+    calls.updateError = "Connect to your LIT group to check for updates."
+    panel.restedxpUpdate:Click()
+    assert(panel.feedback:GetText() == calls.updateError, "rejected updates retain the actionable footer error")
+    calls.updateError = nil
+    panel.restedxpUpdate:Click()
+    assert(panel.feedback:GetText() == "", "an accepted retry clears an earlier update error")
+    state.status = "Downloading test pack (50%)."
     state.busy, state.installationProblem = false, "The RestedXP importer is unavailable."
     addon:Notify("RESTEDXP_CHANGED")
     assert(panel.restedxpStatus:GetText():find("importer is unavailable", 1, true), "adapter compatibility problems are visible")
@@ -126,6 +140,11 @@ do
     assert(page.main:IsVisible() and not page.publish:IsShown()
         and panel.restedxpBattleTag:GetText() == "" and panel.restedxpExport:GetText() == "",
         "successful sharing returns to availability and clears sensitive drafts")
+    assert(panel.feedback:GetText() == "", "accepted imports clear prior errors and use live validation status")
+    state.status = "Shared leveling (10 guides)."
+    addon:Notify("RESTEDXP_CHANGED")
+    assert(panel.feedback:GetText() == "" and panel.restedxpStatus:GetText():find("Shared leveling", 1, true),
+        "completed sharing does not leave a permanent validating footer message")
     local function Draft()
         panel.restedxpShare:Click()
         panel.restedxpPackID:UserInput("test")

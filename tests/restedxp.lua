@@ -146,6 +146,13 @@ local function exchange(a, b, seconds, filter)
         a:deliver(b, filter); b:deliver(a)
     end
 end
+local function transferMessages(world)
+    local count = 0
+    for _, wire in ipairs(world.sent) do
+        if wire:match("^1|[WD]|") then count = count + 1 end
+    end
+    return count
+end
 
 -- A late joiner discovers an earlier publication, follows it explicitly, and
 -- recovers a dropped data packet before reporting confirmed installation.
@@ -173,6 +180,15 @@ do
     assert(dropped and #b.installs == 1, "missing chunks are requested again without duplicate installation")
     local installed = recipient:GetRestedXPState()
     assert(installed.packs[1].installed and installed.packs[1].hash == pack.hash)
+
+    local sent, requested = transferMessages(a), transferMessages(b)
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 5)
+    assert(#b.installs == 1 and transferMessages(a) == sent and transferMessages(b) == requested,
+        "rechecking an identical followed pack neither transfers nor reinstalls it")
+    assert(not recipient:GetRestedXPState().busy
+        and recipient:GetRestedXPState().status:find("up to date", 1, true),
+        "an unchanged online followed pack finishes with an explicit up-to-date result")
 
     -- Content changes with the same guide #version still propagate automatically.
     local updated = packFor(publisher, api, 1, 5)
@@ -260,11 +276,42 @@ end
 do
     local addon, world = client("Solo")
     world:connect(true)
+    assert(addon:GetRestedXPState().busy, "login starts bounded discovery without a manual update")
+    world:advance(4)
+    assert(not addon:GetRestedXPState().busy and addon:GetRestedXPState().canUpdate
+        and addon:GetRestedXPState().status:find("No LIT-shared packs found.", 1, true),
+        "login discovery completes even when no member has published an export")
     assert(addon:UpdateRestedXPGuides())
     assert(addon:GetRestedXPState().busy)
     world:advance(4)
     assert(not addon:GetRestedXPState().busy and addon:GetRestedXPState().canUpdate)
-    assert(addon:GetRestedXPState().status:find("No group packs", 1, true))
+    assert(addon:GetRestedXPState().status:find("No LIT-shared packs found.", 1, true))
+end
+
+-- Local publications install once, and an unchanged manual update has the same
+-- no-op behavior as an unchanged followed pack. Failed installations remain retryable.
+do
+    local addon, world, api = client("Publisher")
+    world:connect(true)
+    publish(addon, packFor(addon, api, 1))
+    world.failInstall = true
+    assert(addon:UpdateRestedXPGuides())
+    world:advance(4)
+    assert(#world.installs == 1 and not addon:GetRestedXPState().packs[1].installed,
+        "a failed local publication install is not recorded as installed")
+    world.failInstall = false
+    assert(addon:UpdateRestedXPGuides())
+    world:advance(4)
+    assert(#world.installs == 2 and addon:GetRestedXPState().packs[1].installed,
+        "a manual update can retry a failed local publication install")
+    local transferred = transferMessages(world)
+    assert(addon:UpdateRestedXPGuides())
+    world:advance(4)
+    local state = addon:GetRestedXPState()
+    assert(#world.installs == 2 and transferMessages(world) == transferred,
+        "rechecking an identical local publication neither transfers nor reinstalls it")
+    assert(not state.busy and state.status:find("up to date", 1, true),
+        "an already installed local publication finishes with an explicit up-to-date result")
 end
 
 -- Stale senders cannot permanently exhaust the peer slots, and selecting a new
@@ -288,6 +335,8 @@ do
     assert(addon:UpdateRestedXPGuides())
     world:advance(3)
     assert(#world.installs == 0, "an unavailable newly selected publisher does not authorize the previous publisher's cache")
+    assert(addon:GetRestedXPState().status:find("offline", 1, true),
+        "a completed discovery distinguishes offline publishers from confirmed current content")
 end
 
 print("PASS: RestedXP pack sharing, content updates, transfer recovery and lifecycle")
