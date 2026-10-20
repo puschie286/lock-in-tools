@@ -246,7 +246,8 @@ assert(addon:ReceiveData("Friend", "1|echo|" .. maximumPayload))
 local receivedBefore = #incoming
 for _, message in ipairs({
     "2|echo|wrong version", "1|unknown|missing handler", "1|echo", "1||missing feature",
-    "1|Upper|bad identifier",
+    "1|Upper|bad identifier", "echo|missing version", "1|Q", "1|Q|", "1|R", "1|R|",
+    "1|Q|echo|request|streaming feature", "1|R|echo|request|self-testrealm|streaming feature",
 }) do
     assert(not addon:ReceiveData("Friend", message))
 end
@@ -257,6 +258,20 @@ addon.ready = false
 assert(not addon:IsDataConnected() and not addon:SendData("echo", "not ready")
     and not addon:ReceiveData("Friend", "1|echo|not ready"))
 addon.ready = true
+
+-- Feature bodies are opaque, including empty values and text resembling envelopes.
+do
+    local current, clock = newAddon()
+    local received = {}
+    assert(current:RegisterDataFeature("echo", function(_, payload) received[#received + 1] = payload end))
+    clock:connect()
+    for index, payload in ipairs({ "", "|", "|a||b|", "1|Q|snapshot|nested|", "1|R|snapshot|nested|self-testrealm|" }) do
+        assert(current:SendData("echo", payload))
+        assert(clock.sent[index].message == "1|echo|" .. payload)
+        assert(current:ReceiveData("Friend", clock.sent[index].message))
+        assert(received[index] == payload, "Feature routing must preserve every byte after its outer envelope")
+    end
+end
 
 -- Feature acceptance and connection callbacks cannot break neighboring features.
 assert(addon:RegisterDataFeature("declined", function() return false end))
@@ -911,6 +926,25 @@ local function requestFixture(onRequest, onResponse, native)
     return current, clock
 end
 
+-- Request and response handlers receive the complete body after their own headers.
+do
+    local requests, responses = {}, {}
+    local current, clock = requestFixture(function(_, payload)
+        requests[#requests + 1] = payload
+        return payload
+    end, function(_, payload) responses[#responses + 1] = payload end)
+    for index, payload in ipairs({ "", "|", "|a||b|", "1|Q|snapshot|nested|", "1|R|snapshot|nested|self-testrealm|" }) do
+        local accepted, id = current:RequestData("snapshot", payload)
+        assert(accepted and clock.sent[#clock.sent].message == "1|Q|snapshot|" .. id .. "|" .. payload)
+        local peerID = "opaque-" .. index
+        assert(current:ReceiveData("Friend", "1|Q|snapshot|" .. peerID .. "|" .. payload))
+        assert(requests[index] == payload)
+        assert(clock.sent[#clock.sent].message == "1|R|snapshot|" .. peerID .. "|friend-testrealm|" .. payload)
+        assert(current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|" .. payload))
+        assert(responses[index] == payload, "An empty or nested response body must survive request correlation")
+    end
+end
+
 do
     local requests, responses = 0, {}
     local current, clock = requestFixture(function(_, payload) requests = requests + 1; return payload end,
@@ -1095,6 +1129,131 @@ end
 
 local function receive(current, sender, payload)
     return current:ReceiveData(sender, "1|status|" .. payload)
+end
+
+-- Registration replays one connection state; every shared dispatch phase visits
+-- providers alphabetically, regardless of registration order or rejected changes.
+do
+    local current, clock = newAddon()
+    local seen = { collect = {}, contact = {}, sample = {}, connection = {} }
+    for _, name in ipairs({ "zeta", "alpha", "middle" }) do
+        assert(current:RegisterDataStatusProvider(name,
+            function() seen.collect[#seen.collect + 1] = name; return {} end,
+            function() seen.sample[#seen.sample + 1] = name end,
+            function(connected) seen.connection[#seen.connection + 1] = name .. ":" .. tostring(connected) end,
+            function() seen.contact[#seen.contact + 1] = name end))
+    end
+    assert(table.concat(seen.connection, ",") == "zeta:false,alpha:false,middle:false")
+    local function rejected() error("A rejected provider must never replace or join the callback set") end
+    assert(not current:RegisterDataStatusProvider("alpha", rejected, rejected, rejected, rejected))
+    assert(not current:RegisterDataStatusProvider("Upper", rejected, rejected, rejected, rejected))
+    assert(not current:RegisterDataStatusProvider("beta", rejected, rejected, false, rejected))
+    assert(#seen.connection == 3, "Rejected registrations must not replay connection callbacks")
+    clock:connect()
+    assert(table.concat(seen.collect, ",") == "alpha,middle,zeta")
+    assert(table.concat(seen.connection, ",") == "zeta:false,alpha:false,middle:false,alpha:true,middle:true,zeta:true")
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=1")))
+    assert(table.concat(seen.contact, ",") == "alpha,middle,zeta")
+    assert(table.concat(seen.sample, ",") == "alpha,middle,zeta")
+end
+
+-- Adding a provider inside a callback preserves the active phase's snapshot.
+-- The following phase sees the new alphabetical order, including sample delivery
+-- immediately after a contact callback registers another provider.
+for _, phase in ipairs({ "collect", "contact", "sample", "connection" }) do
+    local current, clock = newAddon()
+    local seen = { collect = {}, contact = {}, sample = {}, connection = {} }
+    local armed, added, register = false, false, nil
+    local function record(kind, name, connected)
+        local value = kind == "connection" and name .. ":" .. tostring(connected) or name
+        seen[kind][#seen[kind] + 1] = value
+        if armed and not added and kind == phase and name == "middle" then
+            added = true
+            register("alpha")
+        end
+    end
+    register = function(name)
+        assert(current:RegisterDataStatusProvider(name,
+            function() record("collect", name); return {} end,
+            function() record("sample", name) end,
+            function(connected) record("connection", name, connected) end,
+            function() record("contact", name) end))
+    end
+    register("zeta"); register("middle")
+    clock:connect()
+    seen = { collect = {}, contact = {}, sample = {}, connection = {} }
+    armed = true
+    if phase == "connection" then clock:disconnect()
+    elseif phase == "collect" then clock:advance(5)
+    else assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=1"))) end
+    assert(added, "The callback must register the additional provider during " .. phase)
+    if phase == "connection" then
+        assert(table.concat(seen.connection, ",") == "middle:false,alpha:false,zeta:false",
+            "The new provider gets one immediate replay without disturbing the active connection phase")
+    else
+        assert(table.concat(seen[phase], ",") == "middle,zeta", "Do not revisit or skip a provider during " .. phase)
+        assert(table.concat(seen.connection, ",") == "alpha:true", "Late registration replays the current connection exactly once")
+        if phase == "contact" then
+            assert(table.concat(seen.sample, ",") == "alpha,middle,zeta",
+                "Sample delivery following contact uses the newly registered provider set")
+        end
+    end
+    seen = { collect = {}, contact = {}, sample = {}, connection = {} }
+    if phase == "connection" then clock:connect()
+    elseif phase == "collect" then clock:advance(5)
+    else assert(receive(current, "Friend", full("peer", 2000000001, 2, "2=2"))) end
+    if phase == "connection" then
+        assert(table.concat(seen.connection, ",") == "alpha:true,middle:true,zeta:true")
+    else assert(table.concat(seen[phase], ",") == "alpha,middle,zeta") end
+end
+
+-- A failed initial snapshot remains a full join request even when a remote gap
+-- and newer local data appear before the retry. Recovery follows on the next tick.
+do
+    local values = { xp = 1 }
+    local current, clock = statusFixture(values, false)
+    assert(receive(current, "Friend", heartbeat("peer", 2000000000, 2)))
+    values.xp, clock.sendResult = 2, 0
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|Q|status|[^|]+|3|F|[^|]+|2000000005|2|2=2$"),
+        "The latest full join snapshot takes priority over remote resync")
+    clock:advance(5)
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|Q|status|[^|]+|3|S$"),
+        "Publishing the join snapshot must not lose the outstanding remote recovery request")
+end
+
+-- A changed sample due at the heartbeat boundary publishes its delta instead.
+do
+    local values = { xp = 1 }
+    local _, clock = statusFixture(values)
+    clock:advance(25)
+    values.xp = 2
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|D|[^|]+|2000000030|2|1|2=2$"))
+    clock:advance(25)
+    assert(#clock.sent == 2, "An accepted change restarts the idle heartbeat interval")
+    clock:advance(5)
+    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|3|H|[^|]+|2000000060|2$"))
+end
+
+-- Rejected deltas never advance the accepted baseline. Retry only the latest
+-- sample; returning to that baseline still needs a full with the new revision.
+for _, latest in ipairs({ 3, 1 }) do
+    local values = { xp = 1 }
+    local _, clock = statusFixture(values)
+    values.xp, clock.sendResult = 2, 11
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].message:match("|3|D|[^|]+|2000000005|2|1|2=2$"))
+    values.xp, clock.sendResult = latest, 0
+    clock:advance(5)
+    local expected = latest == 1 and "|3|F|[^|]+|2000000010|3|2=1$"
+        or "|3|D|[^|]+|2000000010|3|1|2=3$"
+    assert(#clock.sent == 3 and clock.sent[3].message:match(expected),
+        "Retries use the accepted baseline and current values, including the empty-delta full fallback")
+    clock:advance(25)
+    assert(#clock.sent == 3, "A successfully retried sample clears unpublished state")
+    clock:advance(5)
+    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|3|H|[^|]+|2000000040|3$"))
 end
 
 -- These IDs are permanent protocol assignments. Collectors and consumers retain

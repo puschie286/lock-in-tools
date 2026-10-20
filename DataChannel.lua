@@ -47,7 +47,6 @@ function addon:InitializeDataChannel()
     self:InitializeGroupChannelCleanup()
     local state = self.dataState
     state.phase, state.attempts = "idle", 0
-    state.channelName = self:GetGroupDataChannelName()
     local prefixResults = Enum and Enum.RegisterAddonMessagePrefixResult
     local sendResults = Enum and Enum.SendAddonMessageResult
     -- Native capabilities are stable for this UI session; retry connection
@@ -92,7 +91,6 @@ function addon:ResetDataForGroupSwitch()
     if not state then return end
     self:CancelDataTimer()
     self:SetDataConnected(false)
-    state.channelName = nil
     state.phase, state.detail = "idle", nil
     state.attempts, state.pending, state.failed, state.awaitingLeave = 0, false, false, false
     state.leaveChecks = 0
@@ -103,7 +101,7 @@ end
 function addon:ResumeDataAfterGroupSwitch()
     local state = self.dataState
     if not state then return end
-    state.channelName, state.wanted = self:GetGroupDataChannelName(), self:HasGroup()
+    state.wanted = self:HasGroup()
     if state.nativeStarted and Wanted(self) then self:JoinDataChannel(false) end
     Refresh(self)
 end
@@ -149,7 +147,6 @@ function addon:ConfirmDataMembership()
         return true
     end
     self:CancelDataTimer()
-    state.channelName = name
     state.attempts, state.pending, state.failed = 0, false, false
     state.phase, state.detail = "joined", nil
     self:SetDataConnected(true)
@@ -172,10 +169,10 @@ function addon:JoinDataChannel(manual)
     end
     if not Wanted(self) then return false end
     if not state.nativeAvailable then return self:FailDataJoin("The native group-data API is unavailable.") end
-    state.channelName = self:GetGroupDataChannelName()
+    local name = self:GetGroupDataChannelName()
     if state.awaitingLeave then
         -- Native leave notices can arrive before cached membership disappears.
-        if ChannelID(state.channelName) then
+        if ChannelID(name) then
             state.leaveChecks = (state.leaveChecks or 0) + 1
             if state.leaveChecks < LEAVE_CACHE_CHECK_LIMIT then
                 if not state.timer then self:ScheduleDataCheck(1) end
@@ -183,8 +180,8 @@ function addon:JoinDataChannel(manual)
             end
             -- A delayed notice or failed leave must not stall recovery forever.
             state.leaveChecks = 0
-            self:LeaveGroupChannel(state.channelName)
-            if ChannelID(state.channelName) then
+            self:LeaveGroupChannel(name)
+            if ChannelID(name) then
                 self:ScheduleDataCheck(FAILURE_RETRY_DELAY)
                 return false
             end
@@ -204,7 +201,7 @@ function addon:JoinDataChannel(manual)
     self:SetDataConnected(false)
     state.attempts = math.min(state.attempts + 1, #RETRY_DELAYS)
     state.pending, state.phase, state.detail = true, "joining", nil
-    local ok = pcall(JoinTemporaryChannel, state.channelName, self:GetGroupDataChannelPassword())
+    local ok = pcall(JoinTemporaryChannel, name, self:GetGroupDataChannelPassword())
     if not ok then return self:FailDataJoin("The data-channel join request failed.") end
     if Wanted(self) and not state.failed and not self:ConfirmDataMembership() then
         self:ScheduleDataCheck(RETRY_DELAYS[state.attempts])

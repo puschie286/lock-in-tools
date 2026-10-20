@@ -153,7 +153,7 @@ end
 -- providers, and omitted fields remain unavailable rather than retaining old data.
 local function CollectStatus(self)
     local status, fields, available = self.dataState.status, {}, false
-    for _, name in ipairs(StatusNames(status.providers)) do
+    for _, name in ipairs(status.providerNames) do
         local ok, values = pcall(status.providers[name].collect)
         if ok and not IsSecret(values) and type(values) == "table" then
             local collected, valid = {}, true
@@ -212,7 +212,7 @@ local function ContactStatus(self, sender, message, peer)
     local metadata = { kind = ({ F = "full", D = "delta", H = "heartbeat" })[message.kind],
         session = message.session, revision = message.revision, hasBaseline = peer.fields ~= nil,
         coherent = synchronized, synchronized = synchronized }
-    for _, name in ipairs(StatusNames(status.providers)) do
+    for _, name in ipairs(status.providerNames) do
         local provider = status.providers[name]
         if provider.contact then pcall(provider.contact, sender, message.stamp, CopyStatus(metadata)) end
     end
@@ -263,7 +263,7 @@ local function ProcessStatus(self, sender, message, requested)
     peer.revision, peer.advertised, peer.stamp = message.revision, message.revision, message.stamp
     peer.contactStamp, peer.unsynchronized = message.stamp, false
     local metadata = ContactStatus(self, sender, message, peer)
-    for _, name in ipairs(StatusNames(status.providers)) do
+    for _, name in ipairs(status.providerNames) do
         -- Each callback owns its copies. Central revision ordering keeps one
         -- coherent baseline even if a consumer throws or rejects the sample.
         local provider = status.providers[name]
@@ -296,7 +296,7 @@ local function StatusConnectionChanged(self, connected)
         status.session = state.requestSession .. "-" .. status.sessionSequence
     end
     status.requestNeeded = connected
-    for _, name in ipairs(StatusNames(status.providers)) do
+    for _, name in ipairs(status.providerNames) do
         local callback = status.providers[name].connectionChanged
         if callback then pcall(callback, connected) end
     end
@@ -321,6 +321,8 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     end
     local status = state.status
     status.providers[name] = { collect = collect, receive = receive, connectionChanged = connectionChanged, contact = contact }
+    -- Replace the snapshot so registration during a callback cannot alter its active iteration.
+    status.providerNames = StatusNames(status.providers)
     if first then
         self:RegisterDataRequest("status", function(sender, payload, budget)
             if payload ~= "3|S" then
@@ -348,6 +350,29 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     return true
 end
 
+local function NextStatusPacket(self, fields, revision, now)
+    local status = self.dataState.status
+    if status.requestNeeded then
+        return EncodeStatus(self, "F", fields, revision), true, true
+    elseif status.resyncNeeded and (not status.lastResyncAttemptAt or now - status.lastResyncAttemptAt >= STATUS_HEARTBEAT_INTERVAL) then
+        return "3|S", true
+    elseif status.forceFull or revision ~= status.broadcastRevision then
+        if not status.forceFull and status.lastBroadcast then
+            local changed = {}
+            for name, value in pairs(fields) do
+                if status.lastBroadcast[name] ~= value then changed[name] = value end
+            end
+            for name in pairs(status.lastBroadcast) do if fields[name] == nil then changed[name] = false end end
+            if next(changed) then
+                return EncodeStatus(self, "D", changed, revision, status.broadcastRevision), false, true
+            end
+        end
+        return EncodeStatus(self, "F", fields, revision), false, true
+    elseif status.lastTrafficAt and now - status.lastTrafficAt >= STATUS_HEARTBEAT_INTERVAL then
+        return EncodeStatus(self, "H", nil, status.broadcastRevision)
+    end
+end
+
 function addon:DataStatusTick()
     local state = self.dataState
     local status = state and state.status
@@ -361,23 +386,7 @@ function addon:DataStatusTick()
     local fields, revision = CurrentStatus(self)
     local sent = false
     if fields ~= nil and self:IsDataConnected() then
-        local payload, request, broadcast
-        if status.requestNeeded then
-            payload, request, broadcast = EncodeStatus(self, "F", fields, revision), true, true
-        elseif status.resyncNeeded and (not status.lastResyncAttemptAt or now - status.lastResyncAttemptAt >= STATUS_HEARTBEAT_INTERVAL) then
-            payload, request = "3|S", true
-        elseif status.forceFull or revision ~= status.broadcastRevision then
-            local changed = {}
-            for name, value in pairs(fields) do
-                if not status.lastBroadcast or status.lastBroadcast[name] ~= value then changed[name] = value end
-            end
-            for name in pairs(status.lastBroadcast or {}) do if fields[name] == nil then changed[name] = false end end
-            local kind = (status.forceFull or not status.lastBroadcast or not next(changed)) and "F" or "D"
-            payload, broadcast = EncodeStatus(self, kind, kind == "F" and fields or changed, revision,
-                kind == "D" and status.broadcastRevision or nil), true
-        elseif status.lastTrafficAt and now - status.lastTrafficAt >= STATUS_HEARTBEAT_INTERVAL then
-            payload = EncodeStatus(self, "H", nil, status.broadcastRevision)
-        end
+        local payload, request, broadcast = NextStatusPacket(self, fields, revision, now)
         if payload then
             status.lastAttemptAt = now
             if payload == "3|S" then

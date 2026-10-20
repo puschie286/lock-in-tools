@@ -171,9 +171,9 @@ function addon:SendData(feature, payload)
     return SendFrame(self, "1|" .. feature .. "|" .. payload)
 end
 
-local function ReceiveRequest(self, sender, message)
+local function ReceiveRequest(self, sender, body)
     local state = self.dataState
-    local feature, id, payload = message:match("^1|Q|([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
+    local feature, id, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
     local normalized = SenderName(self, sender)
     if not feature or not ValidRequestID(id) or not normalized or IsSelfName(self, normalized) then return false end
     local registration = state.requests[feature]
@@ -188,8 +188,8 @@ local function ReceiveRequest(self, sender, message)
     return SendFrame(self, header .. response)
 end
 
-local function ReceiveResponse(self, sender, message)
-    local feature, id, target, payload = message:match("^1|R|([a-z][a-z0-9_-]*)|([^|]+)|([^|]+)|(.*)$")
+local function ReceiveResponse(self, sender, body)
+    local feature, id, target, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|([^|]+)|(.*)$")
     local normalized = SenderName(self, sender)
     if not feature or not ValidRequestID(id) or not normalized or IsSelfName(self, normalized) then return false end
     local state = self.dataState
@@ -208,12 +208,12 @@ end
 -- Native events supply ordinary bounded strings. Only the addon protocol needs
 -- decoding; all receives enter through the connected native-channel event.
 function addon:OnDataMessage(sender, message)
-    if message:sub(1, 4) == "1|Q|" then return ReceiveRequest(self, sender, message) end
-    if message:sub(1, 4) == "1|R|" then return ReceiveResponse(self, sender, message) end
-    local feature, payload = message:match("^1|([a-z][a-z0-9_-]*)|(.*)$")
-    if not feature then return false end
-    local registration = self.dataState.features[feature]
+    local kind, body = message:match("^1|([^|]+)|(.*)$")
+    if not kind then return false end
+    if kind == "Q" then return ReceiveRequest(self, sender, body) end
+    if kind == "R" then return ReceiveResponse(self, sender, body) end
+    local registration = self.dataState.features[kind]
     if not registration then return false end
-    local ok, accepted = pcall(registration.receive, sender, payload)
+    local ok, accepted = pcall(registration.receive, sender, body)
     return ok and accepted ~= false
 end
