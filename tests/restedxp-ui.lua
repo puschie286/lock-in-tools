@@ -34,6 +34,9 @@ do
         "RestedXP has an accessible Settings tab with explicit installation status")
     assert(not panel.restedxpUpdate:IsEnabled() and panel.restedxpGuides.empty:IsShown()
         and panel.restedxpPacks.empty:IsShown(), "unavailable updates and empty lists remain understandable")
+    assert(panel.restedxpPacks.empty:GetText():find("shared automatically", 1, true)
+        and not panel.restedxpPacks.empty:GetText():find("must use Share export", 1, true),
+        "empty availability explains automatic sharing without requiring a manual first export")
     assert(panel.tabs.restedxp.point[2] + panel.tabs.restedxp:GetWidth() <= 700,
         "all Settings tabs fit inside the existing window")
     state.installed, state.version = true, "4.9.1"
@@ -42,6 +45,8 @@ do
         and panel.restedxpStatus:GetText():find("4.9.1", 1, true),
         "an installed but unloaded addon is distinguished from an absent addon")
     state.loaded, state.canUpdate = true, true
+    state.sharingStatus = "Automatically sharing 9 imported guides."
+    state.sharedInstalledGuides, state.unshareableGuides = 9, 0
     state.guides = {}
     for index = 1, 9 do
         state.guides[index] = { name = "Guide " .. index, group = "Test group", version = index, key = "guide" .. index }
@@ -57,6 +62,21 @@ do
         and panel.restedxpGuides.rows[1].name:GetText() == "Test group / Guide 1"
         and panel.restedxpGuides.rows[1].version:GetText() == "v1"
         and panel.restedxpGuides.scrollbar:IsShown(), "installed guide names and versions render in a bounded list")
+    assert(panel.restedxpSharing:GetText() == state.sharingStatus,
+        "automatic sharing status is visible without a sharing preference or manual export")
+    assert(panel.restedxpPacks.rows[1].name:GetText() == "Test pack (test)",
+        "automatic pack labels remain readable beside their stable identity")
+    state.refreshingInstalled = true
+    state.sharingStatus = "Refreshing automatically shared guides..."
+    addon:Notify("RESTEDXP_CHANGED")
+    assert(panel.restedxpSharing:GetText() == state.sharingStatus,
+        "background native-import refreshes update the sharing hint")
+    state.refreshingInstalled = false
+    state.sharedInstalledGuides, state.unshareableGuides = 8, 1
+    state.sharingStatus = "Automatically sharing 8 guides. Complete source is unavailable for 1 guide."
+    addon:Notify("RESTEDXP_CHANGED")
+    assert(panel.restedxpSharing:GetText() == state.sharingStatus,
+        "guides whose source cannot be recovered have separate actionable sharing status")
     panel.restedxpGuides.scripts.OnMouseWheel(panel.restedxpGuides, -100)
     assert(panel.restedxpGuides.offset == 5 and panel.restedxpGuides.rows[4].version:GetText() == "v9",
         "wheel scrolling reaches every installed guide and clamps to the last row")

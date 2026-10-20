@@ -5,7 +5,7 @@ local function loadModule(file, addon, env)
     chunk("LockInTools", addon)
 end
 
-local function client(name, saved, readOnly)
+local function client(name, saved, readOnly, automatic)
     local world = { now = 0, timers = {}, sent = {}, listeners = {}, events = {}, installs = {}, notifications = 0 }
     local addon = { db = saved or {}, savedDataReadOnly = readOnly, ready = true, initialized = true,
         connected = false, fingerprint = "test-group", dataState = { requestSession = name .. "-session" } }
@@ -68,12 +68,34 @@ local function client(name, saved, readOnly)
         if world.busy then return false, "Native import running", "busy" end
         world.installs[#world.installs + 1] = pack.hash
         world.installTimer = env.C_Timer.NewTimer(0.5, function()
+            if not world.failInstall and world.afterInstall then world.afterInstall(pack) end
             callback(not world.failInstall, world.failInstall and "Synthetic import failure" or nil)
         end)
         return true
     end
     function addon:CancelRestedXPInstallation()
         if world.installTimer then world.installTimer:Cancel() end
+    end
+    if automatic then
+        world.installedPacks = {}
+        function addon:CollectRestedXPInstalledPacks()
+            world.scans = (world.scans or 0) + 1
+            if world.scanBusy then return nil, { busy = true, complete = false } end
+            if world.scanProblem then return nil, { complete = false, problem = world.scanProblem } end
+            return world.installedPacks, { complete = world.scanComplete ~= false, skipped = world.skipped or 0 }
+        end
+        function addon:WatchRestedXPInstalledGuides(callback)
+            world.watchStarts = (world.watchStarts or 0) + 1
+            world.installedChanged = callback
+            return true
+        end
+        function addon:StopWatchingRestedXPInstalledGuides()
+            world.watchStops = (world.watchStops or 0) + 1
+            world.installedChanged = nil
+        end
+        function addon:MatchesRestedXPInstalledPack(pack)
+            return world.matches and world.matches[pack.hash] == true
+        end
     end
     loadModule("RestedXP.lua", addon, env)
     addon:InitializeRestedXP()
@@ -352,6 +374,281 @@ do
     assert(#world.installs == 0, "an unavailable newly selected publisher does not authorize the previous publisher's cache")
     assert(addon:GetRestedXPState().status:find("offline", 1, true),
         "a completed discovery distinguishes offline publishers from confirmed current content")
+end
+
+-- Existing native imports become publications on login without an export form;
+-- a later native import refreshes the same publication even without a new version.
+do
+    local publisher, a, api = client("AutoAlpha", nil, nil, true)
+    local recipient, b = client("AutoBeta")
+    local original = packFor(publisher, api, 7)
+    a.installedPacks = { { id = "installed-route", label = "Synthetic Pack", pack = original } }
+    a:connect(true)
+    a:advance(4)
+    local state = publisher:GetRestedXPState()
+    local group = publisher.db.restedxp.groups[publisher.fingerprint]
+    assert(group.packs["installed-route"] and group.packs["installed-route"].hash == original.hash
+        and group.packs["installed-route"].localInstalled and state.sharedInstalledGuides == 1,
+        "login collects a complete installed guide into a stable automatically shared pack")
+    assert(state.packs[1].installed and #a.installs == 0,
+        "a recovered installed guide is already installed and never needs a native self-import")
+    assert(type(a.installedChanged) == "function", "native import observation starts automatically")
+    a.delivered = #a.sent -- the later login must actively discover the existing holder
+    b:connect(true)
+    exchange(a, b, 4)
+    assert(#recipient:GetRestedXPState().packs == 1 and #b.installs == 0,
+        "a later group member discovers automatic publications without unsolicited installation")
+    assert(recipient:SelectRestedXPPack("installed-route", "autoalpha-testrealm"))
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 70)
+    assert(#b.installs == 1 and b.installs[1] == original.hash,
+        "following an automatic publication installs the recovered source")
+    local updated = packFor(publisher, api, 7, 11)
+    a.installedPacks = { { id = "installed-route", label = "Synthetic Pack", pack = updated } }
+    a.installedChanged()
+    exchange(a, b, 70)
+    assert(group.packs["installed-route"].hash == updated.hash and #a.installs == 0,
+        "a direct RestedXP import refreshes its existing local publication without self-import")
+    assert(#b.installs == 2 and b.installs[2] == updated.hash,
+        "native content changes with unchanged versions announce and update followers automatically")
+end
+
+-- Native recovery can finish after a recipient's short discovery window; the
+-- later offer must replace the completed empty result with the next action.
+do
+    local publisher, a, api = client("LateAlpha", nil, nil, true)
+    local recipient, b = client("LateBeta")
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    local empty = recipient:GetRestedXPState()
+    assert(#empty.packs == 0 and not empty.busy and empty.status:find("No LIT-shared packs found.", 1, true),
+        "initial empty discovery finishes before a publisher recovers a guide")
+    a.installedPacks = { { id = "installed-later", label = "Later Pack", pack = packFor(publisher, api, 1) } }
+    a.installedChanged()
+    exchange(a, b, 4)
+    local available = recipient:GetRestedXPState()
+    assert(#available.packs == 1 and available.packs[1].id == "installed-later"
+        and available.status:find("Choose Follow", 1, true)
+        and not available.status:find("No LIT-shared packs found.", 1, true),
+        "a publication recovered after discovery replaces the stale empty result with follow guidance")
+    assert(#b.installs == 0 and transferMessages(b) == 0,
+        "late automatic availability updates guidance without an unsolicited transfer")
+end
+
+-- Two native installations with identical source use their recovered hashes to
+-- finish discovery without sending guide contents or importing them again.
+do
+    local alpha, a, api = client("SameAlpha", nil, nil, true)
+    local beta, b = client("SameBeta", nil, nil, true)
+    local pack = packFor(alpha, api, 3)
+    a.installedPacks = { { id = "installed-same", label = "Same Pack", pack = pack } }
+    b.installedPacks = { { id = "installed-same", label = "Same Pack", pack = pack } }
+    a:connect(true); b:connect(true)
+    exchange(a, b, 5)
+    assert(alpha:SelectRestedXPPack("installed-same", "samebeta-testrealm"))
+    assert(beta:SelectRestedXPPack("installed-same", "samealpha-testrealm"))
+    assert(alpha:UpdateRestedXPGuides() and beta:UpdateRestedXPGuides())
+    exchange(a, b, 5)
+    assert(#a.installs == 0 and #b.installs == 0 and transferMessages(a) == 0 and transferMessages(b) == 0,
+        "matching recovered hashes on both players avoid all guide requests, data and imports")
+    assert(not alpha:GetRestedXPState().busy and not beta:GetRestedXPState().busy,
+        "same-content checks finish for both players")
+end
+
+-- A native-cache notification during a download must wait until that download
+-- has been installed, then recover the newly imported source rather than the old cache.
+do
+    local publisher, a, api = client("RaceAlpha", nil, nil, true)
+    local recipient, b = client("RaceBeta", nil, nil, true)
+    local original = packFor(publisher, api, 6)
+    local id = "installed-race"
+    a.installedPacks = { { id = id, label = "Racing Pack", pack = original } }
+    b.installedPacks = { { id = id, label = "Racing Pack", pack = original } }
+    b.afterInstall = function(pack)
+        b.installedPacks = { { id = id, label = "Racing Pack", pack = pack } }
+    end
+    a:connect(true); b:connect(true)
+    exchange(a, b, 5)
+    assert(recipient:SelectRestedXPPack(id, "racealpha-testrealm"))
+    local updated = packFor(publisher, api, 6, 13)
+    a.installedPacks = { { id = id, label = "Racing Pack", pack = updated } }
+    a.installedChanged()
+    for _ = 1, 100 do
+        exchange(a, b, 0.15)
+        if recipient.restedxpState.incoming then break end
+    end
+    assert(recipient.restedxpState.incoming and #b.installs == 0,
+        "the native notification occurs while the changed shared pack is still downloading")
+    b.installedChanged()
+    exchange(a, b, 70)
+    local dataPackets = 0
+    for _, wire in ipairs(a.sent) do
+        if wire:find("1|D|" .. updated.hash:sub(1, 16) .. "|", 1, true) == 1 then dataPackets = dataPackets + 1 end
+    end
+    assert(#b.installs == 1 and b.installs[1] == updated.hash
+        and dataPackets == math.ceil(#updated.data / 128),
+        "deferred native recovery installs the changed pack once without downloading its chunks again")
+    local saved = recipient.db.restedxp.groups[recipient.fingerprint].packs[id]
+    assert(saved and saved.hash == updated.hash and not recipient:GetRestedXPState().refreshingInstalled,
+        "post-import recovery publishes the new native source and finishes the deferred refresh")
+
+    local rejected = packFor(publisher, api, 6, 19)
+    a.installedPacks = { { id = id, label = "Racing Pack", pack = rejected } }
+    b.failInstall = true
+    a.installedChanged()
+    for _ = 1, 100 do
+        exchange(a, b, 0.15)
+        if recipient.restedxpState.incoming then break end
+    end
+    assert(recipient.restedxpState.incoming)
+    b.installedChanged()
+    exchange(a, b, 70)
+    assert(#b.installs == 2 and recipient.restedxpState.failed[id] == rejected.hash,
+        "failed native import followed by old-source recovery retains the rejected remote hash")
+    local requests, responses = transferMessages(b), transferMessages(a)
+    b.installedChanged()
+    a.installedChanged()
+    exchange(a, b, 10)
+    assert(#b.installs == 2 and transferMessages(b) == requests and transferMessages(a) == responses
+        and recipient.restedxpState.failed[id] == rejected.hash,
+        "unchanged old native source and repeated announcements cannot trigger a failed-update retry loop")
+    b.failInstall = false
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 70)
+    assert(#b.installs == 3 and b.installs[3] == rejected.hash,
+        "an explicit update still retries the previously rejected newer content")
+end
+
+-- A downloaded pack can match a native installation recovered through another
+-- grouping, so exact native-source verification can avoid the redundant import.
+do
+    local publisher, a, api = client("MatchAlpha", nil, nil, true)
+    local recipient, b = client("MatchBeta", nil, nil, true)
+    local pack = packFor(publisher, api, 4)
+    a.installedPacks = { { id = "installed-match", label = "Matching Pack", pack = pack } }
+    b.matches = { [pack.hash] = true }
+    a:connect(true); b:connect(true)
+    exchange(a, b, 5)
+    assert(recipient:SelectRestedXPPack("installed-match", "matchalpha-testrealm"))
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 70)
+    assert(transferMessages(b) > 0 and #b.installs == 0,
+        "verified matching native source suppresses import after a first download")
+    local found
+    for _, available in ipairs(recipient:GetRestedXPState().packs) do
+        if available.id == "installed-match" and available.source == "matchalpha-testrealm" then found = available end
+    end
+    assert(found and found.installed, "a native content match is recorded as installed")
+end
+
+-- Removal withdraws only local automatic publications; explicit fallback exports
+-- retain their independent lifetime and remain available to the group.
+do
+    local addon, world, api = client("Removal", nil, nil, true)
+    local pack = packFor(addon, api, 2)
+    world.installedPacks = { { id = "installed-remove", label = "Removed Pack", pack = pack } }
+    world:connect(true)
+    world:advance(4)
+    publish(addon, packFor(addon, api, 5, 9), "manual-fallback")
+    local group = addon.db.restedxp.groups[addon.fingerprint]
+    assert(group.packs["installed-remove"] and group.packs["manual-fallback"])
+    world.installedPacks = {}
+    world.installedChanged()
+    world:advance(4)
+    assert(group.packs["installed-remove"] == nil and group.packs["manual-fallback"] ~= nil,
+        "a complete source scan withdraws removed automatic packs and preserves explicit exports")
+    assert(addon:GetRestedXPState().sharedInstalledGuides == 0,
+        "sharing counts refresh when all native source guides are removed")
+end
+
+-- The group cache is account-wide, while recoverable native source can change
+-- between characters or RestedXP profiles on that account.
+do
+    local previous, a, api = client("PreviousCharacter", nil, nil, true)
+    a.installedPacks = { { id = "installed-previous", label = "Previous Profile", pack = packFor(previous, api, 2) } }
+    a:connect(true)
+    a:advance(4)
+    publish(previous, packFor(previous, api, 3, 17), "profile-fallback")
+    local function Copy(value)
+        if type(value) ~= "table" then return value end
+        local copied = {}
+        for key, item in pairs(value) do copied[key] = Copy(item) end
+        return copied
+    end
+    local current, b = client("CurrentCharacter", Copy(previous.db), nil, true)
+    b:connect(true)
+    b:advance(4)
+    local group = current.db.restedxp.groups[current.fingerprint]
+    assert(group.packs["installed-previous"] == nil and group.packs["profile-fallback"] ~= nil,
+        "an empty current profile withdraws earlier-character automatic packs and preserves explicit exports")
+    for _, wire in ipairs(b.sent) do
+        assert(not wire:find("1|O|installed-previous|", 1, true),
+            "a restored automatic pack from another character is never advertised before current source validation")
+    end
+end
+
+-- Busy imports defer source recovery; unavailable source finishes cleanly and
+-- gives sharing guidance rather than leaving the tab indefinitely busy.
+do
+    local addon, world, api = client("Deferred", nil, nil, true)
+    world.installedPacks = { { id = "installed-deferred", label = "Deferred Pack", pack = packFor(addon, api, 1) } }
+    world.scanBusy = true
+    world:connect(true)
+    world:advance(3)
+    assert(world.scans and world.scans > 0 and addon.db.restedxp.groups[addon.fingerprint].packs["installed-deferred"] == nil,
+        "an active native import defers source collection without publishing partial data")
+    world.scanBusy = false
+    world:advance(5)
+    assert(addon.db.restedxp.groups[addon.fingerprint].packs["installed-deferred"],
+        "source collection retries after the native importer becomes available")
+    world.scanProblem = "RestedXP's complete source cache is unavailable."
+    world.installedChanged()
+    world:advance(5)
+    local state = addon:GetRestedXPState()
+    assert(not state.refreshingInstalled and not state.busy and state.sharingStatus:find("unavailable", 1, true),
+        "unavailable source recovery terminates and reports the compatibility problem")
+    assert(addon.db.restedxp.groups[addon.fingerprint].packs["installed-deferred"],
+        "an unavailable or incomplete scan does not withdraw the last complete publication")
+end
+
+-- Native observers and pending collection work respect read-only, logout and
+-- group boundaries, including callbacks already queued before cancellation.
+do
+    local addon, world, api = client("Lifecycle", nil, nil, true)
+    world.installedPacks = { { id = "installed-lifecycle", label = "Lifecycle Pack", pack = packFor(addon, api, 1) } }
+    world:connect(true)
+    world:advance(4)
+    local lateCallback = assert(world.installedChanged)
+    world:connect(false)
+    addon.fingerprint = nil
+    addon:Notify("GROUP_CHANGED")
+    lateCallback()
+    local scans, sent = world.scans, #world.sent
+    world:advance(5)
+    assert(world.installedChanged == nil and world.scans == scans and #world.sent == sent
+        and addon.db.restedxp.groups["test-group"] == nil,
+        "group leave stops observation, ignores late callbacks and clears old automatic publications")
+    addon.fingerprint = "new-group"
+    addon:Notify("GROUP_CHANGED")
+    world:connect(true)
+    world:advance(4)
+    assert(world.installedChanged and addon.db.restedxp.groups["new-group"].packs["installed-lifecycle"],
+        "joining a new group recovers installed guides into only the new group")
+    lateCallback = world.installedChanged
+    assert(world.events.PLAYER_LOGOUT)(addon, "PLAYER_LOGOUT")
+    lateCallback()
+    scans, sent = world.scans, #world.sent
+    world:advance(5)
+    assert(world.installedChanged == nil and world.scans == scans and #world.sent == sent,
+        "logout cancels source observation and pending callbacks without later traffic or scans")
+
+    local untouched = { sentinel = true }
+    local readonly, readWorld = client("ReadOnlyAuto", untouched, true, true)
+    readWorld:connect(true)
+    readWorld:advance(5)
+    assert(untouched.sentinel and untouched.restedxp == nil and readWorld.installedChanged == nil
+        and not readWorld.scans and #readWorld.sent == 0,
+        "newer-schema profiles never scan, publish, observe or write automatic guide state")
 end
 
 print("PASS: RestedXP pack sharing, content updates, transfer recovery and lifecycle")

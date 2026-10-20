@@ -38,6 +38,14 @@ function addon:GetRankingSettings()
     return self.rankingSettings
 end
 
+function addon:GetRankingHelpText()
+    return "Rank: higher level first, then exact XP progress; equal progress shares a rank.\n"
+        .. "XP %: progress toward the next level. MAX: confirmed maximum level.\n"
+        .. "Stale / ~: last saved progress, which may have changed; these values still count in the ranking.\n"
+        .. "Awaiting XP: no usable level and XP report yet (new discovery, older saved data or a level-up). "
+        .. "These characters have no rank until progress is available."
+end
+
 local function Editable(self, value)
     if not self.initialized or not self.rankingSettings then return false, "Still loading. Please try again after login." end
     if type(value) ~= "boolean" then return false, "Choose on or off." end
@@ -119,12 +127,16 @@ function addon:GetPlayerRanking()
     if not result.grouped or result.switching then return result end
     for _, player in ipairs(self:GetOverviewPlayers()) do
         local row = Copy(player)
+        row.stale = not player.isSelf and (not result.connected or not player.online
+            or player.xpStale == true or player.statusSynchronized == false)
+        row.xpStale = row.stale
         if player.isSelf then result.own = row end
-        if not player.online then result.inactive = result.inactive + 1
-        elseif player.xpStale or (not player.isSelf and player.statusSynchronized == false) then
-            result.stale = result.stale + 1
-        elseif not Complete(player) then result.awaiting = result.awaiting + 1
-        elseif result.connected then result.players[#result.players + 1] = row end
+        if not player.online then result.inactive = result.inactive + 1 end
+        if not Complete(player) then result.awaiting = result.awaiting + 1
+        else
+            result.players[#result.players + 1] = row
+            if row.stale then result.stale = result.stale + 1 end
+        end
     end
     table.sort(result.players, function(left, right)
         local order = CompareProgress(left, right)

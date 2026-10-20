@@ -75,7 +75,7 @@ end
 -- Future-schema profiles retain readable native controls while blocking preference changes.
 do
     local saved = settings(SECRET, false)
-    saved.schemaVersion = 99
+    saved.schemaVersion = 4
     local readonly, api, _, _, world = loadAddon(saved, false)
     world:initialize()
     loadOptions(readonly, api)
@@ -83,11 +83,12 @@ do
     local options = readonly.optionsPanel
     assert(not options.secret:IsEnabled() and options.secret.color[1] == 0.60
         and not options.applyGroup:IsEnabled() and options.applyGroup:GetFontString().alpha == 0.5
-        and options.ownSecret:GetText() == SECRET and readonly.mainPanel.CloseButton:IsEnabled(),
-        "read-only native fields and actions are visibly muted while the saved key and close control stay usable")
+        and readonly.mainPanel.TitleText.color[1] == 0.96 and readonly.mainPanel.CloseButton:IsEnabled()
+        and saved.group.secret == SECRET,
+        "read-only native edits are visibly muted while the heading and close control stay usable and saved keys stay intact")
     options.tabs.chat:Click()
     assert(options.tabs.chat.themeTab.selected and not options.tabs.group.themeTab.selected
-        and not options.autoJoin:IsEnabled() and saved.schemaVersion == 99,
+        and not options.autoJoin:IsEnabled() and saved.schemaVersion == 4,
         "read-only navigation selects native tabs without enabling edits or changing the saved schema")
 end
 

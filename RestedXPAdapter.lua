@@ -7,6 +7,9 @@ local TIMEOUT = 300
 local observations = setmetatable({}, { __mode = "k" })
 local guideObservations = setmetatable({}, { __mode = "k" })
 local installation
+local installedWatcher
+local watchedOwners = setmetatable({}, { __mode = "k" })
+local MAX_CACHE_ENTRIES, MAX_SCAN_BYTES = 10000, 16 * 1024 * 1024
 
 local function CallNative(name, ...)
     local callback = C_AddOns and C_AddOns[name] or _G[name]
@@ -123,6 +126,263 @@ local function Busy(rxp)
         or importer.importReady == true or importer.cachedState ~= nil or WorkerActive(rxp)
 end
 
+local function Pause()
+    if coroutine and coroutine.running() then coroutine.yield() end
+end
+
+-- These are source identities, not the character-specific keys produced by
+-- ParseGuide. Keep conditional headers so faction/class variants stay intact.
+local function SourceIdentity(raw)
+    local fields = {}
+    local games = { classic = true, tbc = true, wotlk = true, cata = true, mop = true,
+        df = true, retail = true, forever = true }
+    for line in raw:gmatch("[^\r\n]+") do
+        if line:match("^%s*step%s*$") or line:match("^%s*step%s+") then break end
+        local name, value = line:match("^%s*#([%a]+)%s*(.-)%s*$")
+        if name == "group" or name == "subgroup" or name == "name" or games[name] then
+            fields[#fields + 1] = name .. ":" .. tostring(#value) .. ":" .. value
+        elseif line:match("^%s*<<") then
+            fields[#fields + 1] = "condition:" .. line:match("^%s*(.-)%s*$")
+        end
+    end
+    return table.concat(fields, "\n")
+end
+
+local function Snapshot(rxp)
+    local cache = rxp and rxp.db and rxp.db.profile and rxp.db.profile.guides
+    local snapshot = { cache = cache, entries = {}, count = 0 }
+    if type(cache) ~= "table" then return snapshot end
+    for key, entry in pairs(cache) do
+        snapshot.count = snapshot.count + 1
+        if snapshot.count > MAX_CACHE_ENTRIES then snapshot.overflow = true; break end
+        snapshot.entries[key] = type(entry) == "table" and {
+            entry = entry, data = entry.groupOrContent, text = entry.text, version = entry.version,
+        } or { entry = entry }
+    end
+    return snapshot
+end
+
+local function SameSnapshot(rxp, snapshot)
+    local cache = rxp and rxp.db and rxp.db.profile and rxp.db.profile.guides
+    if cache ~= snapshot.cache or type(cache) ~= "table" then return false end
+    local count = 0
+    for key, entry in pairs(cache) do
+        count = count + 1
+        if count > MAX_CACHE_ENTRIES then return snapshot.overflow == true end
+        local previous = snapshot.entries[key]
+        if not previous or previous.entry ~= entry or type(entry) == "table"
+            and (previous.data ~= entry.groupOrContent or previous.text ~= entry.text or previous.version ~= entry.version) then
+            return false
+        end
+    end
+    return count == snapshot.count
+end
+
+local function MarkInstalledDirty(rxp, key, source)
+    local watcher = installedWatcher
+    if not watcher or watcher.rxp ~= rxp then return end
+    watcher.dirty, watcher.changedAt = true, GetTime()
+    local cache = rxp.db and rxp.db.profile and rxp.db.profile.guides
+    if watcher.recentCache ~= cache then
+        watcher.recentCache, watcher.recent, watcher.recentCount, watcher.recentBytes = cache, {}, 0, 0
+    end
+    -- A post-hook sees the raw argument before the native cache's lossy keys
+    -- can make equal-version replacements indistinguishable after a restart.
+    local compressed = type(source) == "table" and source.groupOrContent or nil
+    local raw = type(source) == "string" and source or nil
+    if type(key) ~= "string" or not raw and type(compressed) ~= "string" then return end
+    local previous = watcher.recent[key]
+    local size = #(raw or compressed)
+    local bytes = watcher.recentBytes - (previous and previous.size or 0) + size
+    if not previous and watcher.recentCount >= MAX_CACHE_ENTRIES or bytes > MAX_SCAN_BYTES then return end
+    watcher.serial = watcher.serial + 1
+    watcher.recent[key] = { raw = raw, compressed = compressed, size = size, serial = watcher.serial }
+    watcher.recentCount = watcher.recentCount + (previous and 0 or 1)
+    watcher.recentBytes = bytes
+end
+
+local function WatchMethod(rxp, owner, method, cache)
+    if type(owner) ~= "table" or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
+    local methods = watchedOwners[owner]
+    if not methods then methods = {}; watchedOwners[owner] = methods end
+    if methods[method] then return end
+    local success = pcall(hooksecurefunc, owner, method, function(key, source)
+        if cache then MarkInstalledDirty(rxp, key, source) else MarkInstalledDirty(rxp) end
+    end)
+    if success then methods[method] = true end
+end
+
+local function AttachInstalledHooks(rxp)
+    WatchMethod(rxp, rxp, "CacheGuide", true)
+    WatchMethod(rxp, rxp.RXPGuides or _G.RXPGuides, "ImportGuide")
+    WatchMethod(rxp, rxp.guideImporter, "ImportString")
+    WatchMethod(rxp, rxp, "LoadCachedGuides")
+end
+
+function addon:StopWatchingRestedXPInstalledGuides()
+    if not installedWatcher then return false end
+    if installedWatcher.timer then installedWatcher.timer:Cancel() end
+    installedWatcher = nil
+    return true
+end
+
+function addon:WatchRestedXPInstalledGuides(callback)
+    self:StopWatchingRestedXPInstalledGuides()
+    if type(callback) ~= "function" or not C_Timer or type(C_Timer.NewTicker) ~= "function" then return false end
+    local watcher = { callback = callback, dirty = true, changedAt = GetTime(), serial = 0,
+        recent = {}, recentCount = 0, recentBytes = 0 }
+    installedWatcher = watcher
+    watcher.timer = C_Timer.NewTicker(0.5, function()
+        if installedWatcher ~= watcher then return end
+        local rxp = GetRestedXP()
+        if watcher.rxp ~= rxp then
+            watcher.rxp, watcher.snapshot = rxp, nil
+            watcher.recentCache, watcher.recent, watcher.recentCount, watcher.recentBytes = nil, {}, 0, 0
+            watcher.dirty, watcher.changedAt = true, GetTime()
+        end
+        if not rxp then return end
+        AttachInstalledHooks(rxp)
+        if not watcher.nextPoll or GetTime() >= watcher.nextPoll then
+            watcher.nextPoll = GetTime() + 5
+            if not watcher.snapshot or not SameSnapshot(rxp, watcher.snapshot) then
+                watcher.snapshot = Snapshot(rxp)
+                watcher.dirty, watcher.changedAt = true, GetTime()
+            end
+        end
+        if not watcher.dirty or not Compatible(rxp) or Busy(rxp) or GetTime() - watcher.changedAt < 0.5 then return end
+        watcher.snapshot = Snapshot(rxp)
+        watcher.dirty = false
+        pcall(watcher.callback)
+    end)
+    return true
+end
+
+local function CollectSources(self)
+    local rxp = GetRestedXP()
+    local info = { complete = false, skipped = 0 }
+    if not Compatible(rxp) then
+        info.problem = self:GetRestedXPInstallation().problem or "RestedXP guide storage is unavailable."
+        return nil, info
+    end
+    if Busy(rxp) then
+        info.busy, info.problem = true, "Waiting for RestedXP to finish importing guides."
+        return nil, info
+    end
+    local codec = self.RestedXPCodec
+    if not codec or type(codec.DecodeCachedSource) ~= "function" or type(codec.SourceMetadata) ~= "function" then
+        info.problem = "Installed guide source conversion is unavailable."
+        return nil, info
+    end
+    local snapshot = Snapshot(rxp)
+    if snapshot.overflow then
+        info.problem = "RestedXP guide storage exceeds the supported guide limit."
+        return nil, info
+    end
+    local recent, watcher = {}, installedWatcher
+    if watcher and watcher.rxp == rxp and watcher.recentCache == snapshot.cache then
+        for _, entry in pairs(watcher.recent) do
+            local raw = entry.raw and codec.NormalizeSource(entry.raw) or codec.DecodeCachedSource(entry.compressed, MAX_SCAN_BYTES)
+            local metadata = raw and codec.SourceMetadata(raw)
+            if metadata then
+                local identity = SourceIdentity(raw)
+                if not recent[identity] or recent[identity].serial < entry.serial then
+                    recent[identity] = { hash = metadata.sourceHash, serial = entry.serial }
+                end
+            end
+            Pause()
+        end
+    end
+    local selected, bytes = {}, 0
+    local keys = {}
+    for key in pairs(snapshot.entries) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, key in ipairs(keys) do
+        local cache = rxp.db and rxp.db.profile and rxp.db.profile.guides
+        local entry = snapshot.entries[key]
+        if GetRestedXP() ~= rxp or Busy(rxp) or cache ~= snapshot.cache
+            or cache[key] ~= entry.entry or type(entry.entry) == "table"
+                and (entry.entry.groupOrContent ~= entry.data or entry.entry.text ~= entry.text) then
+            info.busy, info.problem = true, "RestedXP guides changed during collection; waiting for its import to finish."
+            return nil, info
+        end
+        local raw, problem
+        if type(entry.data) == "string" and entry.text == nil then
+            raw, problem = codec.DecodeCachedSource(entry.data, MAX_SCAN_BYTES - bytes)
+        end
+        local metadata = raw and codec.SourceMetadata(raw)
+        if not raw or not metadata then
+            info.skipped = info.skipped + 1
+            info.problem = problem or "Some installed guides have no recoverable complete source."
+        else
+            bytes = bytes + #raw
+            if bytes > MAX_SCAN_BYTES then
+                info.problem = "Installed guide sources exceed the supported size limit."
+                return nil, info
+            end
+            local identity = SourceIdentity(raw)
+            local previous = selected[identity]
+            local version = GuideVersion(metadata.version)
+            if not previous or version > previous.version then
+                selected[identity] = { raw = raw, metadata = metadata, version = version }
+            elseif version == previous.version and metadata.sourceHash ~= previous.metadata.sourceHash then
+                local newest = recent[identity]
+                if newest and newest.hash == metadata.sourceHash then
+                    selected[identity] = { raw = raw, metadata = metadata, version = version }
+                elseif not newest or newest.hash ~= previous.metadata.sourceHash then
+                    previous.conflict = true
+                end
+            end
+        end
+        Pause()
+    end
+    if GetRestedXP() ~= rxp or Busy(rxp) or not SameSnapshot(rxp, snapshot) then
+        info.busy, info.problem = true, "RestedXP guides changed during collection; retrying after the import."
+        return nil, info
+    end
+    local result = {}
+    for _, entry in pairs(selected) do
+        if entry.conflict then
+            info.skipped = info.skipped + 1
+            info.problem = "Conflicting installed guide sources have the same identity and version; import the current export in RestedXP."
+        else
+            result[#result + 1] = entry
+        end
+    end
+    table.sort(result, function(a, b) return a.raw < b.raw end)
+    info.complete = info.skipped == 0
+    return result, info, rxp, snapshot
+end
+
+function addon:CollectRestedXPInstalledPacks()
+    local sources, info, rxp, snapshot = CollectSources(self)
+    if not sources then return nil, info end
+    local grouped, result = {}, {}
+    for _, source in ipairs(sources) do
+        local group = source.metadata.group
+        grouped[group] = grouped[group] or {}
+        grouped[group][#grouped[group] + 1] = source.raw
+    end
+    local names = {}
+    for group in pairs(grouped) do names[#names + 1] = group end
+    table.sort(names)
+    for _, group in ipairs(names) do
+        local pack, problem = self.RestedXPCodec.FromSources(grouped[group])
+        if pack then
+            local hash = self.Crypto.Hex(self.Crypto.SHA256("LIT-RXP-INSTALLED-1\000" .. group, Pause))
+            result[#result + 1] = { id = "rxpi-" .. hash:sub(1, 24), label = group, pack = pack }
+        else
+            info.complete, info.skipped = false, info.skipped + #grouped[group]
+            info.problem = problem or "Some installed guide groups could not be prepared for sharing."
+        end
+        Pause()
+    end
+    if GetRestedXP() ~= rxp or Busy(rxp) or not SameSnapshot(rxp, snapshot) then
+        info.complete, info.busy, info.problem = false, true, "RestedXP guides changed while preparing shared packs; retrying after the import."
+        return nil, info
+    end
+    return result, info
+end
+
 local function Observe(importer)
     if observations[importer] then return observations[importer] end
     local observation = { serial = 0 }
@@ -209,12 +469,35 @@ local function Matches(metadata, expected, key)
 end
 
 local function AppliesToGame(guide, game)
-    local tagged = guide.classic or guide.tbc or guide.wotlk or guide.df or guide.retail or guide.cata
+    local tagged = guide.classic or guide.tbc or guide.wotlk or guide.df or guide.retail or guide.cata or guide.mop or guide.forever
     if not tagged then return true end
     game = type(game) == "string" and game:lower() or ""
     return guide[game] ~= nil and guide[game] ~= false
         or game == "forever" and guide.classic ~= nil and guide.classic ~= false
         or game == "retail" and guide.df ~= nil and guide.df ~= false
+end
+
+function addon:MatchesRestedXPInstalledPack(pack)
+    if type(pack) ~= "table" or type(pack.guides) ~= "table" then return false end
+    local sources, _, rxp = CollectSources(self)
+    if not sources then return false end
+    local available, expected, checked = {}, {}, 0
+    for _, source in ipairs(sources) do
+        if AppliesToGame(source.metadata, rxp.game) then
+            local hash = source.metadata.sourceHash
+            available[hash] = (available[hash] or 0) + 1
+        end
+    end
+    for _, guide in ipairs(pack.guides) do
+        if AppliesToGame(guide, rxp.game) then
+            local hash = guide.sourceHash
+            if type(hash) ~= "string" then return false end
+            checked = checked + 1
+            expected[hash] = (expected[hash] or 0) + 1
+            if expected[hash] > (available[hash] or 0) then return false end
+        end
+    end
+    return checked > 0
 end
 
 local function Verify(job)

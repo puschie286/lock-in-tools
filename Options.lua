@@ -316,7 +316,7 @@ local function CreateRestedXPPage(panel)
             or (pack.localPack or not pack.source) and "Shared" or canFollow and "Follow" or "Cached")
         row.follow:SetEnabled(not page.readOnly and not page.busy and canFollow and not pack.selected)
     end)
-    panel.restedxpPacks.empty:SetText("No LIT-shared packs found. One member must use Share export first.")
+    panel.restedxpPacks.empty:SetText("No shared packs available. Imported guides with recoverable source are shared automatically.")
     panel.restedxpUpdate = UI:Button(main, "Update guides", "primary")
     panel.restedxpUpdate:SetPoint("TOPLEFT", 16, -338)
     panel.restedxpUpdate:SetSize(160, 32)
@@ -327,11 +327,17 @@ local function CreateRestedXPPage(panel)
     end)
     OptionTooltip(page, panel.restedxpUpdate, "Update guides",
         "Discover available group packs and install changed content from publishers you follow. "
-            .. "One member must use Share export first; installed guides alone are not shared. "
+            .. "Imported guides are shared automatically on login and refreshed after RestedXP imports. "
             .. "Guide versions are displayed above; pack content identifies changes.")
+    panel.restedxpSharing = UI:Label(main, "", 11, "muted")
+    panel.restedxpSharing:SetPoint("TOPLEFT", 192, -338)
+    panel.restedxpSharing:SetSize(472, 32)
     panel.restedxpShare = UI:Button(main, "Share export")
     panel.restedxpShare:SetPoint("TOPRIGHT", -16, -12)
     panel.restedxpShare:SetSize(128, 28)
+    OptionTooltip(page, panel.restedxpShare, "Share export",
+        "Imported guides are shared automatically when their complete source is available. "
+            .. "Use this form to share an export that cannot be recovered from installed guides.")
 
     local packLabel = UI:Label(publish, "Pack ID", 12, "muted")
     packLabel:SetPoint("TOPLEFT", 16, -52)
@@ -462,6 +468,8 @@ local function RefreshRestedXP(panel)
     panel.restedxpStatus:SetText(status)
     panel.restedxpGuides:Refresh(state.guides)
     panel.restedxpPacks:Refresh(state.packs)
+    panel.restedxpSharing:SetText(GuideText(state.sharingStatus
+        or "Imported guides are shared automatically with your LIT group."))
     panel.restedxpUpdate:SetEnabled(not page.readOnly and not page.busy and state.canUpdate == true)
     panel.restedxpShare:SetEnabled(not page.readOnly and not page.busy)
     for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do
@@ -722,6 +730,7 @@ local function CreateOptionsPanel()
     local rankingHelpTitle = UI:Label(ranking, "How to read the ranking", 13)
     rankingHelpTitle:SetPoint("TOPLEFT", 16, -229)
     local rankingHelp = UI:Label(ranking, addon:GetRankingHelpText(), 12, "muted")
+    panel.rankingHelp = rankingHelp
     rankingHelp:SetPoint("TOPLEFT", 16, -251)
     rankingHelp:SetSize(648, 110)
 

@@ -95,7 +95,7 @@ do
 	-- 3. _MINOR
 
 	-- version to store the official version of LibDeflate
-	local _VERSION = "1.0.2-lit1"
+	local _VERSION = "1.0.2-lit2"
 
 	-- When MAJOR is changed, I should name it as LibDeflate2
 	local _MAJOR = "LITLibDeflate"
@@ -105,7 +105,7 @@ do
 	-- 1 : v1.0.0
 	-- 2 : v1.0.1
 	-- 3 : v1.0.2
-	local _MINOR = 1
+	local _MINOR = 2
 
 	local _COPYRIGHT =
 	"LibDeflate ".._VERSION
@@ -349,7 +349,7 @@ end
 -- @param str [string] the input string to calcuate its Adler-32 checksum.
 -- @return [integer] The Adler-32 checksum, which is greater or equal to 0,
 -- and less than 2^32 (4294967296).
-function LibDeflate:Adler32(str)
+function LibDeflate:Adler32(str, progress)
 	-- This function is loop unrolled by better performance.
 	--
 	-- Here is the minimum code:
@@ -378,6 +378,7 @@ function LibDeflate:Adler32(str)
 			+7*x10+6*x11+5*x12+4*x13+3*x14+2*x15+x16)%65521
 		a = (a+x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)%65521
 		i =  i + 16
+		if progress and i % 16384 == 1 then progress() end
 	end
 	while (i <= strlen) do
 		local x = string_byte(str, i, i)
@@ -1725,7 +1726,7 @@ end
 -- This function determines whether to use store/fixed/dynamic blocks by
 -- calculating the block size of each block type and chooses the smallest one.
 local function Deflate(configs, WriteBits, WriteString, FlushWriter, str
-	, dictionary)
+	, dictionary, progress)
 	local string_table = {}
 	local hash_tables = {}
 	local is_last_block = nil
@@ -1758,6 +1759,7 @@ local function Deflate(configs, WriteBits, WriteString, FlushWriter, str
 	end
 
 	while not is_last_block do
+		if progress then progress() end
 		if not block_start then
 			block_start = 1
 			block_end = 64*1024 - 1
@@ -1939,7 +1941,7 @@ end
 
 -- @see LibDeflate:CompressZlib
 -- @see LibDeflate:CompressZlibWithDict
-local function CompressZlibInternal(str, dictionary, configs)
+local function CompressZlibInternal(str, dictionary, configs, progress)
 	local WriteBits, WriteString, FlushWriter = CreateWriter()
 
 	local CM = 8 -- Compression method
@@ -1972,10 +1974,10 @@ local function CompressZlibInternal(str, dictionary, configs)
 		WriteBits(byte0, 8)
 	end
 
-	Deflate(configs, WriteBits, WriteString, FlushWriter, str, dictionary)
+	Deflate(configs, WriteBits, WriteString, FlushWriter, str, dictionary, progress)
 	FlushWriter(_FLUSH_MODE_BYTE_BOUNDARY)
 
-	local adler32 = LibDeflate:Adler32(str)
+	local adler32 = LibDeflate:Adler32(str, progress)
 
 	-- Most significant byte first
 	local byte3 = adler32%256
@@ -2061,6 +2063,16 @@ function LibDeflate:CompressZlib(str, configs)
 			..arg_err), 2)
 	end
 	return CompressZlibInternal(str, nil, configs)
+end
+
+-- Private API: stable compression with a cooperative callback between the
+-- compressor's bounded blocks, including when one guide is very large.
+function LibDeflate:CompressZlibCooperative(str, progress)
+	if type(str) ~= "string" or #str > 16777216
+		or (progress ~= nil and type(progress) ~= "function") then
+		return nil
+	end
+	return CompressZlibInternal(str, nil, {level = 3}, progress)
 end
 
 --- Compress using the zlib format with a preset dictionary.
@@ -2652,8 +2664,10 @@ end
 
 -- @see LibDeflate:DecompressDeflate(str)
 -- @see LibDeflate:DecompressDeflateWithDict(str, dictionary)
-local function DecompressDeflateInternal(str, dictionary)
+local function DecompressDeflateInternal(str, dictionary, max_output, progress)
 	local state = CreateDecompressState(str, dictionary)
+	state.max_output, state.output_size = max_output, 0
+	state.progress, state.progress_at = progress, 4096
 	local result, status = Inflate(state)
 	if not result then
 		return nil, status
@@ -2728,7 +2742,7 @@ local function DecompressZlibInternal(str, dictionary, max_output, progress)
 
 	local adler32_expected = adler_byte0*16777216
 		+ adler_byte1*65536 + adler_byte2*256 + adler_byte3
-	local adler32_actual = LibDeflate:Adler32(result)
+	local adler32_actual = LibDeflate:Adler32(result, progress)
 	if not IsEqualAdler32(adler32_expected, adler32_actual) then
 		return nil, -15 -- Adler32 checksum does not match
 	end
@@ -2758,6 +2772,16 @@ function LibDeflate:DecompressDeflate(str)
 			..arg_err), 2)
 	end
 	return DecompressDeflateInternal(str)
+end
+
+-- Private API for RestedXP's native guide cache, which uses raw Deflate.
+function LibDeflate:DecompressDeflateBounded(str, maximum, progress)
+	if type(str) ~= "string" or type(maximum) ~= "number" or maximum < 0
+		or maximum ~= math.floor(maximum) or maximum > 16777216
+		or (progress ~= nil and type(progress) ~= "function") then
+		return nil, -18
+	end
+	return DecompressDeflateInternal(str, nil, maximum, progress)
 end
 
 --- Decompress a raw deflate compressed data with a preset dictionary.

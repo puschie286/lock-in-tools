@@ -90,7 +90,8 @@ local function newAddon()
         GetTime = function() return world.now end,
         InCombatLockdown = function() return world.combat == true end,
         hooksecurefunc = function(owner, method, callback)
-            assert(owner == importer and method == "ImportString" or owner == public and method == "ImportGuide")
+            assert(owner == importer and method == "ImportString" or owner == public and method == "ImportGuide"
+                or owner == rxp and (method == "CacheGuide" or method == "LoadCachedGuides"))
             world.hooks = (world.hooks or 0) + 1
             local original = owner[method]
             owner[method] = function(...)
@@ -101,7 +102,7 @@ local function newAddon()
             end
         end,
         C_Timer = { NewTicker = function(delay, callback)
-            assert(delay == 0.01)
+            assert(delay == 0.01 or delay == 0.5)
             local timer = { callback = callback }
             function timer:Cancel() self.cancelled = true end
             world.timers[#world.timers + 1] = timer
@@ -124,6 +125,58 @@ local function newAddon()
     crypto("LockInTools", addon)
     loadModule(addon, environment)
     return addon, world
+end
+
+local function useSourceCache(addon, world)
+    local environment = world.environment
+    local libraries = setmetatable({}, { __index = _G })
+    for _, path in ipairs({ "Libs/LibStub/LibStub.lua", "Libs/LibDeflate/LibDeflate.lua" }) do
+        local chunk = assert(loadfile(path))
+        setfenv(chunk, libraries)
+        chunk()
+    end
+    local nativeStub = environment.LibStub
+    environment.LibStub = function(name, silent)
+        if name == "LITLibDeflate" then return libraries.LibStub(name, silent) end
+        return nativeStub(name, silent)
+    end
+    local codec = assert(loadfile("RestedXPCodec.lua"))
+    setfenv(codec, environment)
+    codec("LockInTools", addon)
+    local deflate = libraries.LibStub("LITLibDeflate")
+    function world:Cache(raw, key)
+        self.cacheSerial = (self.cacheSerial or 0) + 1
+        local metadata = assert(addon.RestedXPCodec.SourceMetadata(raw))
+        local storageKey = (key or metadata.key) .. "|" .. self.cacheSerial
+        self.rxp.db.profile.guides[storageKey] = {
+            key = key or metadata.key, version = metadata.version, metadata = metadata,
+            groupOrContent = deflate:CompressDeflate("--123456\n" .. raw),
+        }
+        return storageKey
+    end
+    function world.rxp.CacheGuide(key, raw)
+        world:Cache(raw, key)
+    end
+    function world.rxp.LoadCachedGuides() end
+    return addon.RestedXPCodec
+end
+
+local function source(group, name, version, content, condition, game)
+    return "#" .. (game or "classic") .. "\n#group " .. group .. "\n#name " .. name
+        .. "\n#version " .. version .. "\n" .. (condition and "<< " .. condition .. "\n" or "")
+        .. "step\n+" .. (content or "Fictional guide") .. "\n"
+end
+
+local function collectInstalled(addon)
+    local thread = coroutine.create(function() return addon:CollectRestedXPInstalledPacks() end)
+    local yields = 0
+    while true do
+        local okay, packs, info = coroutine.resume(thread)
+        assert(okay, packs)
+        if coroutine.status(thread) == "dead" then return packs, info, yields end
+        yields = yields + 1
+        assert(yields < 10000, "source collection did not finish")
+    end
 end
 
 local function pack(guides)
@@ -352,4 +405,97 @@ do
     assert(result == false and not world.imports and not world.aborts)
 end
 
-print("PASS: RestedXP installation detection, guide versions, local identity and verified asynchronous imports")
+do
+    local addon, world = newAddon()
+    local codec = useSourceCache(addon, world)
+    local old = source("Test", "Chapter", 1, "Old")
+    local current = source("Test", "Chapter", 2, "Current")
+    local variant = source("Test", "Chapter", 2, "Class-specific", "Druid")
+    local other = source("Other", "Next", 0)
+    world:Cache(old)
+    world:Cache(current)
+    world:Cache(current)
+    world:Cache(variant)
+    world:Cache(other)
+    local packs, info, yields = collectInstalled(addon)
+    assert(info.complete and info.skipped == 0 and #packs == 2 and yields > 0)
+    assert(packs[1].label == "Other" and packs[2].label == "Test")
+    assert(packs[2].id:match("^rxpi%-%x+$") and #packs[2].id <= 40)
+    assert(packs[2].pack.guideCount == 2, "newest complete sources retain class variants and deduplicate repeated cache entries")
+    assert(packs[2].pack.hash == assert(codec.FromSources({ current, variant })).hash)
+    local reversed = {}
+    for key, value in pairs(world.rxp.db.profile.guides) do reversed[key] = value end
+    world.rxp.db.profile.guides = reversed
+    local repeated = assert(collectInstalled(addon))
+    assert(repeated[2].id == packs[2].id and repeated[2].pack.hash == packs[2].pack.hash)
+    assert(addon:MatchesRestedXPInstalledPack(packs[2].pack))
+    assert(not addon:MatchesRestedXPInstalledPack(assert(codec.FromSources({ source("Test", "Chapter", 2, "Different") }))),
+        "equal versions cannot establish that externally imported source content matches")
+    assert(addon:MatchesRestedXPInstalledPack(assert(codec.FromSources({ current, source("Retail", "Elsewhere", 4, nil, nil, "retail") }))),
+        "only guides for the local game need to be present")
+    world.rxp.db.profile.guides["Metadata||Only|9"] = { key = "Metadata||Only", version = 1 }
+    packs, info = collectInstalled(addon)
+    assert(#packs == 2 and not info.complete and info.skipped == 1 and info.problem)
+    world.importer.importReady = true
+    packs, info = collectInstalled(addon)
+    assert(not packs and info.busy and not info.complete)
+end
+
+do
+    local addon, world = newAddon()
+    local codec = useSourceCache(addon, world)
+    local old = source("Test", "Chapter", 2, "Old content at the same version")
+    local current = source("Test", "Chapter", 2, "Updated content at the same version")
+    world:Cache(old)
+    world:Cache(current)
+    local packs, info = collectInstalled(addon)
+    assert(#packs == 0 and not info.complete and info.skipped == 1 and info.problem:find("Conflicting", 1, true),
+        "an ambiguous retained cache must not publish a stale equal-version source")
+    local callbacks = 0
+    assert(addon:WatchRestedXPInstalledGuides(function() callbacks = callbacks + 1 end))
+    world:Step(3)
+    assert(callbacks == 1, "watching requests one initial scan after RestedXP is ready")
+    world.rxp.CacheGuide("Test||Chapter", current)
+    world:Step(2)
+    assert(callbacks == 2)
+    packs, info = collectInstalled(addon)
+    assert(info.complete and #packs == 1 and packs[1].pack.hash == assert(codec.FromSources({ current })).hash,
+        "an observed native overwrite resolves equal-version source ambiguity")
+    world.importer.importReady = true
+    world.rxp.CacheGuide("Test||Chapter", source("Test", "Chapter", 3, "Third"))
+    world.rxp.CacheGuide("Other||Next", source("Other", "Next", 1))
+    world:Step(8)
+    assert(callbacks == 2, "native imports are never scanned while the importer is busy")
+    world.importer.importReady = false
+    world:Step()
+    assert(callbacks == 3, "multiple cache writes coalesce into one completed-import notification")
+    world:Step(24)
+    assert(callbacks == 3, "unchanged native storage must not cause repeated scans")
+    world.rxp.db.profile.guides = {}
+    world:Cache(source("New profile", "Only", 1))
+    world:Step(24)
+    assert(callbacks == 4, "the fallback detects profile switches and unhooked cache changes")
+    assert(addon:StopWatchingRestedXPInstalledGuides())
+    world.rxp.CacheGuide("Stopped||Later", source("Stopped", "Later", 1))
+    world:Step(24)
+    assert(callbacks == 4 and not addon:StopWatchingRestedXPInstalledGuides())
+end
+
+do
+    local addon, world = newAddon()
+    useSourceCache(addon, world)
+    world:Cache(source("Test", "Chapter", 1))
+    local thread = coroutine.create(function() return addon:CollectRestedXPInstalledPacks() end)
+    assert(coroutine.resume(thread))
+    assert(coroutine.status(thread) ~= "dead")
+    world.rxp.db.profile.guides = {}
+    local packs, info
+    repeat
+        local okay
+        okay, packs, info = coroutine.resume(thread)
+        assert(okay, packs)
+    until coroutine.status(thread) == "dead"
+    assert(not packs and info.busy, "a profile change during cooperative collection invalidates the entire snapshot")
+end
+
+print("PASS: RestedXP detection, complete installed sources, automatic change watching and verified asynchronous imports")

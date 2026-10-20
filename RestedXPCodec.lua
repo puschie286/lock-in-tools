@@ -125,8 +125,33 @@ local function Checksum(value)
 end
 local games = {classic = true, tbc = true, wotlk = true, cata = true, mop = true,
     df = true, retail = true, forever = true}
-local function Metadata(raw)
-    local guide = { version = 0, subgroup = "", contentHash = Hash(raw) }
+function Codec.NormalizeSource(raw)
+    if type(raw) ~= "string" or #raw == 0 or #raw > Codec.MAX_INFLATED
+        or raw:find("\000", 1, true) then
+        return nil, "Guide source is empty, invalid, or exceeds the decompressed size limit."
+    end
+    -- CacheGuide prepends this local account marker. Its normalization also
+    -- removes comments and whitespace, without filtering class/race branches.
+    raw = raw:gsub("^%-%-%d+\r?\n", "", 1)
+    raw = raw:gsub("%s-[\r\n]+%s*", "\n"):gsub("[\t ][\t ]+", " "):gsub("%-%-[^\n]*", "")
+    -- Comment removal can leave blank lines; normalize those now so repeating
+    -- the native cache/import cycle cannot change the shared source identity.
+    raw = raw:gsub("%s-[\r\n]+%s*", "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+    if raw == "" then return nil, "Guide source contains no guide data." end
+    Pause()
+    return raw
+end
+function Codec.SourceHash(raw)
+    local source, problem = Codec.NormalizeSource(raw)
+    if not source then return nil, problem end
+    return Hash(source)
+end
+local function Metadata(raw, normalized)
+    local contentHash = Hash(raw)
+    local sourceHash, problem = contentHash
+    if not normalized then sourceHash, problem = Codec.SourceHash(raw) end
+    if not sourceHash then return nil, problem end
+    local guide = { version = 0, subgroup = "", contentHash = contentHash, sourceHash = sourceHash }
     for line in raw:gmatch("[^\r\n]+") do
         if line:match("^%s*step%s*$") or line:match("^%s*step%s+") then break end
         local field, value = line:match("^%s*#([%a]+)%s*(.-)%s*$")
@@ -146,6 +171,26 @@ local function Metadata(raw)
     end
     guide.key = guide.group .. "|" .. guide.subgroup .. "|" .. guide.name
     return guide
+end
+function Codec.SourceMetadata(raw)
+    local source, problem = Codec.NormalizeSource(raw)
+    if not source then return nil, problem end
+    return Metadata(source, true)
+end
+function Codec.DecodeCachedSource(compressed, maximum)
+    maximum = maximum or Codec.MAX_INFLATED
+    if type(compressed) ~= "string" or #compressed == 0 or #compressed > Codec.MAX_DATA
+        or type(maximum) ~= "number" or maximum < 1 or maximum > Codec.MAX_INFLATED
+        or maximum ~= floor(maximum) then
+        return nil, "Cached guide exceeds the supported size limits."
+    end
+    local inflater = LibStub and LibStub("LITLibDeflate", true)
+    if not inflater or type(inflater.DecompressDeflateBounded) ~= "function" then
+        return nil, "The bundled guide decompression library is unavailable."
+    end
+    local raw, remaining = inflater:DecompressDeflateBounded(compressed, maximum, Pause)
+    if not raw or remaining ~= 0 then return nil, "Cannot decompress the cached guide within its size limit." end
+    return Codec.NormalizeSource(raw)
 end
 local function Decode(raw, key)
     if type(raw) ~= "string" or #raw == 0 or #raw > Codec.MAX_DATA then
@@ -213,6 +258,68 @@ function Codec.Decode(raw, sourceBattleTag)
 end
 function Codec.DecodeCanonical(data)
     return Decode(data)
+end
+function Codec.FromSources(sources)
+    if type(sources) ~= "table" or #sources == 0 or #sources > MAX_GUIDES then
+        return nil, "The guide source list is empty or exceeds the guide count limit."
+    end
+    local compressor = LibStub and LibStub("LITLibDeflate", true)
+    if not compressor or type(compressor.CompressZlibCooperative) ~= "function" then
+        return nil, "The bundled guide compression library is unavailable."
+    end
+    local ordered, seen, inputSize = {}, {}, 0
+    for index = 1, #sources do
+        local raw = sources[index]
+        if type(raw) ~= "string" then return nil, "A guide source is invalid." end
+        inputSize = inputSize + #raw
+        if inputSize > Codec.MAX_INFLATED then return nil, "Guide sources exceed the decompressed size limit." end
+        local source, problem = Codec.NormalizeSource(raw)
+        if not source then return nil, problem end
+        if not seen[source] then ordered[#ordered + 1], seen[source] = source, true end
+    end
+    -- Include every distinct conditional variant, even when its displayed guide
+    -- name is identical. Sorting full sources also removes native cache order.
+    table.sort(ordered)
+    Pause()
+    local blocks, canonical, plain, guides, entries = {}, {}, {}, {}, {}
+    local entrySize, inflated, encodedSize = 0, 0, 0
+    local function Flush()
+        if #entries == 0 then return true end
+        if #blocks >= MAX_BLOCKS then return nil, "Guide sources contain too many compressed blocks." end
+        local content = concat(entries, "\000")
+        inflated = inflated + #content
+        if inflated > Codec.MAX_INFLATED then return nil, "Guide sources exceed the decompressed size limit." end
+        local checksum = Adler32(content)
+        local compressed = compressor:CompressZlibCooperative(content, Pause)
+        if not compressed then return nil, "Cannot compress the guide sources." end
+        local encoded = tostring(checksum) .. ":" .. Base64Encode(compressed) .. "%"
+        encodedSize = encodedSize + #encoded
+        if encodedSize + #tostring(#ordered) + 7 > Codec.MAX_DATA then
+            return nil, "Guide export exceeds the 2 MiB limit."
+        end
+        blocks[#blocks + 1] = {checksum = checksum, compressed = compressed}
+        canonical[#canonical + 1] = encoded
+        plain[#plain + 1] = tostring(#content) .. ":" .. content
+        entries, entrySize = {}, 0
+        Pause()
+        return true
+    end
+    for _, source in ipairs(ordered) do
+        local guide, problem = Metadata(source, true)
+        if not guide then return nil, problem end
+        if entrySize > 0 and entrySize + #source + 1 > 131072 then
+            local success, failure = Flush()
+            if not success then return nil, failure end
+        end
+        guides[#guides + 1] = guide
+        entrySize = entrySize + #source + (#entries > 0 and 1 or 0)
+        entries[#entries + 1] = source
+    end
+    local success, problem = Flush()
+    if not success then return nil, problem end
+    local data = tostring(#guides) .. "|" .. concat(canonical) .. "|40000"
+    return {data = data, hash = Hash("LIT-RXP-1\000" .. concat(plain)), format = 40000,
+        guides = guides, guideCount = #guides, blocks = blocks}
 end
 function Codec.Encode(pack, destinationBattleTag)
     local key = BattleTagKey(destinationBattleTag)

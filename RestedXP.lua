@@ -6,7 +6,7 @@ local FEATURE, AUTH = "guides", "restedxp"
 local CHUNK, WINDOW, INTERVAL = 128, 8, 0.15
 local MAX_BYTES, MAX_CACHE, MAX_PACKS, MAX_PEERS = 2097152, 8388608, 8, 32
 local OFFER_AGE = 180
-local TryInstall, Reconcile, Schedule, Announce, Receive
+local TryInstall, Reconcile, Schedule, Announce, Receive, RefreshInstalled
 
 local function Secret(value) return issecretvalue and issecretvalue(value) end
 local function Hash(value)
@@ -15,6 +15,20 @@ end
 local function PackID(value)
     return not Secret(value) and type(value) == "string" and #value > 0 and #value <= 40
         and value:match("^[a-z0-9][a-z0-9_-]*$")
+end
+local function PackLabel(value)
+    if type(value) ~= "string" or Secret(value) then return nil end
+    value = value:gsub("[|%c]", " ")
+    -- Keep complete UTF-8 characters inside the native channel's byte limit.
+    local last, index = 0, 1
+    while index <= #value and index <= 48 do
+        local first = value:byte(index)
+        local size = first < 128 and 1 or first < 224 and 2 or first < 240 and 3 or 4
+        if index + size - 1 > 48 then break end
+        last, index = index + size - 1, index + size
+    end
+    value = value:sub(1, last)
+    return value ~= "" and value or nil
 end
 local function Integer(value, maximum)
     if type(value) ~= "string" or #value > 8 or not value:match("^[1-9]%d*$") then return nil end
@@ -126,7 +140,7 @@ local function DecodeSaved(self, id)
     state.decoded[id] = pack
     return pack
 end
-local function StorePack(self, id, pack, source)
+local function StorePack(self, id, pack, source, options)
     local group = CurrentGroup(self)
     if not group then return false, "Join a LIT group before sharing guides." end
     if not group.packs[id] and Count(group.packs) >= MAX_PACKS then return false, "The guide pack limit has been reached." end
@@ -144,7 +158,9 @@ local function StorePack(self, id, pack, source)
             and type(saved.previous.data) == "string" then total = total + #saved.previous.data end
     end
     if total > MAX_CACHE then return false, "There is not enough guide cache space for this update." end
-    group.packs[id] = { data = pack.data, hash = pack.hash, source = source, previous = previous }
+    group.packs[id] = { data = pack.data, hash = pack.hash, source = source, previous = previous,
+        label = options and options.label or old and old.label,
+        localInstalled = options and options.localInstalled == true or nil }
     self.restedxpState.decoded[id] = pack
     return true
 end
@@ -157,8 +173,113 @@ Announce = function(self)
     table.sort(ids)
     for _, id in ipairs(ids) do
         local pack = SavedPack(self, id)
-        if pack then Queue(self, "1|O|" .. id .. "|" .. pack.hash .. "|" .. #pack.data, "offer:" .. id) end
+        if pack and (not pack.localInstalled or self.restedxpState.autoReady) then
+            local label = PackLabel(pack.label)
+            Queue(self, "1|O|" .. id .. "|" .. pack.hash .. "|" .. #pack.data
+                .. (label and ("|" .. label) or ""), "offer:" .. id)
+        end
     end
+end
+
+local function RequestInstalledRefresh(self, delay, quiet)
+    local state = self.restedxpState
+    if not state or state.stopped or self.savedDataReadOnly or not self:HasGroup() or self:IsGroupSwitching()
+        or type(self.CollectRestedXPInstalledPacks) ~= "function" then return end
+    state.refreshAt = GetTime() + (delay or 0.5)
+    state.refreshingInstalled = true
+    state.checkedInstalled = {}
+    state.sharingStatus = "Checking imported guides for automatic sharing..."
+    if Available(self) then Schedule(self) end
+    if not quiet then Changed(self) end
+end
+
+local function WatchInstalled(self)
+    local state = self.restedxpState
+    if state.watching or not Available(self) or type(self.WatchRestedXPInstalledGuides) ~= "function" then return end
+    local generation = state.generation
+    state.watching = self:WatchRestedXPInstalledGuides(function()
+        if state.generation == generation and Available(self) then RequestInstalledRefresh(self) end
+    end) ~= false
+end
+
+local function WithdrawInstalledPack(self, id, saved)
+    local state, group = self.restedxpState, CurrentGroup(self)
+    group.packs[id], state.decoded[id], state.pending[id], Installed(self)[id] = nil, nil, nil, nil
+    -- Drop an announcement or transfer that was queued before the native removal.
+    for index = #state.queue, 1, -1 do
+        local entry = state.queue[index]
+        if entry.key == "offer:" .. id or entry.key and entry.key:sub(1, 64) == saved.hash then
+            if entry.key then state.queued[entry.key] = nil end
+            table.remove(state.queue, index)
+        end
+    end
+    Queue(self, "1|X|" .. id, "withdraw:" .. id)
+end
+
+RefreshInstalled = function(self)
+    local state = self.restedxpState
+    if not state.refreshAt or GetTime() < state.refreshAt or state.incoming or state.installing or state.job then return end
+    -- Finish an already downloaded update before rebuilding its pack from the
+    -- native cache; that cache still contains the previous guides until import.
+    if next(state.pending) then
+        state.refreshAt = GetTime() + 2
+        TryInstall(self)
+        return
+    end
+    state.refreshAt = nil
+    StartJob(self, "Reading installed RestedXP guides...", function()
+        return self:CollectRestedXPInstalledPacks()
+    end, function(packs, info)
+        info = type(info) == "table" and info or { problem = info }
+        if not packs then
+            state.sharingStatus = info.problem or "Automatic guide sharing is unavailable."
+            if info.busy then state.refreshAt = GetTime() + 2
+            else state.refreshingInstalled = false end
+            Changed(self)
+            Schedule(self)
+            return
+        end
+        local group, identity = CurrentGroup(self), LocalIdentity(self)
+        if not group or not identity then state.refreshingInstalled = false; return end
+        local found = {}
+        for _, item in ipairs(packs) do if PackID(item.id) then found[item.id] = true end end
+        for id in pairs(group.packs) do
+            local saved = SavedPack(self, id)
+            if saved and saved.localInstalled and not found[id] then
+                WithdrawInstalledPack(self, id, saved)
+            end
+        end
+        local count, skipped, problem = 0, tonumber(info.skipped) or 0, info.problem
+        for _, item in ipairs(packs) do
+            if PackID(item.id) and type(item.pack) == "table" and Hash(item.pack.hash) then
+                local stored, failure = StorePack(self, item.id, item.pack, identity,
+                    { label = item.label, localInstalled = true })
+                if stored then
+                    Installed(self)[item.id] = item.pack.hash
+                    state.pending[item.id] = nil
+                    if state.failed[item.id] == item.pack.hash then state.failed[item.id] = nil end
+                    count = count + item.pack.guideCount
+                else
+                    skipped, problem = skipped + item.pack.guideCount, failure
+                    local previous = SavedPack(self, item.id)
+                    if previous and previous.localInstalled then
+                        WithdrawInstalledPack(self, item.id, previous)
+                    end
+                end
+            end
+        end
+        state.autoReady, state.sharedInstalledGuides, state.unshareableGuides = true, count, skipped
+        state.refreshingInstalled = state.refreshAt ~= nil
+        state.sharingStatus = count > 0 and ("Automatically sharing " .. count .. " imported guides.")
+            or "No imported guides with recoverable source were found."
+        if skipped > 0 then state.sharingStatus = state.sharingStatus .. " " .. skipped .. " unavailable." end
+        if problem then state.sharingStatus = state.sharingStatus .. " " .. problem end
+        Announce(self)
+        if state.updateAt then state.updateAt = GetTime() + 2 end
+        Changed(self, "Installed guides checked for automatic sharing.")
+        Reconcile(self)
+        Schedule(self)
+    end)
 end
 
 local function RequestWindow(self)
@@ -196,6 +317,20 @@ TryInstall = function(self)
         return
     end
     local generation = state.generation
+    if type(self.MatchesRestedXPInstalledPack) == "function" and state.checkedInstalled[id] ~= pack.hash then
+        StartJob(self, "Comparing installed " .. id .. "...", function()
+            return self:MatchesRestedXPInstalledPack(pack)
+        end, function(matches)
+            state.checkedInstalled[id] = pack.hash
+            if matches == true then
+                Installed(self)[id] = pack.hash
+                state.pending[id], state.failed[id] = nil, nil
+                Changed(self, id .. " is already up to date. No import needed.")
+                Reconcile(self)
+            else TryInstall(self) end
+        end)
+        return
+    end
     state.installing = id
     Changed(self, "Installing " .. id .. "...")
     local accepted, code
@@ -223,9 +358,9 @@ TryInstall = function(self)
     end
 end
 
-Reconcile = function(self, retryFailed)
+Reconcile = function(self)
     local state, group = self.restedxpState, CurrentGroup(self)
-    if not group or state.incoming or state.installing or state.job then return end
+    if not group or state.incoming or state.installing or state.job or state.refreshingInstalled then return end
     Prune(state)
     local ids = {}
     for id in pairs(group.sources) do if PackID(id) then ids[#ids + 1] = id end end
@@ -234,10 +369,9 @@ Reconcile = function(self, retryFailed)
         local source = group.sources[id]
         local offer = state.offers[id] and state.offers[id][source]
         local saved = SavedPack(self, id)
-        if retryFailed then state.failed[id] = nil end
         if offer and GetTime() - offer.seen <= OFFER_AGE and (not saved or saved.hash ~= offer.hash)
             and state.failed[id] ~= offer.hash then
-            state.incoming = { id = id, source = source, hash = offer.hash, size = offer.size,
+            state.incoming = { id = id, source = source, hash = offer.hash, size = offer.size, label = offer.label,
                 count = math.ceil(offer.size / CHUNK), chunks = {}, bytes = 0, progressAt = GetTime(), retries = 0 }
             Changed(self, "Receiving " .. id .. " (0%)...")
             RequestWindow(self)
@@ -264,7 +398,7 @@ local function FinishDownload(self)
         return
     end
     local stored
-    stored, problem = StorePack(self, incoming.id, pack, incoming.source)
+    stored, problem = StorePack(self, incoming.id, pack, incoming.source, { label = incoming.label })
     if not stored then state.failed[incoming.id] = incoming.hash; Changed(self, problem); Reconcile(self); return end
     state.pending[incoming.id] = true
     Changed(self, "Received " .. incoming.id .. ".")
@@ -296,7 +430,7 @@ local function CheckCompleteMessage(self)
     end
     if shared then return "Your shared guide packs are up to date. No download needed." end
     if next(state.offers) then return "Choose Follow beside a publisher, then use Update guides." end
-    return "No LIT-shared packs found. One member must use Share export first."
+    return "No LIT-shared packs found. Recoverable imported guides are shared automatically."
 end
 
 local function Tick(self)
@@ -304,6 +438,7 @@ local function Tick(self)
     state.timer = nil
     if not Available(self) then return end
     local now = GetTime()
+    if state.refreshAt and now >= state.refreshAt then RefreshInstalled(self) end
     local entry = state.queue[1]
     if entry then
         local tag = self:SignGroupMessage(AUTH, entry.body)
@@ -333,15 +468,15 @@ local function Tick(self)
             RequestWindow(self)
         end
     end
-    if state.updateAt and now >= state.updateAt then
+    if state.updateAt and now >= state.updateAt and not state.refreshingInstalled then
         state.updateAt = nil
-        Reconcile(self, true)
+        Reconcile(self)
         if not state.incoming and not state.installing and not state.job and not next(state.pending) then
             Changed(self, CheckCompleteMessage(self))
         else Changed(self) end
     end
     if state.installRetry and now >= state.installRetry then state.installRetry = nil; TryInstall(self) end
-    if #state.queue > 0 or state.incoming or state.updateAt or state.installRetry then Schedule(self) end
+    if #state.queue > 0 or state.incoming or state.updateAt or state.installRetry or state.refreshAt then Schedule(self) end
 end
 
 Schedule = function(self)
@@ -358,7 +493,7 @@ Receive = function(self, sender, wire)
     if not source or isSelf then return false end
     local body, signature = wire:match("^(.*)|([0-9a-f]+)$")
     if not body or not self:VerifyGroupMessage(AUTH, body, signature) then return false end
-    local kind, rest = body:match("^1|([QOWD])|(.*)$")
+    local kind, rest = body:match("^1|([QOWDX])|(.*)$")
     if not kind then return false end
     local state, group, now = self.restedxpState, CurrentGroup(self), GetTime()
     Prune(state)
@@ -375,14 +510,29 @@ Receive = function(self, sender, wire)
         end
     elseif kind == "O" then
         local id, hash, length = rest:match("^([^|]+)|([^|]+)|(%d+)$")
+        local label
+        if not id then id, hash, length, label = rest:match("^([^|]+)|([^|]+)|(%d+)|([^|]+)$") end
         local size = Integer(length, MAX_BYTES)
-        if not PackID(id) or not Hash(hash) or not size then return false end
+        if not PackID(id) or not Hash(hash) or not size or label and (#label > 48 or label:find("%c")) then return false end
         if not state.offers[id] and Count(state.offers) >= MAX_PACKS * MAX_PEERS then return false end
         state.offers[id] = state.offers[id] or {}
         if not state.offers[id][source] and Count(state.offers[id]) >= MAX_PEERS then return false end
-        state.offers[id][source] = { hash = hash, size = size, seen = now }
-        Changed(self)
+        state.offers[id][source] = { hash = hash, size = size, seen = now, label = label }
+        local noPacks = state.status:find("No LIT-shared packs found.", 1, true) == 1
+        Changed(self, noPacks and not state.refreshingInstalled and CheckCompleteMessage(self) or nil)
         if group.sources[id] == source and not state.updateAt then Reconcile(self) end
+    elseif kind == "X" then
+        if not PackID(rest) then return false end
+        local sources = state.offers[rest]
+        if sources then
+            sources[source] = nil
+            if not next(sources) then state.offers[rest] = nil end
+        end
+        if state.incoming and state.incoming.id == rest and state.incoming.source == source then
+            state.incoming = nil
+            Changed(self, "The publisher no longer has this installed guide pack.")
+            Reconcile(self)
+        else Changed(self) end
     elseif kind == "W" then
         local target, id, hash, startText, countText = rest:match("^([^|]+)|([^|]+)|([^|]+)|(%d+)|(%d+)$")
         local identity = LocalIdentity(self)
@@ -391,7 +541,7 @@ Receive = function(self, sender, wire)
         if state.requests[source] and now - state.requests[source] < 0.5 then return false end
         if not state.requests[source] and Count(state.requests) >= MAX_PEERS then return false end
         local pack = SavedPack(self, id)
-        if not pack or pack.hash ~= hash then return false end
+        if not pack or pack.hash ~= hash or pack.localInstalled and not state.autoReady then return false end
         local last = math.min(first + count - 1, math.ceil(#pack.data / CHUNK))
         if first > last then return false end
         state.requests[source] = now
@@ -422,9 +572,13 @@ local function Reset(self, stopped)
     if state.replyTimer then state.replyTimer:Cancel() end
     if state.jobTimer then state.jobTimer:Cancel() end
     if self.CancelRestedXPInstallation then self:CancelRestedXPInstallation() end
+    if self.StopWatchingRestedXPInstalledGuides then self:StopWatchingRestedXPInstalledGuides() end
     state.timer, state.replyTimer, state.incoming, state.installing = nil, nil, nil, nil
     state.job, state.jobTimer = nil, nil
     state.updateAt, state.installRetry, state.backoff, state.pruneAt = nil, nil, nil, nil
+    state.refreshAt, state.refreshingInstalled, state.watching, state.autoReady = nil, false, false, false
+    state.checkedInstalled, state.sharedInstalledGuides, state.unshareableGuides = {}, 0, 0
+    state.sharingStatus = "Imported guides are shared automatically with your LIT group."
     state.queue, state.queued, state.offers, state.replies, state.requests, state.pending, state.failed = {}, {}, {}, {}, {}, {}, {}
     state.generation, state.stopped = state.generation + 1, stopped
 end
@@ -436,12 +590,14 @@ function addon:InitializeRestedXP()
         if type(self.db.restedxp.groups) ~= "table" then self.db.restedxp.groups = {} end
     end
     self.restedxpState = { generation = 0, fingerprint = self:GetGroupFingerprint(), decoded = {}, queue = {}, queued = {}, offers = {},
-        replies = {}, requests = {}, pending = {}, failed = {}, status = "Use Update guides to check your group." }
+        replies = {}, requests = {}, pending = {}, failed = {}, checkedInstalled = {}, status = "Use Update guides to check your group." }
     self:RegisterDataFeature(FEATURE, function(sender, wire) return Receive(self, sender, wire) end, function(connected)
         Reset(self, false)
         if connected and Available(self) then
             CurrentGroup(self)
             self.restedxpState.updateAt = GetTime() + 2
+            WatchInstalled(self)
+            RequestInstalledRefresh(self, 0, true)
             Queue(self, "1|Q|" .. self.dataState.requestSession, "query")
             Announce(self)
             Changed(self, "Checking available group guides...")
@@ -455,14 +611,26 @@ function addon:InitializeRestedXP()
             state.decoded, state.fingerprint = {}, fingerprint
             if previous and not self.savedDataReadOnly then self.db.restedxp.groups[previous] = nil end
             CurrentGroup(self)
-            if Available(self) then Queue(self, "1|Q|" .. self.dataState.requestSession, "query"); Announce(self) end
+            if Available(self) then
+                WatchInstalled(self)
+                RequestInstalledRefresh(self, 0, true)
+                Queue(self, "1|Q|" .. self.dataState.requestSession, "query")
+                Announce(self)
+            end
             -- GROUP_CHANGED already refreshes Settings; avoid a second render.
             state.status = "Guide sources reset for the selected group."
         end
     end)
     self.restedxpEvents = self:RegisterGameEvents({ "ADDON_LOADED", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT" }, function(_, event)
         if event == "PLAYER_LOGOUT" then Reset(self, true)
-        else TryInstall(self); Changed(self) end
+        else
+            if event == "ADDON_LOADED" and Available(self) then
+                WatchInstalled(self)
+                RequestInstalledRefresh(self)
+            end
+            TryInstall(self)
+            Changed(self)
+        end
     end)
 end
 
@@ -508,10 +676,15 @@ function addon:UpdateRestedXPGuides()
     local state = self.restedxpState
     if state.incoming or state.installing or state.job then return false, "A guide update is already in progress." end
     state.updateAt = GetTime() + 2
+    WatchInstalled(self)
+    RequestInstalledRefresh(self, 0, true)
     Queue(self, "1|Q|" .. self.dataState.requestSession, "query")
     Announce(self)
     -- Locally published packs can also be installed without an online peer.
     local group, identity = CurrentGroup(self), LocalIdentity(self)
+    -- A manual request retries failures once, including when source recovery
+    -- completes before discovery does. Later completion must not clear a new failure.
+    for id in pairs(group.sources) do state.failed[id] = nil end
     for id in pairs(group.packs) do
         local saved = SavedPack(self, id)
         if saved and saved.source == identity and Installed(self)[id] ~= saved.hash then
@@ -529,7 +702,12 @@ function addon:GetRestedXPState()
     result.installationProblem = result.problem
     result.packs, result.readOnly = {}, self.savedDataReadOnly == true
     result.status = state and state.status or "Guides are loading."
-    result.busy = state and (state.incoming ~= nil or state.installing ~= nil or state.job ~= nil or state.updateAt ~= nil) or false
+    result.sharingStatus = state and state.sharingStatus
+    result.sharedInstalledGuides = state and state.sharedInstalledGuides or 0
+    result.unshareableGuides = state and state.unshareableGuides or 0
+    result.refreshingInstalled = state and state.refreshingInstalled or false
+    result.busy = state and (state.incoming ~= nil or state.installing ~= nil or state.job ~= nil
+        or state.updateAt ~= nil or state.refreshingInstalled) or false
     result.canUpdate = Available(self) and not result.busy or false
     if not state then return result end
     if state.fingerprint ~= self:GetGroupFingerprint() then
@@ -543,7 +721,7 @@ function addon:GetRestedXPState()
         for source, offer in pairs(sources) do
             if GetTime() - offer.seen <= OFFER_AGE then
                 local saved = SavedPack(self, id)
-                result.packs[#result.packs + 1] = { id = id, label = id, hash = offer.hash, source = source,
+                result.packs[#result.packs + 1] = { id = id, label = offer.label or saved and saved.label or id, hash = offer.hash, source = source,
                     selected = group.sources[id] == source, canFollow = true, installed = installed[id] == offer.hash,
                     updateAvailable = installed[id] ~= offer.hash, status = installed[id] == offer.hash and "Last installed"
                         or saved and saved.hash == offer.hash and "Downloaded" or "Available" }
@@ -554,7 +732,7 @@ function addon:GetRestedXPState()
     for id in pairs(group.packs) do
         local saved = SavedPack(self, id)
         if saved and not added[id .. "|" .. tostring(saved.source)] then
-            result.packs[#result.packs + 1] = { id = id, label = id, hash = saved.hash,
+            result.packs[#result.packs + 1] = { id = id, label = saved.label or id, hash = saved.hash,
                 source = saved.source, selected = group.sources[id] == saved.source, canFollow = false,
                 localPack = saved.source == LocalIdentity(self),
                 installed = installed[id] == saved.hash, updateAvailable = installed[id] ~= saved.hash,

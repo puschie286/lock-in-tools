@@ -30,6 +30,7 @@ assert(#pack.guides == 3 and #pack.blocks == 2)
 assert(pack.guides[1].key == "LIT Synthetic|Test|1-5 First" and pack.guides[1].version == 7)
 assert(pack.guides[1].classic and pack.guides[3].retail and pack.guides[3].version == 0)
 assert(pack.guides[1].contentHash == "f83129ac0ae706e90fc44b5c8573b3dd43944e2d982b7a419e7a555e39d10498")
+assert(pack.guides[1].sourceHash and #pack.guides[1].sourceHash == 64)
 assert(pack.guides[2].contentHash == "1bc430429bd1535a8ace6c7f94afd50db600162d80f82a17e2a78bd75437863c")
 assert(pack.guides[3].contentHash == "bcb59d61521defa0b4506a07d6d5fdac12040787b34cf395989b9f9ecd50bf9f")
 assert(codec.Encode(pack, "Destination#9876") == destination)
@@ -120,4 +121,84 @@ while coroutine.status(thread) ~= "dead" do
 end
 assert(progress > 0 and completed)
 assert(assert(codec.Decode(completed, "Player#1234")).hash == large.hash)
+
+-- Native CacheGuide writes raw Deflate and an account-specific comment. Its
+-- whitespace/comment normalization must not create updates on every import.
+local function NativeCache(raw, account)
+    raw = raw:gsub("%s-[\r\n]+%s*", "\n")
+        :gsub("[\t ][\t ]+", " "):gsub("%-%-[^\n]*", "")
+    return (deflate:CompressDeflate("--" .. (account or "123456789") .. "\n" .. raw))
+end
+local conditional = "\r\n  -- Fictional guide comment\r\n#classic\r\n<< Horde\r\n"
+    .. "#group  Synthetic\r\n#name Conditional\r\n#version 3\r\nstep << Mage\r\n"
+    .. "  .note   Fictional branch << Troll -- Local comment\r\n\r\n"
+local normalized = assert(codec.NormalizeSource(conditional))
+assert(not normalized:find("--", 1, true) and normalized:find("<< Horde", 1, true)
+    and normalized:find("step << Mage", 1, true) and normalized:find("<< Troll", 1, true))
+assert(codec.NormalizeSource(normalized) == normalized)
+local cached = NativeCache(conditional)
+assert(codec.DecodeCachedSource(cached) == normalized)
+assert(codec.DecodeCachedSource(NativeCache(conditional, "987654321")) == normalized)
+for _ = 1, 5 do
+    cached = NativeCache(assert(deflate:DecompressDeflate(cached)))
+    assert(codec.DecodeCachedSource(cached) == normalized, "Native import changed stable source identity")
+end
+local metadata = assert(codec.SourceMetadata(conditional))
+assert(metadata.key == "Synthetic||Conditional" and metadata.enabledFor == "Horde"
+    and metadata.version == 3 and metadata.sourceHash == codec.SourceHash(normalized))
+local original = assert(codec.DecodeCanonical(Canonical(conditional)))
+assert(original.guides[1].sourceHash == metadata.sourceHash
+    and original.guides[1].contentHash ~= metadata.sourceHash)
+local otherVariant = normalized:gsub("<< Mage", "<< Warrior")
+local sources = assert(codec.FromSources({conditional, otherVariant, normalized}))
+assert(sources.guideCount == 2 and #sources.guides == 2, "Distinct conditional sources were discarded")
+local reordered = assert(codec.FromSources({otherVariant, "--12345\n" .. normalized}))
+assert(sources.data == reordered.data and sources.hash == reordered.hash, "Cache order changed pack identity")
+assert(assert(codec.DecodeCanonical(sources.data)).hash == sources.hash)
+assert(assert(codec.Decode(assert(codec.Encode(sources, "Player#1234")), "Player#1234")).hash == sources.hash)
+for _, sourceGuide in ipairs(sources.guides) do
+    assert(sourceGuide.contentHash == sourceGuide.sourceHash)
+end
+local function RejectSources(list)
+    local result, problem = codec.FromSources(list)
+    assert(not result and type(problem) == "string")
+end
+RejectSources({})
+RejectSources({false})
+RejectSources({"-- Comments only"})
+RejectSources({guide .. "\000" .. guide})
+RejectSources({"#version 3\nstep\n.note Missing identity"})
+local tooMany = {}
+for index = 1, 10001 do tooMany[index] = guide end
+RejectSources(tooMany)
+assert(codec.DecodeCachedSource(cached .. "extra") == nil)
+assert(codec.DecodeCachedSource(cached:sub(1, -3)) == nil)
+assert(codec.DecodeCachedSource(string.char(255)) == nil)
+assert(codec.DecodeCachedSource(cached, 8) == nil)
+local rawRepeated = deflate:CompressDeflate(string.rep("x", 20000))
+local rawInflated, rawStatus = deflate:DecompressDeflateBounded(rawRepeated, 19999)
+assert(rawInflated == nil and rawStatus == -18)
+assert(deflate:DecompressDeflateBounded(rawRepeated, 20000) == string.rep("x", 20000))
+local rawStored = deflate:CompressDeflate(string.rep("a", 5000), {level = 0})
+assert(deflate:DecompressDeflateBounded(rawStored, 4999) == nil)
+codec.MAX_INFLATED = #guide - 1
+RejectSources({guide})
+assert(codec.DecodeCachedSource(NativeCache(guide)) == nil)
+codec.MAX_INFLATED = oldLimit
+local oldDataLimit = codec.MAX_DATA
+codec.MAX_DATA = 40
+RejectSources({guide})
+codec.MAX_DATA = oldDataLimit
+
+-- Large single guides also cooperate while compression crosses Deflate blocks.
+local rebuilt, resumed = nil, 0
+local building = coroutine.create(function()
+    rebuilt = assert(codec.FromSources({guide .. string.rep(".note Test\n", 8000)}))
+end)
+while coroutine.status(building) ~= "dead" do
+    local success, problem = coroutine.resume(building)
+    assert(success, problem)
+    resumed = resumed + 1
+end
+assert(resumed > 10 and assert(codec.DecodeCanonical(rebuilt.data)).hash == rebuilt.hash)
 print("restedxp-codec: passed")

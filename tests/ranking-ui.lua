@@ -45,6 +45,17 @@ do
     assert(panel and panel:IsVisible() and saved.ranking.enabled and not ranking.mainPanel
         and panel.TitleText:GetText() == "Player ranking" and panel.subtitle:GetText():find("Connection lost", 1, true),
         "the ranking command opens its own lazy overlay without opening Content")
+    local tooltip = api.GameTooltip
+    panel.help.scripts.OnEnter(panel.help)
+    assert(tooltip:IsShown() and tooltip:IsOwned(panel.help) and tooltip.text == "Ranking values"
+        and tooltip.lines[1]:find("Rank: higher level first", 1, true)
+        and tooltip.lines[1]:find("MAX: confirmed maximum level", 1, true)
+        and tooltip.lines[1]:find("Stale / ~: last saved progress", 1, true)
+        and tooltip.lines[1]:find("Awaiting XP: no usable level and XP report yet", 1, true)
+        and tooltip.lines[1]:find("older saved data or a level-up", 1, true),
+        "the Info tooltip explains ranks, percentage, maximum level, stale values and missing XP reports")
+    panel.help.scripts.OnLeave(panel.help)
+    assert(not tooltip:IsShown(), "leaving Info dismisses its explanation")
     command("options")
     local main = ranking.mainPanel
     assert(main:IsVisible() and panel:IsVisible(), "Settings and ranking can be visible independently")
@@ -56,9 +67,11 @@ do
         "reopening ranking reuses its window and leaves Settings visible")
     main.CloseButton:Click()
     assert(panel:IsVisible(), "closing the main window leaves the overlay visible")
+    panel.help:Click()
+    assert(tooltip:IsShown() and tooltip:IsOwned(panel.help), "Info also opens its explanation on click")
     panel.CloseButton:Click()
-    assert(not panel:IsShown() and not saved.ranking.enabled and not panel.scripts.OnUpdate,
-        "the overlay close button saves disabled and stops visible refresh work")
+    assert(not panel:IsShown() and not saved.ranking.enabled and not panel.scripts.OnUpdate and not tooltip:IsShown(),
+        "the overlay close button saves disabled, stops refresh work and dismisses its Info tooltip")
     ranking:Notify("ROSTER_CHANGED")
     ranking:Notify("DATA_CHANGED")
     ranking:Notify("GROUP_CHANGED")
@@ -93,6 +106,10 @@ do
         and not options.rankingEnabled:GetChecked() and options.rankingLocked:GetChecked()
         and not ranking.rankingOverlay,
         "the Ranking Settings page exposes the default-off and default-locked preferences lazily")
+    assert(options.rankingHelp:GetText():find("Awaiting XP: no usable level and XP report yet", 1, true)
+        and options.rankingHelp:GetText():find("Stale / ~: last saved progress", 1, true)
+        and options.rankingHelp:GetText():find("XP %: progress toward the next level", 1, true),
+        "Settings visibly explains the ranking values and why a character may have no rank")
     options.rankingEnabled:Click()
     local panel = ranking.rankingOverlay
     assert(saved.ranking.enabled and options.rankingEnabled:GetChecked()
@@ -122,7 +139,8 @@ do
         row("Echo", 5, 24, 500, 1000), own,
     }
     local state = { players = players, own = own, connected = true, grouped = true,
-        awaiting = 2, stale = 3, inactive = 4 }
+        awaiting = 2, stale = 2, inactive = 4 }
+    players[1].stale, players[4].stale = true, true
     ranking.GetPlayerRanking = function() return state end
     assert(ranking:SetRankingEnabled(true))
     local panel = ranking.rankingOverlay
@@ -132,30 +150,33 @@ do
         and panel.ownRow:IsShown() and panel.ownRow.player == own and panel.ownRow.rank:GetText() == "6"
         and panel.separator:IsShown() and panel.ownRow.highlight:IsShown(),
         "the top five retain tie ranks and a lower local player has its actual rank in a highlighted separate row")
-    assert(panel.subtitle:GetText() == "Active reports"
+    assert(panel.subtitle:GetText() == "Last reported standings"
         and panel.summary:GetText():find("6 ranked", 1, true)
         and panel.summary:GetText():find("2 awaiting", 1, true)
-        and panel.summary:GetText():find("3 stale", 1, true)
-        and panel.summary:GetText():find("4 inactive", 1, true),
-        "the overlay labels active standings and distinguishes missing, stale and inactive reports")
-    assert(panel.rows[1].progress:GetText() == "MAX" and panel.rows[1].progressTrack:IsShown()
+        and panel.summary:GetText():find("2 stale", 1, true),
+        "the overlay labels last reported standings and separates ranked stale values from missing XP")
+    assert(panel.rows[1].progress:GetText() == "~MAX" and panel.rows[1].progressTrack:IsShown()
         and panel.rows[1].progressFill:IsShown()
         and panel.rows[1].progressFill:GetWidth() == panel.rows[1].progressTrack:GetWidth()
         and panel.rows[2].progress:GetText() == "50%"
         and panel.rows[2].progressTrack:IsShown() and panel.rows[2].progressFill:IsShown()
-        and panel.rows[4].progress:GetText() == "99.9%",
+        and panel.rows[4].progress:GetText() == "~99.9%",
         "maximum level is distinct and displayed percentages do not round near-level XP to 100 percent")
+    assert(panel.rows[1].name:GetText():find("(stale)", 1, true) and panel.rows[1].alpha < 1
+        and panel.rows[1].rank:GetText() == "1", "saved stale progress keeps its rank with visible stale markers")
     local fullWidth = panel.rows[2].progressTrack:GetWidth()
     assert(math.abs(panel.rows[2].progressFill:GetWidth() - fullWidth * 0.5) < 0.000001,
         "the progress fill uses the exact fraction of its track")
     players[4].xp, players[4].xpMax = 9999, 10000
     ranking:RefreshRankingOverlay()
-    assert(panel.rows[4].progress:GetText() == "99.9%",
+    assert(panel.rows[4].progress:GetText() == "~99.9%",
         "progress just below a full level never rounds to 100 percent")
     players[1], own.rank = own, 1
     state.players = { own }
     ranking:Notify("ROSTER_CHANGED")
     assert(panel.rows[1].player == own and panel.rows[1].highlight:IsShown()
+        and panel.rows[1].alpha == 1 and not panel.rows[1].name:GetText():find("stale", 1, true)
+        and panel.rows[1].progress:GetText() == "25%"
         and not panel.ownRow:IsShown() and not panel.separator:IsShown()
         and not panel.ownRow.player and panel.ownRow.rank:GetText() == ""
         and not panel.ownRow.highlight:IsShown(),
@@ -169,19 +190,24 @@ do
             "unused pooled rows clear names, targets, ranks, progress and highlighting")
     end
     own.xp, own.xpMax, own.xpState, own.rank = nil, nil, "unavailable", nil
-    state.players, state.awaiting = {}, 1
+    state.players, state.awaiting, state.stale = {}, 1, 0
     ranking:RefreshRankingOverlay()
     assert(panel.ownRow:IsShown() and panel.ownRow.player == own
         and panel.ownRow.progress:GetText() == "Waiting for XP"
         and not panel.ownRow.rank:GetText():find("%d") and not panel.ownRow.progressTrack:IsShown(),
         "missing local XP shows Waiting for XP without inventing a numeric rank or zero progress")
     own.xp, own.xpMax, own.xpState = 250, 1000, "known"
+    local cached = row("Cached", 1, 25, 500, 1000)
+    cached.stale, cached.online, own.rank = true, false, 2
+    state.players, state.stale, state.awaiting = { cached, own }, 1, 0
     state.connected = false
     ranking:Notify("DATA_CHANGED")
-    assert(panel.subtitle:GetText() == "Connection lost — your progress only"
-        and panel.rows[1].player == own and not panel.rows[1].rank:GetText():find("%d")
-        and not panel.ownRow:IsShown() and panel.rows[1].progress:GetText() == "25%",
-        "a lost connection shows only local progress without claiming a group rank")
+    assert(panel.subtitle:GetText() == "Connection lost — showing last reports"
+        and panel.rows[1].player == cached and panel.rows[1].rank:GetText() == "1"
+        and panel.rows[1].progress:GetText() == "~50%" and panel.rows[2].player == own
+        and panel.rows[2].rank:GetText() == "2" and not panel.ownRow:IsShown()
+        and panel.rows[2].progress:GetText() == "25%",
+        "a lost connection retains saved peer ranks while local progress stays current")
     state.grouped, state.own = false, nil
     ranking:Notify("GROUP_CHANGED")
     assert(panel.empty:IsShown() and panel.empty:GetText():find("group", 1, true)
@@ -189,7 +215,7 @@ do
         "leaving the group clears all player rows while leaving the chosen overlay visible")
 end
 
--- Real roster events update local XP immediately; the visible tick expires quiet peers.
+-- Real roster events update local XP immediately; quiet peers keep their rank using stale progress.
 do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world:initialize()
@@ -214,9 +240,16 @@ do
         "the real XP event refreshes local progress immediately without waiting for the UI tick")
     world.now = world.now + 90
     panel.scripts.OnUpdate(panel, 1)
-    assert(panel.rows[1].player.isSelf and not panel.rows[2]:IsShown()
-        and panel.summary:GetText():find("1 inactive", 1, true) and requests == 0,
-        "the visible refresh expires peers with no contact without requesting another status snapshot")
+    assert(panel.rows[1].player.id == "alpha-testrealm" and panel.rows[1].rank:GetText() == "1"
+        and panel.rows[1].progress:GetText() == "~40%" and panel.rows[2].player.isSelf
+        and panel.summary:GetText():find("1 stale", 1, true) and requests == 0,
+        "contact expiry preserves peer ranks and marks the last progress stale without another snapshot request")
+    assert(ranking:ReceivePlayerStatus("Alpha-TestRealm", {
+        level = 24, xp = 400, xpMax = 1000, xpState = "known",
+    }, api.GetServerTime(), 2))
+    assert(panel.rows[1].progress:GetText() == "40%" and panel.rows[1].alpha == 1
+        and not panel.rows[1].name:GetText():find("stale", 1, true),
+        "a fresh valid report clears the stale marker without changing equal progress")
     api.UIParent:Hide()
     assert(panel:IsShown() and not panel:IsVisible() and not panel.scripts.OnUpdate,
         "hiding the native interface stops overlay refresh work without changing its preference")
@@ -326,36 +359,30 @@ do
         "the read-only toggle reopens the session overlay while preserving the future profile")
 end
 
--- Ranking uses the same optional skin and fitting as the main native window.
+-- Ranking retains native colors and fonts while fitting independently of the main window.
 do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
-    local callbacks, shellCalls, appearance = {}, 0, { font = "RankingSkin-A.ttf", accent = { 0.8, 0.2, 0.4 } }
-    api.EllesmereUI = { RegisterSkin = function(_, register)
-        register({
-            Shell = function() shellCalls = shellCalls + 1 end,
-            Font = function(region)
-                local _, size, flags = region:GetFont()
-                region:SetFont(appearance.font, size, flags)
-            end,
-            GetAccentColor = function() return unpack(appearance.accent) end,
-            OnLooksChanged = function(callback) callbacks[#callbacks + 1] = callback end,
-        })
-    end }
     world:initialize()
     loadOverlay(ranking, api)
-    assert(not ranking.rankingOverlay and shellCalls == 0, "optional skin registration preserves lazy ranking creation")
+    assert(not ranking.rankingOverlay, "native styling preserves lazy ranking creation")
     api.UIParent:SetSize(300, 250)
+    local own = row("Self", 1, 24, 250, 1000, true)
+    ranking.GetPlayerRanking = function() return { players = { own }, own = own, connected = true, grouped = true } end
     assert(ranking:SetRankingEnabled(true))
     local panel = ranking.rankingOverlay
-    assert(shellCalls == 1 and panel.TitleText.font[1] == appearance.font
+    assert(panel.TitleText.font[1] == "Fonts\\FRIZQT__.TTF"
         and panel.scale > 0 and panel.scale < 1
         and panel:GetWidth() * panel.scale <= api.UIParent:GetWidth()
         and panel:GetHeight() * panel.scale <= api.UIParent:GetHeight(),
-        "the independently themed overlay receives the optional font and fits a small native viewport")
-    appearance.font = "RankingSkin-B.ttf"
-    for _, callback in ipairs(callbacks) do callback() end
-    assert(panel.TitleText.font[1] == appearance.font and shellCalls == 1,
-        "live appearance updates refresh ranking fonts without recreating its shell")
+        "the overlay keeps its native font and fits a small viewport independently")
+    local accent = panel.rows[1].progressFill.textureColor
+    assert(accent[1] == 0.27 and accent[2] == 0.65 and accent[3] == 1
+        and panel.rows[1].progress:GetText() == "25%",
+        "ranking progress uses the fixed native blue accent")
+    api.UIParent:SetSize(1920, 1080)
+    ranking:RefreshRankingOverlay()
+    assert(panel.scale == 1 and ranking.rankingOverlay == panel,
+        "the native overlay restores normal scale on a larger viewport without recreating its window")
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep ranking test environments isolated")
