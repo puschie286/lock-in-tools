@@ -154,7 +154,12 @@ local sources = assert(codec.FromSources({conditional, otherVariant, normalized}
 assert(sources.guideCount == 2 and #sources.guides == 2, "Distinct conditional sources were discarded")
 local reordered = assert(codec.FromSources({otherVariant, "--12345\n" .. normalized}))
 assert(sources.data == reordered.data and sources.hash == reordered.hash, "Cache order changed pack identity")
-assert(assert(codec.DecodeCanonical(sources.data)).hash == sources.hash)
+local restoredSources = assert(codec.DecodeCanonical(sources.data))
+assert(restoredSources.hash == sources.hash)
+for index, sourceGuide in ipairs(restoredSources.guides) do
+    assert(sourceGuide.contentHash == sourceGuide.sourceHash
+        and sourceGuide.sourceHash == sources.guides[index].sourceHash)
+end
 assert(assert(codec.Decode(assert(codec.Encode(sources, "Player#1234")), "Player#1234")).hash == sources.hash)
 for _, sourceGuide in ipairs(sources.guides) do
     assert(sourceGuide.contentHash == sourceGuide.sourceHash)

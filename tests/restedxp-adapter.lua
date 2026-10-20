@@ -498,4 +498,184 @@ do
     assert(not packs and info.busy, "a profile change during cooperative collection invalidates the entire snapshot")
 end
 
-print("PASS: RestedXP detection, complete installed sources, automatic change watching and verified asynchronous imports")
+do
+    local addon, world = newAddon()
+    local codec = useSourceCache(addon, world)
+    world:Cache(source("First", "Chapter", 2, "First original"))
+    world:Cache(source("Second", "Chapter", 2, "Second original"))
+    local calls = { decode = 0, metadata = 0, pack = 0 }
+    local decode, metadata, fromSources = codec.DecodeCachedSource, codec.SourceMetadata, codec.FromSources
+    function codec.DecodeCachedSource(...)
+        calls.decode = calls.decode + 1
+        return decode(...)
+    end
+    function codec.SourceMetadata(...)
+        calls.metadata = calls.metadata + 1
+        return metadata(...)
+    end
+    function codec.FromSources(...)
+        calls.pack = calls.pack + 1
+        return fromSources(...)
+    end
+    local notifications = 0
+    assert(addon:WatchRestedXPInstalledGuides(function() notifications = notifications + 1 end))
+    local first, firstInfo = collectInstalled(addon)
+    assert(first and firstInfo.metrics.decodedSources == 2 and firstInfo.metrics.cacheHits == 0
+        and firstInfo.metrics.groupsBuilt == 2 and firstInfo.metrics.groupsReused == 0)
+    assert(calls.decode == 2 and calls.metadata == 2 and calls.pack == 2)
+    assert(addon:AcknowledgeRestedXPInstalledGuides())
+    world:Step(24)
+    assert(notifications == 0, "acknowledging the explicit login scan suppresses the duplicate initial watcher scan")
+    local repeated, repeatedInfo = collectInstalled(addon)
+    assert(repeated and repeatedInfo.metrics.decodedSources == 0 and repeatedInfo.metrics.cacheHits == 2
+        and repeatedInfo.metrics.groupsBuilt == 0 and repeatedInfo.metrics.groupsReused == 2)
+    assert(repeated[1].pack == first[1].pack and repeated[2].pack == first[2].pack)
+    assert(addon:MatchesRestedXPInstalledPack(first[1].pack))
+    assert(calls.decode == 2 and calls.metadata == 2 and calls.pack == 2,
+        "unchanged rescans and installed-content checks reuse recovery, metadata and prepared packs")
+    world.rxp.CacheGuide("First||Chapter", source("First", "Chapter", 2, "First replaced at same version"))
+    local metadataBefore = calls.metadata
+    assert(not addon:AcknowledgeRestedXPInstalledGuides(), "a scan acknowledgement must not clear a newer native change")
+    local updated = assert(collectInstalled(addon))
+    assert(updated[1].id == first[1].id and updated[1].pack.hash ~= first[1].pack.hash)
+    assert(updated[2].pack == first[2].pack and calls.decode == 3 and calls.pack == 3)
+    assert(calls.metadata == metadataBefore + 1, "a changed source is parsed once while the unchanged group is not recompressed")
+    assert(addon:AcknowledgeRestedXPInstalledGuides())
+    world:Step(24)
+    assert(notifications == 0)
+    world.importer.importReady = true
+    assert(not collectInstalled(addon))
+    assert(not addon:AcknowledgeRestedXPInstalledGuides(), "a busy native snapshot cannot be acknowledged")
+    world.importer.importReady = false
+    assert(collectInstalled(addon))
+    assert(calls.decode == 3 and calls.pack == 3, "immutable recovery and group work remain reusable after native busy state")
+    world.rxp.db.profile = { guides = {} }
+    world:Cache(source("Second", "Chapter", 2, "Second original"))
+    local before = calls.decode
+    local switched = assert(collectInstalled(addon))
+    assert(#switched == 1 and switched[1].label == "Second" and calls.decode == before + 1,
+        "changing profiles discards the old profile's recovered source memo")
+    assert(addon:AcknowledgeRestedXPInstalledGuides())
+    world:Step(24)
+    assert(notifications == 0, "an acknowledged profile scan also updates the watcher's profile baseline")
+end
+
+do
+    local addon, world = newAddon()
+    local codec = useSourceCache(addon, world)
+    world:Cache(source("Reset test", "Chapter", 4, "Old same-version source"))
+    local nativeProfile, nativeCache = world.rxp.db.profile, world.rxp.db.profile.guides
+    assert(addon:WatchRestedXPInstalledGuides(function() error("unexpected watcher reset") end))
+    local current = source("Reset test", "Chapter", 4, "Observed current source")
+    world.rxp.CacheGuide("Reset test||Chapter", current)
+    local first, firstInfo = collectInstalled(addon)
+    assert(first and firstInfo.complete and #first == 1 and firstInfo.metrics.decodedSources == 2)
+    assert(first[1].pack.hash == assert(codec.FromSources({ current })).hash)
+    local hooks = world.hooks
+    local entries = {}
+    for key, entry in pairs(nativeCache) do entries[key] = entry end
+    assert(addon:ResetRestedXPSourceMemo())
+    assert(world.rxp.db.profile == nativeProfile and world.rxp.db.profile.guides == nativeCache and world.hooks == hooks)
+    for key, entry in pairs(entries) do assert(nativeCache[key] == entry) end
+    assert(not world.imports and not addon:AcknowledgeRestedXPInstalledGuides(), "resetting preparation must not import or acknowledge native data")
+    local cold, coldInfo = collectInstalled(addon)
+    assert(cold and coldInfo.complete and cold[1].pack.hash == first[1].pack.hash,
+        "reset preserves the observed equal-version overwrite authority")
+    assert(cold[1].pack ~= first[1].pack and coldInfo.metrics.decodedSources == 2
+        and coldInfo.metrics.groupsBuilt == 1 and coldInfo.metrics.groupsReused == 0)
+    local warm, warmInfo = collectInstalled(addon)
+    assert(warm and warm[1].pack == cold[1].pack and warmInfo.metrics.decodedSources == 0
+        and warmInfo.metrics.groupsBuilt == 0 and warmInfo.metrics.groupsReused == 1)
+    warmInfo.metrics.decodedSources = 999
+    local _, cleanInfo = collectInstalled(addon)
+    assert(cleanInfo.metrics.decodedSources == 0, "returned metrics are separate for each preparation run")
+    assert(addon:AcknowledgeRestedXPInstalledGuides())
+    world:Step(24)
+end
+
+do
+    local addon, world = newAddon()
+    local codec = useSourceCache(addon, world)
+    local oldKey = world:Cache(source("First inventory", "Chapter", 1, "Old"))
+    local firstKey = world:Cache(source("First inventory", "Chapter", 2, "Current"))
+    local variantKey = world:Cache(source("First inventory", "Class variant", 2, "Variant", "Druid"))
+    local secondKey = world:Cache(source("Second inventory", "Other", 7))
+    for _, key in ipairs({ oldKey, firstKey, variantKey }) do world.rxp.db.profile.guides[key].metadata.guideId = 100 end
+    local function run(callback)
+        local thread = coroutine.create(callback)
+        repeat
+            local okay, result, info = coroutine.resume(thread)
+            assert(okay, result)
+            if coroutine.status(thread) == "dead" then return result, info end
+        until false
+    end
+    local calls = { decode = 0, metadata = 0, pack = 0 }
+    local decode, metadata, fromSources = codec.DecodeCachedSource, codec.SourceMetadata, codec.FromSources
+    function codec.DecodeCachedSource(...)
+        calls.decode = calls.decode + 1
+        return decode(...)
+    end
+    function codec.SourceMetadata(...)
+        calls.metadata = calls.metadata + 1
+        return metadata(...)
+    end
+    function codec.FromSources(...)
+        calls.pack = calls.pack + 1
+        return fromSources(...)
+    end
+    local storedSource = world.rxp.db.profile.guides[firstKey].groupOrContent
+    local opaque = "Opaque compressed source must not be hashed"
+    world.rxp.db.profile.guides[firstKey].groupOrContent = opaque
+    local sha = addon.Crypto.SHA256
+    function addon.Crypto.SHA256(message, ...)
+        assert(not message:find(opaque, 1, true), "inventory must never hash native source bytes")
+        return sha(message, ...)
+    end
+    local inventory, info = run(function() return addon:CollectRestedXPInstalledInventory() end)
+    assert(info.complete and #inventory == 2 and inventory[1].guideCount == 1 and inventory[2].guideCount == 1)
+    assert(calls.decode == 0 and calls.metadata == 0 and calls.pack == 0,
+        "startup inventory uses native identity/version metadata without opening guide sources")
+    local first = inventory[1]
+    assert(#first.revision == 64 and first.id:match("^rxpi%-%x+$"))
+    world.rxp.db.profile.guides[firstKey].groupOrContent = storedSource
+    world.rxp.db.profile.guides[firstKey].metadata.key = "First inventory||Renamed display"
+    inventory = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
+    assert(inventory[1].revision == first.revision, "native guideId is stable when character-specific display keys change")
+    local prepared = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
+    assert(calls.decode == 2 and calls.pack == 1 and prepared.guideCount == 2,
+        "requested preparation recovers only the newest requested group while retaining its conditional variants")
+    local sourceHash = prepared.hash
+    world.rxp.db.profile.guides[firstKey].groupOrContent = opaque
+    local unchanged = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
+    assert(unchanged[1].revision == first.revision)
+    local repeated = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
+    assert(repeated == prepared and calls.decode == 2 and calls.pack == 1,
+        "unchanged native guide ids and versions deliberately reuse preparation despite changed source bytes")
+    local metadataCalls, nativeCache = calls.metadata, world.rxp.db.profile.guides
+    assert(addon:ResetRestedXPInventoryMemo())
+    local fresh = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
+    local stillPrepared = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
+    assert(fresh[1].revision == first.revision and stillPrepared == prepared and world.rxp.db.profile.guides == nativeCache
+        and calls.decode == 2 and calls.metadata == metadataCalls and calls.pack == 1,
+        "resetting the inventory memo rereads metadata without clearing prepared sources or changing native guides")
+    local newKey = world:Cache(source("First inventory", "Chapter", 3, "New version"))
+    world.rxp.db.profile.guides[newKey].metadata.guideId = 100
+    local changed = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
+    assert(changed[1].id == first.id and changed[1].revision ~= first.revision)
+    local rejected, problem = run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end)
+    assert(not rejected and problem:find("versions changed", 1, true))
+    local updated = assert(run(function() return addon:PrepareRestedXPInstalledPack(changed[1].id, changed[1].revision) end))
+    assert(updated.hash ~= sourceHash and calls.decode == 3 and calls.pack == 2)
+    world.rxp.db.profile.guides[secondKey].metadata.version = 8
+    local secondChanged = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
+    assert(secondChanged[1].revision == changed[1].revision and secondChanged[2].revision ~= changed[2].revision,
+        "guides without native guideId use their metadata key and version")
+    world.rxp.db.profile.guides[secondKey].metadata.guideId = 200
+    local identityChanged = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
+    assert(identityChanged[2].revision ~= secondChanged[2].revision, "a changed native guide id changes the inventory revision")
+    world.importer.importReady = true
+    inventory, info = run(function() return addon:CollectRestedXPInstalledInventory() end)
+    assert(not inventory and info.busy)
+end
+
+print("PASS: RestedXP metadata inventory, on-demand preparation, memoized sharing and verified asynchronous imports")

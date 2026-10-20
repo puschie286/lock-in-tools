@@ -1,7 +1,33 @@
 local _, addon = ...
 local UI = addon.Theme
-local WIDTH, ROW_WIDTH, ROW_HEIGHT, ROW_TOP = 326, 302, 42, 82
+local WIDTH, ROW_WIDTH, ROW_HEIGHT, ROW_TOP = 326, 302, 42, 56
 local VISIBLE_ROWS = 5
+local COLUMN_X = { 17, 42, 272 }
+
+local function HideTooltip(widget)
+    if GameTooltip and GameTooltip:IsOwned(widget) then GameTooltip:Hide() end
+end
+
+local function HideTooltips(panel)
+    for _, widget in ipairs(panel.tooltipOwners or {}) do HideTooltip(widget) end
+end
+
+local function Tooltip(panel, widget, title, description)
+    panel.tooltipOwners = panel.tooltipOwners or {}
+    panel.tooltipOwners[#panel.tooltipOwners + 1] = widget
+    if widget.SetMotionScriptsWhileDisabled then widget:SetMotionScriptsWhileDisabled(true) end
+    local function Show()
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(widget, "ANCHOR_RIGHT")
+        GameTooltip:SetText(type(title) == "function" and title() or title)
+        GameTooltip:AddLine(type(description) == "function" and description() or description, 1, 1, 1, true)
+        GameTooltip:Show()
+    end
+    widget:HookScript("OnEnter", Show)
+    widget:HookScript("OnLeave", function() HideTooltip(widget) end)
+    widget:HookScript("OnHide", function() HideTooltip(widget) end)
+    return Show
+end
 
 local function Label(parent, text, x, y, width, size, role)
     local label = UI:Label(parent, text, size or 12, role)
@@ -23,8 +49,11 @@ local function CreateRow(panel)
     row.level:SetJustifyH("RIGHT")
     row.progress = Label(row, "", 210, 23, 50, 10, "muted")
     row.progress:SetJustifyH("RIGHT")
+    row.progress:SetHeight(12)
+    row.status = Label(row, "", 30, 23, 174, 10, "muted")
+    row.status:SetHeight(12)
     row.progressTrack = row:CreateTexture(nil, "BACKGROUND")
-    row.progressTrack:SetPoint("TOPLEFT", 30, -30)
+    row.progressTrack:SetPoint("TOPLEFT", 30, -37)
     row.progressTrack:SetSize(174, 3)
     row.progressFill = row:CreateTexture(nil, "ARTWORK")
     row.progressFill:SetPoint("TOPLEFT", row.progressTrack, "TOPLEFT")
@@ -41,6 +70,8 @@ local function PaintRow(row, player)
         row.name:SetText("")
         row.level:SetText("")
         row.progress:SetText("")
+        row.status:SetText("")
+        row.status:Hide()
         row.progressTrack:Hide()
         row.progressFill:Hide()
         row.highlight:Hide()
@@ -53,7 +84,7 @@ local function PaintRow(row, player)
     local stale = player.stale == true
     row:SetAlpha(stale and 0.65 or 1)
     row.rank:SetText(rank and tostring(rank) or "—")
-    row.name:SetText(player.name .. (player.isSelf and " (you)" or "") .. (stale and " (stale)" or ""))
+    row.name:SetText(player.name .. (player.isSelf and " (you)" or ""))
     row.level:SetText(player.level and tostring(player.level) or "—")
     row.highlight:SetColorTexture(red, green, blue, 0.14)
     if player.isSelf then
@@ -70,10 +101,16 @@ local function PaintRow(row, player)
     row.progress:ClearAllPoints()
     row.progressTrack:Hide()
     row.progressFill:Hide()
+    row.status:SetText("")
+    row.status:Hide()
     local known = player.level and player.xpState == "known" and type(player.xp) == "number"
         and type(player.xpMax) == "number" and player.xpMax > 0
     local maximum = player.level and player.xpState == "max"
     if known or maximum then
+        if stale then
+            row.status:SetText("Stale progress")
+            row.status:Show()
+        end
         local fraction = maximum and 1 or math.max(0, math.min(1, player.xp / player.xpMax))
         local tenths = maximum and 1000 or math.floor(player.xp * 1000 / player.xpMax)
         local percentage = string.format("%.1f", tenths / 10):gsub("%.0$", "")
@@ -151,6 +188,10 @@ local function CreateOverlay()
             addon:Notify("RANKING_CHANGED")
         else addon:SetRankingEnabled(false) end
     end)
+    Tooltip(panel, panel.CloseButton, "Hide ranking", function()
+        if addon.savedDataReadOnly then return "Hide the overlay for this session. Use /lit ranking to reopen it." end
+        return "Hide this overlay. Reopen it from Settings > Ranking or /lit ranking."
+    end)
 
     panel.header = CreateFrame("Frame", nil, panel)
     panel.header:SetPoint("TOPLEFT", 1, -1)
@@ -158,6 +199,7 @@ local function CreateOverlay()
     panel.header:RegisterForDrag("LeftButton")
     panel.header:SetScript("OnDragStart", function()
         if addon:GetRankingSettings().locked then return end
+        HideTooltips(panel)
         panel.moving = true
         panel:StartMoving()
     end)
@@ -166,32 +208,30 @@ local function CreateOverlay()
     panel.lock:SetPoint("TOPRIGHT", -36, -8)
     panel.lock:SetSize(60, 23)
     panel.lock:SetScript("OnClick", function()
+        HideTooltip(panel.lock)
         addon:SetRankingLocked(not addon:GetRankingSettings().locked)
+    end)
+    Tooltip(panel, panel.lock, function()
+        return addon:GetRankingSettings().locked and "Unlock overlay" or "Lock overlay"
+    end, function()
+        if addon.savedDataReadOnly then return "Update LockInTools before changing the position lock." end
+        if addon:GetRankingSettings().locked then
+            return "Unlock to drag the title bar. Your position saves across reloads and characters."
+        end
+        return "Drag the title bar to move the overlay, then lock it to keep it in place. Player rows let clicks pass through."
     end)
     panel.help = UI:Button(panel, "Info")
     panel.help:SetPoint("TOPRIGHT", -102, -8)
     panel.help:SetSize(36, 23)
-    local function ShowHelp(button)
-        if not GameTooltip then return end
-        GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Ranking values")
-        GameTooltip:AddLine(addon:GetRankingHelpText(), 1, 1, 1, true)
-        GameTooltip:Show()
-    end
-    local function HideHelp(button)
-        if GameTooltip and GameTooltip:IsOwned(button) then GameTooltip:Hide() end
-    end
-    panel.help:HookScript("OnEnter", ShowHelp)
-    panel.help:HookScript("OnLeave", HideHelp)
-    panel.help:HookScript("OnHide", HideHelp)
+    local ShowHelp = Tooltip(panel, panel.help, "Ranking values", function() return addon:GetRankingHelpText() end)
     panel.help:SetScript("OnClick", ShowHelp)
     panel.subtitle = Label(panel, "", 12, 38, ROW_WIDTH, 10, "muted")
     panel.subtitle:SetHeight(24)
     if panel.subtitle.SetWordWrap then panel.subtitle:SetWordWrap(true) end
-    Label(panel, "#", 17, 65, 24, 10, "muted")
-    Label(panel, "Player · XP progress", 42, 65, 218, 10, "muted")
-    local level = Label(panel, "Level", 272, 65, 36, 10, "muted")
+    local level = Label(panel, "Level", 272, ROW_TOP - 17, 36, 10, "muted")
     level:SetJustifyH("RIGHT")
+    panel.columnHeaders = { Label(panel, "#", 17, ROW_TOP - 17, 24, 10, "muted"),
+        Label(panel, "Player · XP progress", 42, ROW_TOP - 17, 218, 10, "muted"), level }
     panel.rows = {}
     for index = 1, VISIBLE_ROWS do
         local row = CreateRow(panel)
@@ -205,8 +245,6 @@ local function CreateOverlay()
     panel.empty = Label(panel, "", 12, ROW_TOP + 4, ROW_WIDTH, 11, "muted")
     panel.empty:SetHeight(36)
     if panel.empty.SetWordWrap then panel.empty:SetWordWrap(true) end
-    panel.summary = Label(panel, "", 12, 130, ROW_WIDTH, 10, "muted")
-    panel.summary:SetHeight(32)
 
     local position = addon:GetRankingSettings().position
     panel:ClearAllPoints()
@@ -218,6 +256,7 @@ local function CreateOverlay()
         addon:RefreshRankingOverlay()
     end)
     panel:SetScript("OnHide", function()
+        HideTooltips(panel)
         panel:SetScript("OnUpdate", nil)
         if panel.moving then addon:SaveRankingPosition() end
     end)
@@ -252,12 +291,20 @@ function addon:RefreshRankingOverlay()
         panel.subtitle:SetText("Connection lost — showing last reports")
         panel.empty:SetText("Waiting for usable player progress.")
     else
-        panel.subtitle:SetText("Last reported standings")
+        panel.subtitle:SetText("")
         panel.empty:SetText("Waiting for usable player progress.")
     end
 
+    local rowTop = ROW_TOP
+    if panel.subtitle:GetText() ~= "" then
+        panel.subtitle:Show()
+        rowTop = rowTop + 26
+    else panel.subtitle:Hide() end
+    panel.empty:SetPoint("TOPLEFT", 12, -rowTop - 4)
+
     local count, ownVisible = 0, false
     for index, row in ipairs(panel.rows) do
+        row:SetPoint("TOPLEFT", 12, -rowTop - (index - 1) * ROW_HEIGHT)
         local player = players[index]
         PaintRow(row, player)
         if player then
@@ -265,27 +312,34 @@ function addon:RefreshRankingOverlay()
             if own and (player.isSelf or player.id == own.id) then ownVisible = true end
         end
     end
-    local bottom = ROW_TOP + math.max(1, count) * ROW_HEIGHT
-    if hasStandings and own and not ownVisible then
-        panel.separator:ClearAllPoints()
-        panel.separator:SetPoint("TOPLEFT", 12, -bottom - 4)
-        panel.separator:Show()
+    local bottom = rowTop + count * ROW_HEIGHT
+    local showOwn = hasStandings and own and not ownVisible
+    if showOwn then
+        if count > 0 then
+            panel.separator:ClearAllPoints()
+            panel.separator:SetPoint("TOPLEFT", 12, -bottom - 4)
+            panel.separator:Show()
+            bottom = bottom + 24
+        else panel.separator:Hide() end
         panel.ownRow:ClearAllPoints()
-        panel.ownRow:SetPoint("TOPLEFT", 12, -bottom - 24)
+        panel.ownRow:SetPoint("TOPLEFT", 12, -bottom)
         PaintRow(panel.ownRow, own)
-        bottom = bottom + 24 + ROW_HEIGHT
+        bottom = bottom + ROW_HEIGHT
     else
         panel.separator:Hide()
         PaintRow(panel.ownRow, nil)
     end
-    if count == 0 then panel.empty:Show() else panel.empty:Hide() end
-    if hasStandings then
-        panel.summary:SetText(#players .. " ranked · " .. (ranking.stale or 0) .. " stale\n"
-            .. (ranking.awaiting or 0) .. " awaiting XP")
-    else panel.summary:SetText("") end
-    panel.summary:ClearAllPoints()
-    panel.summary:SetPoint("TOPLEFT", 12, -bottom - 10)
-    panel:SetHeight(bottom + 52)
+    local hasRows = count > 0 or showOwn
+    if hasRows then panel.empty:Hide()
+    else
+        panel.empty:Show()
+        bottom = bottom + ROW_HEIGHT
+    end
+    for index, heading in ipairs(panel.columnHeaders) do
+        heading:SetPoint("TOPLEFT", COLUMN_X[index], -rowTop + 17)
+        if hasRows then heading:Show() else heading:Hide() end
+    end
+    panel:SetHeight(bottom + 12)
     UI:Fit(panel)
     panel:Show()
 end

@@ -5,7 +5,7 @@
 - Features share one account-wide group key in `LockInToolsDB`. Preserve migrations, legacy keys and newer-schema read-only behavior. Never log group keys.
 - `LockInTools.toc` defines metadata and load order. Register new addon files there; keep tests out. Use `/reload` for existing Lua edits; restart WoW after manifest additions.
 - Keep `README.md` focused on development setup.
-- Keep one concise overview per feature in `feature/`: purpose, main user-facing behavior, important limits and brief in-game checks. Not every tiny detail needs to be recorded; omit implementation minutiae, exhaustive checklists and change history. Label planned features clearly.
+- Keep non-obvious behavior constraints beside the relevant code or regression tests, and manual in-game checks in `tests/testing.md`.
 
 ## Verification
 

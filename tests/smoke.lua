@@ -126,5 +126,62 @@ for _, damaged in ipairs({ false, "invalid", { schemaVersion = "bad", showWelcom
     assert(type(repaired.db.chat) == "table" and not repaired:HasGroup())
 end
 
+-- Local RestedXP diagnostics are explicit commands, independent of discovery
+-- and guide-update actions. The benchmark implementation owns its progress output.
+do
+    local diagnostics, api, output, _, diagnosticWorld = loadAddon(settings(SECRET, false), false)
+    local invoke = api.SlashCmdList.LOCKINTOOLS
+    local calls = { test = 0, stats = 0 }
+    local failure
+    function diagnostics:StartRestedXPBenchmark()
+        calls.test = calls.test + 1
+        if failure then return false, failure end
+        return true
+    end
+    function diagnostics:ShowRestedXPPerformance()
+        calls.stats = calls.stats + 1
+        self:Print("Local RestedXP performance report.")
+    end
+    invoke("rxp test")
+    assert(calls.test == 0 and output[#output]:find("Still loading", 1, true),
+        "RestedXP diagnostics wait for addon initialization and login")
+    diagnosticWorld:initialize()
+    local guideSends, dataSends, statusSends = #diagnosticWorld.guideSends, #diagnosticWorld.dataSends,
+        #diagnosticWorld.statusSends
+    invoke("  RXp TeST  ")
+    invoke("restedxp stats")
+    assert(calls.test == 1 and calls.stats == 1 and output[#output]:find("performance report", 1, true),
+        "test and stats dispatch once with normal command casing and the RestedXP alias")
+    failure = "A RestedXP benchmark is already running."
+    invoke("rxp test")
+    assert(calls.test == 2 and output[#output]:find(failure, 1, true),
+        "a rejected benchmark reports its local actionable error")
+    local previousStats = diagnostics.ShowRestedXPPerformance
+    diagnostics.ShowRestedXPPerformance = nil
+    invoke("rxp stats")
+    assert(output[#output]:find("diagnostics are unavailable", 1, true) and calls.stats == 1,
+        "missing diagnostics fail with reload guidance instead of a Lua error")
+    diagnostics.ShowRestedXPPerformance = previousStats
+    local previousTest = diagnostics.StartRestedXPBenchmark
+    diagnostics.StartRestedXPBenchmark = nil
+    invoke("rxp test")
+    assert(output[#output]:find("diagnostics are unavailable", 1, true) and calls.stats == 1,
+        "a missing benchmark cannot accidentally dispatch the passive statistics action")
+    diagnostics.StartRestedXPBenchmark = previousTest
+    for _, invalid in ipairs({ "rxp", "rxp update", "rxp test extra", "restedxp stats extra" }) do
+        invoke(invalid)
+        assert(output[#output]:find("Unknown command", 1, true), "unsupported diagnostic verbs remain invalid")
+    end
+    assert(calls.test == 2 and calls.stats == 1 and #diagnosticWorld.guideSends == guideSends
+        and #diagnosticWorld.dataSends == dataSends and #diagnosticWorld.statusSends == statusSends,
+        "diagnostic routing and invalid verbs never initiate group discovery or guide traffic")
+    local first = #output + 1
+    invoke("help")
+    assert(contains(output, "/lit rxp test", first) and contains(output, "/lit rxp stats", first),
+        "help lists the local benchmark and passive statistics commands")
+    assert(contains(output, "guide ID/version checks", first),
+        "benchmark help describes metadata checks rather than full guide preparation")
+end
+
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
 print("PASS: startup, migrations, commands and saved-data compatibility")

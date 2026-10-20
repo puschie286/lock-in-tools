@@ -5,8 +5,8 @@ local function loadModule(file, addon, env)
     chunk("LockInTools", addon)
 end
 
-local function client(name, saved, readOnly, automatic)
-    local world = { now = 0, timers = {}, sent = {}, listeners = {}, events = {}, installs = {}, notifications = 0 }
+local function client(name, saved, readOnly, automatic, metadata)
+    local world = { now = 0, timers = {}, sent = {}, observed = {}, output = {}, listeners = {}, events = {}, installs = {}, notifications = 0 }
     local addon = { db = saved or {}, savedDataReadOnly = readOnly, ready = true, initialized = true,
         connected = false, fingerprint = "test-group", dataState = { requestSession = name .. "-session" } }
     local env = setmetatable({ bit = false, bit32 = false, GetTime = function() return world.now end,
@@ -38,6 +38,7 @@ local function client(name, saved, readOnly, automatic)
     function addon:VerifyGroupMessage(feature, body, signature)
         return type(signature) == "string" and self.Crypto.Equal(self:SignGroupMessage(feature, body), signature)
     end
+    function addon:Print(message) world.output[#world.output + 1] = message end
     function addon:Notify(event)
         world.notifications = world.notifications + 1
         for _, callback in ipairs(world.listeners[event] or {}) do callback() end
@@ -76,13 +77,21 @@ local function client(name, saved, readOnly, automatic)
     function addon:CancelRestedXPInstallation()
         if world.installTimer then world.installTimer:Cancel() end
     end
-    if automatic then
+    if automatic or metadata then
         world.installedPacks = {}
         function addon:CollectRestedXPInstalledPacks()
             world.scans = (world.scans or 0) + 1
+            for _ = 1, world.scanYields or 0 do coroutine.yield() end
             if world.scanBusy then return nil, { busy = true, complete = false } end
             if world.scanProblem then return nil, { complete = false, problem = world.scanProblem } end
-            return world.installedPacks, { complete = world.scanComplete ~= false, skipped = world.skipped or 0 }
+            local metrics = world.memoWarm and { cacheHits = #world.installedPacks, decodedSources = 0,
+                groupsBuilt = 0, groupsReused = #world.installedPacks }
+                or { cacheHits = 0, decodedSources = #world.installedPacks, groupsBuilt = #world.installedPacks, groupsReused = 0 }
+            world.memoWarm = true
+            return world.installedPacks, { complete = world.scanComplete ~= false, skipped = world.skipped or 0, metrics = metrics }
+        end
+        function addon:ResetRestedXPSourceMemo()
+            world.memoResets, world.memoWarm = (world.memoResets or 0) + 1, false
         end
         function addon:WatchRestedXPInstalledGuides(callback)
             world.watchStarts = (world.watchStarts or 0) + 1
@@ -95,6 +104,24 @@ local function client(name, saved, readOnly, automatic)
         end
         function addon:MatchesRestedXPInstalledPack(pack)
             return world.matches and world.matches[pack.hash] == true
+        end
+    end
+    if metadata then
+        world.inventory, world.preparedPacks, world.prepares = {}, {}, {}
+        function addon:CollectRestedXPInstalledInventory()
+            world.inventoryScans = (world.inventoryScans or 0) + 1
+            for _ = 1, world.inventoryYields or 0 do coroutine.yield() end
+            return world.inventory, { complete = true, skipped = 0 }
+        end
+        function addon:ResetRestedXPInventoryMemo()
+            world.inventoryResets = (world.inventoryResets or 0) + 1
+        end
+        function addon:PrepareRestedXPInstalledPack(id, revision)
+            world.prepares[#world.prepares + 1] = { id = id, revision = revision }
+            for _ = 1, world.prepareYields or 0 do coroutine.yield() end
+            local entry = world.preparedPacks[id]
+            if not entry or entry.revision ~= revision then return nil, "The requested installed guide version is no longer available." end
+            return entry.pack
         end
     end
     loadModule("RestedXP.lua", addon, env)
@@ -125,7 +152,10 @@ local function client(name, saved, readOnly, automatic)
         while self.delivered < #self.sent do
             self.delivered = self.delivered + 1
             local wire = self.sent[self.delivered]
-            if not filter or filter(wire) then other.receive(name .. "-TestRealm", wire) end
+            if not filter or filter(wire) then
+                other.observed[#other.observed + 1] = wire
+                other.receive(name .. "-TestRealm", wire)
+            end
         end
     end
     return addon, world, env
@@ -175,6 +205,26 @@ local function transferMessages(world)
     end
     return count
 end
+local function Traffic(wires)
+    local result = { Q = 0, O = 0, V = 0, W = 0, D = 0, X = 0, messages = 0, bytes = 0 }
+    for _, wire in ipairs(wires) do
+        local kind = wire:match("^1|([QOVWDX])|")
+        assert(kind, "recorded guide frames have a known type")
+        result[kind], result.messages, result.bytes = result[kind] + 1, result.messages + 1, result.bytes + #wire + 9
+    end
+    return result
+end
+local function SameTraffic(actual, expected, description)
+    for _, field in ipairs({ "Q", "O", "V", "W", "D", "X", "messages", "bytes" }) do
+        assert(actual[field] == expected[field], description .. " (" .. field .. ")")
+    end
+end
+local function Copy(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, item in pairs(value) do result[key] = Copy(item) end
+    return result
+end
 
 -- A late joiner discovers an earlier publication, follows it explicitly, and
 -- recovers a dropped data packet before reporting confirmed installation.
@@ -200,6 +250,20 @@ do
         return true
     end)
     assert(dropped and #b.installs == 1, "missing chunks are requested again without duplicate installation")
+    local chunks = {}
+    for _, wire in ipairs(a.sent) do
+        local sequence = wire:match("^1|D|" .. pack.hash:sub(1, 16) .. "|(%d+)|")
+        if sequence then sequence = tonumber(sequence); chunks[sequence] = (chunks[sequence] or 0) + 1 end
+    end
+    for sequence = 1, math.ceil(#pack.data / 128) do
+        assert(chunks[sequence] == (sequence == 3 and 2 or 1),
+            "loss recovery retransmits only the missing chunk, preserving already received data")
+    end
+    local measured = recipient:GetRestedXPPerformance()
+    SameTraffic(measured.tx, Traffic(b.sent), "passive transmit counts match successful native guide frames")
+    SameTraffic(measured.rx, Traffic(b.observed), "passive receive counts match authenticated guide frames observed on the channel")
+    assert(measured.duplicateChunks == 0 and measured.retryWindows >= 1,
+        "loss recovery records retries without delivering duplicate guide chunks")
     local installed = recipient:GetRestedXPState()
     assert(installed.packs[1].installed and installed.packs[1].hash == pack.hash)
 
@@ -376,6 +440,241 @@ do
         "a completed discovery distinguishes offline publishers from confirmed current content")
 end
 
+-- Cooperative checkpoints must not each impose a separate frame's delay.
+do
+    local addon, world, api = client("FastPreparation", nil, nil, true)
+    world.scanYields = 80
+    world.installedPacks = { { id = "prepared-quickly", label = "Quick Pack", pack = packFor(addon, api, 1) } }
+    world:connect(true)
+    world:advance(0.5)
+    local group = addon.db.restedxp.groups[addon.fingerprint]
+    assert(group.packs["prepared-quickly"] and not addon:GetRestedXPState().refreshingInstalled,
+        "many inexpensive preparation checkpoints finish promptly instead of waiting one timer per checkpoint")
+end
+
+-- Discovery and publisher selection remain responsive while a large installed
+-- library is being prepared, without scheduling that library a second time.
+do
+    local addon, world, api = client("BackgroundPreparation", nil, nil, true)
+    local pack = packFor(addon, api, 1)
+    world.scanYields = 5000
+    world.installedPacks = { { id = "installed-background", label = "Background Pack", pack = pack } }
+    world:connect(true)
+    world:advance(2.5)
+    local state = addon:GetRestedXPState()
+    assert(state.refreshingInstalled and addon.restedxpState.job and not state.busy and state.canUpdate,
+        "login discovery finishes and enables Update even while background preparation is still active")
+    local offer = "1|O|installed-background|" .. pack.hash .. "|" .. #pack.data
+    assert(world.receive("Other-TestRealm", offer .. "|" .. addon:SignGroupMessage("restedxp", offer)))
+    assert(#addon:GetRestedXPState().packs == 1
+        and addon:SelectRestedXPPack("installed-background", "other-testrealm"),
+        "online publishers appear and can be followed while local preparation continues")
+    world.installedChanged(); world.installedChanged()
+    assert(addon:UpdateRestedXPGuides(), "Update can request discovery during background preparation")
+    world:advance(2.5)
+    state = addon:GetRestedXPState()
+    assert(world.scans == 1 and state.refreshingInstalled and not state.busy and state.canUpdate,
+        "duplicate observer and update requests neither restart the library nor prolong discovery")
+    for _ = 1, 1500 do
+        if not addon:GetRestedXPState().refreshingInstalled then break end
+        world:advance(0.01)
+    end
+    state = addon:GetRestedXPState()
+    assert(not state.refreshingInstalled and state.canUpdate and world.scans == 1
+        and #world.installs == 0 and transferMessages(world) == 0,
+        "preparation completes once without an extra discovery delay or an identical-content import")
+end
+
+-- A user import may interrupt preparation, while a resumed background scan
+-- must preserve the import's actionable validation result.
+do
+    local addon, world = client("PriorityImport", nil, nil, true)
+    world.scanYields = 1000
+    world:connect(true)
+    world:advance(0.2)
+    assert(addon.restedxpState.job and addon:GetRestedXPState().refreshingInstalled)
+    assert(addon:ImportRestedXPPack("invalid", "bad", "Source#1234"),
+        "manual imports take priority over source preparation")
+    world:advance(0.1)
+    local failure = addon:GetRestedXPState().status
+    assert(failure:find("Unsupported or invalid", 1, true), "the explicit import reports its validation failure")
+    world:advance(4)
+    assert(addon:GetRestedXPState().status == failure and not addon:GetRestedXPState().refreshingInstalled,
+        "resuming background preparation preserves the foreground error and completes normally")
+end
+
+-- Production discovery reads native IDs and versions, without preparing source
+-- until a followed publisher receives a request for a missing guide version.
+do
+    local publisher, a, api = client("MetadataAlpha", nil, nil, nil, true)
+    local recipient, b = client("MetadataBeta", nil, nil, nil, true)
+    local id, otherID = "metadata-route", "metadata-unrequested"
+    local revision, updatedRevision = string.rep("a", 64), string.rep("b", 64)
+    local initial = packFor(publisher, api, 1)
+    a.inventory = {
+        { id = id, label = "Metadata Route", revision = revision, guideCount = 1 },
+        { id = otherID, label = "Unrequested Route", revision = string.rep("c", 64), guideCount = 1 },
+    }
+    b.inventory = { { id = id, label = "Metadata Route", revision = revision, guideCount = 1 } }
+    a.preparedPacks[id] = { revision = revision, pack = initial }
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    assert(a.inventoryScans and b.inventoryScans and not a.scans and not b.scans
+        and #a.prepares == 0 and #b.prepares == 0,
+        "login publishes installed guide IDs and versions without collecting or preparing full sources")
+    assert(recipient:SelectRestedXPPack(id, "metadataalpha-testrealm"))
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 4)
+    assert(transferMessages(a) == 0 and transferMessages(b) == 0 and #a.prepares == 0
+        and #b.prepares == 0 and #b.installs == 0,
+        "matching native guide IDs and versions need no requests, source preparation, data or native import")
+
+    local sameVersion = packFor(publisher, api, 1, 23)
+    a.preparedPacks[id] = { revision = revision, pack = sameVersion }
+    local lastAnnouncement = #a.sent
+    a.installedChanged()
+    exchange(a, b, 4)
+    for index = lastAnnouncement + 1, #a.sent do
+        assert(not a.sent[index]:match("^1|[VQ]|"),
+            "raw source changes retaining guide IDs and versions do not announce a metadata update")
+    end
+    assert(#a.prepares == 0 and #b.installs == 0,
+        "unchanged versions do not cause source inspection or an automatic content update")
+
+    local changed = packFor(publisher, api, 2, 29)
+    a.inventory[1].revision = updatedRevision
+    a.preparedPacks[id] = { revision = updatedRevision, pack = changed }
+    b.afterInstall = function(pack)
+        assert(type(pack.guides) == "table", "on-demand downloads are fully decoded before native import")
+        b.inventory[1].revision = updatedRevision
+    end
+    a.installedChanged()
+    exchange(a, b, 70)
+    assert(#a.prepares == 1 and a.prepares[1].id == id and a.prepares[1].revision == updatedRevision
+        and #b.prepares == 0 and not a.scans and not b.scans,
+        "a changed version prepares only the selected publisher group when its follower requests it")
+    assert(#b.installs == 1 and b.installs[1] == changed.hash,
+        "ready-size announcement and canonical transfer install the newly advertised native guide version")
+    local saved = recipient.db.restedxp.groups[recipient.fingerprint].packs[id]
+    assert(saved and saved.hash == changed.hash and saved.revision == updatedRevision,
+        "download integrity retains its canonical content hash separately from update-detection metadata")
+    local followed
+    for _, entry in ipairs(recipient:GetRestedXPState().packs) do
+        if entry.id == id and entry.source == "metadataalpha-testrealm" then followed = entry end
+    end
+    assert(followed and followed.installed and followed.hash == updatedRevision,
+        "the publisher's ID-and-version revision is recognized as installed after the native import")
+    local counts = recipient:GetRestedXPPerformance()
+    SameTraffic(counts.tx, Traffic(b.sent), "metadata guide requests retain exact transmit accounting")
+    SameTraffic(counts.rx, Traffic(b.observed), "inventory and ready-size announcements retain exact observed accounting")
+
+    local newestRevision = string.rep("f", 64)
+    a.inventory[1].revision = newestRevision
+    a.installedChanged()
+    assert(publisher:UpdateRestedXPGuides())
+    a:advance(4) -- the recipient does not request the new version during this local check
+    local current = publisher:GetRestedXPState()
+    local native
+    for _, entry in ipairs(current.packs) do
+        if entry.id == id and entry.localPack then native = entry end
+    end
+    assert(native and native.installed and native.hash == newestRevision and #a.installs == 0,
+        "a newer native version stays installed even while the publisher caches an older prepared export")
+    assert(not current.busy and not current.status:find("Use Update guides to install", 1, true)
+        and (current.status:find("shared with your group", 1, true) or current.status:find("up to date", 1, true)),
+        "a completed publisher check reports its current shared inventory instead of offering to reinstall stale cached content")
+end
+
+-- Even a delayed native metadata API must replace discovery's temporary
+-- preparation message with its completed inventory result.
+do
+    local addon, world = client("SlowInventory", nil, nil, nil, true)
+    world.inventoryYields = 3000
+    world.inventory = { { id = "slow-inventory", label = "Slow Inventory", revision = string.rep("a", 64), guideCount = 1 } }
+    world:connect(true)
+    world:advance(2.5)
+    assert(addon:GetRestedXPState().refreshingInstalled,
+        "the metadata fixture remains active beyond the initial discovery window")
+    world:advance(5.5)
+    local complete = addon:GetRestedXPState()
+    assert(not complete.refreshingInstalled and not complete.busy and complete.sharedInstalledGuides == 1
+        and not complete.status:find("still being", 1, true) and complete.status:find("shared", 1, true),
+        "delayed metadata completion finalizes the header rather than leaving temporary preparation guidance")
+end
+
+-- Source preparation happens only on request and can legitimately outlast a
+-- normal data-transfer idle timeout before the publisher knows the export size.
+do
+    local publisher, a, api = client("SlowPrepareAlpha", nil, nil, nil, true)
+    local recipient, b = client("SlowPrepareBeta", nil, nil, nil, true)
+    local id, revision = "slow-prepared-route", string.rep("b", 64)
+    local pack = packFor(publisher, api, 4)
+    a.inventory = { { id = id, label = "Slow Prepared Route", revision = revision, guideCount = 1 } }
+    a.preparedPacks[id] = { revision = revision, pack = pack }
+    a.prepareYields = 30000
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    assert(recipient:SelectRestedXPPack(id, "slowpreparealpha-testrealm"))
+    assert(recipient:UpdateRestedXPGuides())
+    local beforeReady = 0
+    exchange(a, b, 70, function(wire)
+        if wire:find("1|O|" .. id .. "|", 1, true) == 1 and beforeReady == 0 then beforeReady = #b.sent end
+        return true
+    end)
+    assert(#a.prepares == 1 and #b.installs == 1 and b.installs[1] == pack.hash,
+        "on-demand preparation beyond thirty seconds completes with one export job and one native installation")
+    local requests = 0
+    assert(beforeReady > 0, "the publisher announces the prepared size after its long export job")
+    for index = 1, beforeReady do
+        if b.sent[index]:match("^1|W|") then requests = requests + 1 end
+    end
+    assert(requests <= 5, "waiting for a prepared size sends only sparse bounded requests")
+end
+
+-- Preparing an older requested revision can finish after a publisher has
+-- announced a newer revision; readiness must not roll availability backward.
+do
+    local addon, world = client("StaleReadiness")
+    world:connect(true)
+    world:advance(3)
+    local id, older, newer = "metadata-readiness", string.rep("d", 64), string.rep("e", 64)
+    local function Signed(body) return body .. "|" .. addon:SignGroupMessage("restedxp", body) end
+    assert(world.receive("Publisher-TestRealm", Signed("1|V|" .. id .. "|" .. older .. "|1|Route")))
+    assert(addon:SelectRestedXPPack(id, "publisher-testrealm"))
+    assert(addon:UpdateRestedXPGuides())
+    world:advance(3)
+    local incoming = assert(addon.restedxpState.incoming)
+    assert(incoming.hash == older and not incoming.size, "metadata-only requests wait for a publisher's prepared size")
+    assert(world.receive("Publisher-TestRealm", Signed("1|V|" .. id .. "|" .. newer .. "|2|Newer Route")))
+    assert(world.receive("Publisher-TestRealm", Signed("1|O|" .. id .. "|" .. older .. "|321|Route")))
+    local advertised = addon.restedxpState.offers[id]["publisher-testrealm"]
+    assert(advertised.hash == newer and advertised.guideCount == 2 and advertised.versioned,
+        "readiness for a previously requested revision cannot replace a newer ID/version announcement")
+    assert(addon.restedxpState.incoming == incoming and incoming.size == 321 and incoming.count == 3,
+        "matching readiness can still supply the old in-flight download size without changing current availability")
+end
+
+-- A missing publisher cannot keep the larger preparation grace period open
+-- indefinitely when no ready-size response ever arrives.
+do
+    local addon, world = client("OfflinePreparation", nil, nil, nil, true)
+    local id, revision = "offline-preparation", string.rep("c", 64)
+    world:connect(true)
+    world:advance(3)
+    local body = "1|V|" .. id .. "|" .. revision .. "|1|Offline Route"
+    assert(world.receive("Offline-TestRealm", body .. "|" .. addon:SignGroupMessage("restedxp", body)))
+    assert(addon:SelectRestedXPPack(id, "offline-testrealm"))
+    assert(addon:UpdateRestedXPGuides())
+    world:advance(35)
+    assert(addon.restedxpState.incoming and not addon.restedxpState.incoming.size,
+        "unknown-size preparation is allowed more than the ordinary transfer timeout")
+    world:advance(90)
+    assert(not addon.restedxpState.incoming and not addon:GetRestedXPState().busy
+        and addon.restedxpState.failed[id] == revision,
+        "an offline publisher without readiness still reaches a bounded preparation timeout")
+end
+
+-- Legacy adapters without metadata access retain complete-export sharing.
 -- Existing native imports become publications on login without an export form;
 -- a later native import refreshes the same publication even without a new version.
 do
@@ -411,6 +710,14 @@ do
         "a direct RestedXP import refreshes its existing local publication without self-import")
     assert(#b.installs == 2 and b.installs[2] == updated.hash,
         "native content changes with unchanged versions announce and update followers automatically")
+    local announced = #a.sent
+    a.installedChanged()
+    exchange(a, b, 4)
+    for index = announced + 1, #a.sent do
+        assert(not a.sent[index]:match("^1|[OQ]|"),
+            "an unchanged native-source callback sends neither another offer nor a discovery query")
+    end
+    assert(#b.installs == 2, "an unchanged native-source callback does not reinstall its follower's guides")
 end
 
 -- Native recovery can finish after a recipient's short discovery window; the
@@ -569,12 +876,6 @@ do
     a:connect(true)
     a:advance(4)
     publish(previous, packFor(previous, api, 3, 17), "profile-fallback")
-    local function Copy(value)
-        if type(value) ~= "table" then return value end
-        local copied = {}
-        for key, item in pairs(value) do copied[key] = Copy(item) end
-        return copied
-    end
     local current, b = client("CurrentCharacter", Copy(previous.db), nil, true)
     b:connect(true)
     b:advance(4)
@@ -609,6 +910,110 @@ do
         "unavailable source recovery terminates and reports the compatibility problem")
     assert(addon.db.restedxp.groups[addon.fingerprint].packs["installed-deferred"],
         "an unavailable or incomplete scan does not withdraw the last complete publication")
+end
+
+-- Passive statistics distinguish native send failures and unsigned input from
+-- transmitted frames and authenticated channel occupancy, including rejected bodies.
+do
+    local addon, world = client("CountedTraffic")
+    world.rejectSends = true
+    world:connect(true)
+    world:advance(1)
+    local report = addon:GetRestedXPPerformance()
+    assert(report.rejectedSends >= 1 and report.tx.messages == 0,
+        "rejected native sends are measured separately from successful transmitted frames")
+    world.rejectSends = false
+    world:advance(4)
+    local function Signed(body) return body .. "|" .. addon:SignGroupMessage("restedxp", body) end
+    assert(not world.receive("Peer-TestRealm", "1|Q|invalid|" .. string.rep("0", 64)))
+    assert(addon:GetRestedXPPerformance().rx.messages == 0,
+        "unsigned traffic does not inflate authenticated channel occupancy counts")
+    local malformed = Signed("1|O|bad id|" .. string.rep("a", 64) .. "|100")
+    assert(not world.receive("Peer-TestRealm", malformed))
+    local query = Signed("1|Q|counted-peer")
+    assert(world.receive("Peer-TestRealm", query))
+    report = addon:GetRestedXPPerformance()
+    SameTraffic(report.tx, Traffic(world.sent), "successful retry traffic is counted once")
+    SameTraffic(report.rx, Traffic({ malformed, query }),
+        "authenticated queries and rejected authenticated bodies count their complete observed channel sizes")
+end
+
+-- Production timing exercises only the same ID/version inventory used on login,
+-- while preserving source caches and requiring no canonical exports at all.
+do
+    local addon, world = client("InventoryBenchmark", nil, nil, nil, true)
+    world.inventory = {
+        { id = "inventory-two", label = "Two Guides", revision = string.rep("d", 64), guideCount = 2 },
+        { id = "inventory-three", label = "Three Guides", revision = string.rep("e", 64), guideCount = 3 },
+    }
+    assert(addon:StartRestedXPBenchmark())
+    world:advance(1)
+    local result = addon:GetRestedXPPerformance().benchmark
+    assert(result and result.metadataOnly and result.cold.metadataOnly and result.warm.metadataOnly,
+        "the production benchmark identifies both measured runs as metadata-only checks")
+    assert(world.inventoryScans == 2 and world.inventoryResets == 1
+        and not world.scans and not world.memoResets and #world.prepares == 0,
+        "fresh and repeat metadata timing never invoke source collection, source-cache resets or export preparation")
+    for _, run in ipairs({ result.cold, result.warm }) do
+        assert(run.guides == 5 and run.packs == 2 and run.bytes == 0,
+            "metadata timing sums native guide counts without measuring or preparing compressed source bytes")
+    end
+    assert(#world.sent == 0 and #world.installs == 0 and next(addon.db.restedxp.groups) == nil,
+        "metadata benchmarks remain local without publishing source or changing native installation")
+end
+
+-- Legacy adapters without inventory APIs can still measure complete local
+-- preparation without changing publications or calling the native importer.
+do
+    local addon, world, api = client("Benchmark", nil, nil, true)
+    local pack = packFor(addon, api, 8)
+    world.installedPacks = { { id = "benchmark-only", label = "Local Fixture", pack = pack } }
+    world.scanYields = 17
+    local group = addon.db.restedxp.groups
+    assert(next(group) == nil)
+    assert(addon:StartRestedXPBenchmark())
+    local acceptedAgain, problem = addon:StartRestedXPBenchmark()
+    assert(not acceptedAgain and type(problem) == "string", "a second benchmark cannot interrupt active local preparation")
+    world:advance(4)
+    local report = addon:GetRestedXPPerformance()
+    assert(report.benchmark and report.benchmark.cold and report.benchmark.warm and world.memoResets == 1,
+        "one local benchmark clears memoization for its cold scan and then measures a warm repeat")
+    assert(report.benchmark.cold.guides == 1 and report.benchmark.cold.packs == 1
+        and report.benchmark.cold.bytes == #pack.data and report.benchmark.warm.bytes == #pack.data,
+        "benchmark output measures the locally recovered guide count and compressed source size")
+    assert(report.benchmark.cold.metrics.decodedSources == 1 and report.benchmark.warm.metrics.cacheHits == 1,
+        "cold and warm source metrics preserve their distinct recovery paths")
+    for _, run in ipairs({ report.benchmark.cold, report.benchmark.warm }) do
+        assert(run.wall >= 0 and run.cpu == nil and run.slices >= 1 and run.resumes >= 1,
+            "local timings include cooperative work and omit unavailable high-resolution CPU measurements")
+    end
+    assert(#world.sent == 0 and #world.installs == 0 and next(group) == nil,
+        "local benchmarking neither joins guide traffic nor creates published cache entries or native imports")
+    report.tx.messages = 999
+    report.benchmark.cold.metrics.decodedSources = 999
+    local copied = addon:GetRestedXPPerformance()
+    assert(copied.tx.messages == 0 and copied.benchmark.cold.metrics.decodedSources == 1,
+        "performance snapshots cannot mutate internal traffic or nested benchmark metrics")
+    local before = #world.output
+    addon:ShowRestedXPPerformance()
+    assert(#world.output > before and #world.sent == 0 and #world.installs == 0 and next(group) == nil,
+        "printing passive diagnostics reports locally without initiating discovery or guide changes")
+    for _, line in ipairs(world.output) do
+        assert(not line:find(pack.data, 1, true), "diagnostics never print recovered guide contents")
+    end
+end
+
+-- Benchmarking must not replace a real automatic scan already preparing guides.
+do
+    local addon, world = client("BusyBenchmark", nil, nil, true)
+    world.scanYields = 10000
+    world:connect(true)
+    world:advance(0.2)
+    local active = assert(addon.restedxpState.job)
+    local accepted, problem = addon:StartRestedXPBenchmark()
+    assert(not accepted and type(problem) == "string" and addon.restedxpState.job == active and not world.memoResets,
+        "a rejected benchmark leaves the active automatic scan and its source memo intact")
+    world:connect(false)
 end
 
 -- Native observers and pending collection work respect read-only, logout and

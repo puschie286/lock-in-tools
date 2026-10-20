@@ -1,6 +1,8 @@
 local _, addon = ...
 
 -- Native group-data membership and lifecycle; message transport lives in Data.lua.
+-- CHANNEL delivery is limited to the same internal realm and faction;
+-- cross-realm delivery and whisper fallback are intentionally unsupported.
 local RETRY_DELAYS = { 2, 4, 8, 8, 30 }
 local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
 local LEAVE_CACHE_CHECK_LIMIT = 5
@@ -82,6 +84,7 @@ function addon:OnDataLogin()
     local state = self.dataState
     self:NotifyDataConnection()
     state.nativeStarted = true
+    -- Status discovery stays active with human chat off; positions remain opt-in.
     state.wanted = self:HasGroup()
     if state.wanted then self:JoinDataChannel(false) end
 end

@@ -285,6 +285,9 @@ function addon:OnRosterLogout()
     self.rosterState.stopped = true
 end
 
+-- Rows cover discovered characters, not all key holders or distinct people.
+-- Progress is reported, not independently verified; online means recent contact,
+-- so contact expiry cannot confirm a logout.
 function addon:GetOverviewPlayers()
     if not self.initialized or not self:HasGroup() or not self.rosterState then return {} end
     if self.IsGroupSwitching and self:IsGroupSwitching() then return {} end

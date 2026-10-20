@@ -67,10 +67,20 @@ do
     assert(panel.restedxpPacks.rows[1].name:GetText() == "Test pack (test)",
         "automatic pack labels remain readable beside their stable identity")
     state.refreshingInstalled = true
+    state.busy, state.status = false, "Choose Follow beside a publisher, then use Update guides."
     state.sharingStatus = "Refreshing automatically shared guides..."
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpSharing:GetText() == state.sharingStatus,
-        "background native-import refreshes update the sharing hint")
+    assert(panel.restedxpSharing:GetText() == state.sharingStatus
+        and panel.restedxpStatus:GetText():find("Choose Follow", 1, true)
+        and panel.restedxpUpdate:IsEnabled() and panel.restedxpPacks.rows[1].follow:IsEnabled(),
+        "background native-source preparation keeps Update and Follow available with both statuses visible")
+    state.busy, state.status = true, "Checking available group guides..."
+    addon:Notify("RESTEDXP_CHANGED")
+    assert(not panel.restedxpUpdate:IsEnabled() and not panel.restedxpPacks.rows[1].follow:IsEnabled()
+        and panel.restedxpSharing:GetText() == state.sharingStatus
+        and panel.restedxpStatus:GetText():find("Checking available", 1, true),
+        "foreground discovery temporarily disables actions independently of background source preparation")
+    state.busy, state.status = false, nil
     state.refreshingInstalled = false
     state.sharedInstalledGuides, state.unshareableGuides = 8, 1
     state.sharingStatus = "Automatically sharing 8 guides. Complete source is unavailable for 1 guide."

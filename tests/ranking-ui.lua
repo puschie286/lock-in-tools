@@ -106,25 +106,38 @@ do
         and not options.rankingEnabled:GetChecked() and options.rankingLocked:GetChecked()
         and not ranking.rankingOverlay,
         "the Ranking Settings page exposes the default-off and default-locked preferences lazily")
-    assert(options.rankingHelp:GetText():find("Awaiting XP: no usable level and XP report yet", 1, true)
-        and options.rankingHelp:GetText():find("Stale / ~: last saved progress", 1, true)
-        and options.rankingHelp:GetText():find("XP %: progress toward the next level", 1, true),
-        "Settings visibly explains the ranking values and why a character may have no rank")
-    options.rankingEnabled:Click()
+    local tooltip = api.GameTooltip
+    options.rankingInfo.scripts.OnEnter(options.rankingInfo)
+    assert(not options.rankingHelp and tooltip:IsShown() and tooltip:IsOwned(options.rankingInfo)
+        and tooltip.lines[1]:find("Awaiting XP: no usable level and XP report yet", 1, true)
+        and tooltip.lines[1]:find("Stale / ~: last saved progress", 1, true)
+        and tooltip.lines[1]:find("XP %: progress toward the next level", 1, true),
+        "Ranking info explains values and missing reports without a permanent text block")
+    options.tabs.group:Click()
+    assert(not tooltip:IsShown(), "leaving Ranking dismisses its help without creating the overlay")
+    options.tabs.ranking:Click()
+    options.rankingEnabled.labelButton:Click()
     local panel = ranking.rankingOverlay
     assert(saved.ranking.enabled and options.rankingEnabled:GetChecked()
         and panel:IsVisible() and options:IsVisible() and options.selectedTab == "ranking",
         "enabling from Settings immediately saves and shows the independent overlay")
-    options.rankingLocked:Click()
+    options.rankingLocked.labelButton:Click()
     assert(not saved.ranking.locked and not options.rankingLocked:GetChecked()
         and panel.header.mouseEnabled and panel.lock:GetText() == "Lock",
         "the Settings lock preference immediately updates the overlay header")
     panel.lock:Click()
     assert(saved.ranking.locked and options.rankingLocked:GetChecked(),
         "locking within the overlay immediately refreshes its Settings checkbox")
+    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
+    assert(tooltip:IsOwned(panel.CloseButton) and tooltip.text == "Hide ranking"
+        and tooltip.lines[1]:find("/lit ranking", 1, true), "close help explains how to reopen ranking")
     panel.CloseButton:Click()
-    assert(not saved.ranking.enabled and not options.rankingEnabled:GetChecked() and options:IsVisible(),
+    assert(not saved.ranking.enabled and not options.rankingEnabled:GetChecked() and options:IsVisible()
+        and not tooltip:IsShown(),
         "closing ranking refreshes its visibility checkbox while retaining the Settings page")
+    options.rankingInfo.scripts.OnEnter(options.rankingInfo)
+    ranking.mainPanel.CloseButton:Click()
+    assert(not tooltip:IsShown(), "closing Settings dismisses Ranking info")
 end
 
 -- Five pooled leaders and a separate local row preserve actual ranks and progress states.
@@ -150,11 +163,17 @@ do
         and panel.ownRow:IsShown() and panel.ownRow.player == own and panel.ownRow.rank:GetText() == "6"
         and panel.separator:IsShown() and panel.ownRow.highlight:IsShown(),
         "the top five retain tie ranks and a lower local player has its actual rank in a highlighted separate row")
-    assert(panel.subtitle:GetText() == "Last reported standings"
-        and panel.summary:GetText():find("6 ranked", 1, true)
-        and panel.summary:GetText():find("2 awaiting", 1, true)
-        and panel.summary:GetText():find("2 stale", 1, true),
-        "the overlay labels last reported standings and separates ranked stale values from missing XP")
+    assert(not panel.subtitle:IsShown() and panel.subtitle:GetText() == "" and not panel.summary,
+        "connected standings have no explanatory subtitle or count footer")
+    local compactTop, compactHeight = panel.rows[1].point[3], panel:GetHeight()
+    state.connected = false
+    ranking:RefreshRankingOverlay()
+    assert(panel.subtitle:IsShown() and panel.rows[1].point[3] < compactTop
+        and panel:GetHeight() > compactHeight, "connection notices make space above the rows only when needed")
+    state.connected = true
+    ranking:RefreshRankingOverlay()
+    assert(not panel.subtitle:IsShown() and panel.rows[1].point[3] == compactTop
+        and panel:GetHeight() == compactHeight, "reconnecting removes the notice and its extra spacing")
     assert(panel.rows[1].progress:GetText() == "~MAX" and panel.rows[1].progressTrack:IsShown()
         and panel.rows[1].progressFill:IsShown()
         and panel.rows[1].progressFill:GetWidth() == panel.rows[1].progressTrack:GetWidth()
@@ -162,8 +181,15 @@ do
         and panel.rows[2].progressTrack:IsShown() and panel.rows[2].progressFill:IsShown()
         and panel.rows[4].progress:GetText() == "~99.9%",
         "maximum level is distinct and displayed percentages do not round near-level XP to 100 percent")
-    assert(panel.rows[1].name:GetText():find("(stale)", 1, true) and panel.rows[1].alpha < 1
+    assert(panel.rows[1].name:GetText() == players[1].name
+        and panel.rows[1].status:IsShown() and panel.rows[1].status:GetText() == "Stale progress"
+        and panel.rows[1].alpha < 1
         and panel.rows[1].rank:GetText() == "1", "saved stale progress keeps its rank with visible stale markers")
+    players[1].name = "Longcharactername-Longrealmname"
+    ranking:RefreshRankingOverlay()
+    assert(panel.rows[1].name:GetText() == players[1].name
+        and panel.rows[1].status:GetText() == "Stale progress" and panel.rows[1].progress:GetText() == "~MAX",
+        "long names cannot consume the separate stale marker or XP indicator")
     local fullWidth = panel.rows[2].progressTrack:GetWidth()
     assert(math.abs(panel.rows[2].progressFill:GetWidth() - fullWidth * 0.5) < 0.000001,
         "the progress fill uses the exact fraction of its track")
@@ -173,9 +199,11 @@ do
         "progress just below a full level never rounds to 100 percent")
     players[1], own.rank = own, 1
     state.players = { own }
+    state.stale, state.awaiting = 0, 0
     ranking:Notify("ROSTER_CHANGED")
     assert(panel.rows[1].player == own and panel.rows[1].highlight:IsShown()
         and panel.rows[1].alpha == 1 and not panel.rows[1].name:GetText():find("stale", 1, true)
+        and not panel.rows[1].status:IsShown() and panel.rows[1].status:GetText() == ""
         and panel.rows[1].progress:GetText() == "25%"
         and not panel.ownRow:IsShown() and not panel.separator:IsShown()
         and not panel.ownRow.player and panel.ownRow.rank:GetText() == ""
@@ -185,6 +213,7 @@ do
         local unused = panel.rows[index]
         assert(not unused:IsShown() and not unused.player and unused.rank:GetText() == ""
             and unused.name:GetText() == "" and unused.level:GetText() == "" and unused.progress:GetText() == ""
+            and unused.status:GetText() == "" and not unused.status:IsShown()
             and not unused.progressTrack:IsShown() and not unused.progressFill:IsShown()
             and not unused.highlight:IsShown(),
             "unused pooled rows clear names, targets, ranks, progress and highlighting")
@@ -194,8 +223,10 @@ do
     ranking:RefreshRankingOverlay()
     assert(panel.ownRow:IsShown() and panel.ownRow.player == own
         and panel.ownRow.progress:GetText() == "Waiting for XP"
+        and not panel.empty:IsShown() and not panel.separator:IsShown()
+        and panel.ownRow.point[3] == panel.rows[1].point[3]
         and not panel.ownRow.rank:GetText():find("%d") and not panel.ownRow.progressTrack:IsShown(),
-        "missing local XP shows Waiting for XP without inventing a numeric rank or zero progress")
+        "missing local XP uses the first row without duplicate empty messages or an invented rank")
     own.xp, own.xpMax, own.xpState = 250, 1000, "known"
     local cached = row("Cached", 1, 25, 500, 1000)
     cached.stale, cached.online, own.rank = true, false, 2
@@ -213,6 +244,9 @@ do
     assert(panel.empty:IsShown() and panel.empty:GetText():find("group", 1, true)
         and not panel.rows[1]:IsShown() and not panel.rows[1].player,
         "leaving the group clears all player rows while leaving the chosen overlay visible")
+    for _, heading in ipairs(panel.columnHeaders) do
+        assert(not heading:IsShown(), "empty standings hide unused column headings")
+    end
 end
 
 -- Real roster events update local XP immediately; quiet peers keep their rank using stale progress.
@@ -242,7 +276,7 @@ do
     panel.scripts.OnUpdate(panel, 1)
     assert(panel.rows[1].player.id == "alpha-testrealm" and panel.rows[1].rank:GetText() == "1"
         and panel.rows[1].progress:GetText() == "~40%" and panel.rows[2].player.isSelf
-        and panel.summary:GetText():find("1 stale", 1, true) and requests == 0,
+        and panel.rows[1].status:GetText() == "Stale progress" and requests == 0,
         "contact expiry preserves peer ranks and marks the last progress stale without another snapshot request")
     assert(ranking:ReceivePlayerStatus("Alpha-TestRealm", {
         level = 24, xp = 400, xpMax = 1000, xpState = "known",
@@ -276,11 +310,20 @@ do
         and not panel.scripts.OnDragStart and not panel.scripts.OnDragStop,
         "login restores saved visibility and placement with only the locked header reserving drag behavior")
     for _, entry in ipairs(panel.rows) do assert(entry.mouseEnabled == false, "ranking rows let clicks pass through") end
+    panel.lock.scripts.OnEnter(panel.lock)
+    assert(api.GameTooltip.text == "Unlock overlay"
+        and api.GameTooltip.lines[1]:find("drag the title bar", 1, true),
+        "locked movement help explains the available unlock action")
     panel.lock:Click()
-    assert(not saved.ranking.locked and panel.header.mouseEnabled and panel.lock:GetText() == "Lock",
+    assert(not saved.ranking.locked and panel.header.mouseEnabled and panel.lock:GetText() == "Lock"
+        and not api.GameTooltip:IsShown(),
         "the lock control enables header-only dragging and saves its account preference")
+    panel.lock.scripts.OnEnter(panel.lock)
+    assert(api.GameTooltip.text == "Lock overlay"
+        and api.GameTooltip.lines[1]:find("then lock it", 1, true),
+        "unlocked movement help explains dragging and locking when finished")
     panel.header.scripts.OnDragStart(panel.header)
-    assert(panel.moving, "dragging the unlocked header moves the overlay")
+    assert(panel.moving and not api.GameTooltip:IsShown(), "dragging the unlocked header moves the overlay and clears help")
     panel:SetPoint("BOTTOMRIGHT", api.UIParent, "BOTTOMRIGHT", -120, 65)
     panel.header.scripts.OnDragStop(panel.header)
     local position = saved.ranking.position
@@ -327,10 +370,21 @@ do
     assert(readonly.savedDataReadOnly and readonlyPanel:IsVisible() and not readonlyPanel.lock:IsEnabled()
         and readonlyPanel.CloseButton:IsEnabled(),
         "a future-schema profile still permits viewing and closing while preference controls are disabled")
+    readonlyPanel.lock.scripts.OnEnter(readonlyPanel.lock)
+    assert(readonlyAPI.GameTooltip:IsShown() and readonlyAPI.GameTooltip.lines[1]:find("Update LockInTools", 1, true),
+        "disabled lock help explains newer-schema restrictions")
+    readonlyPanel.CloseButton.scripts.OnEnter(readonlyPanel.CloseButton)
+    assert(readonlyAPI.GameTooltip.lines[1]:find("for this session", 1, true)
+        and readonlyAPI.GameTooltip.lines[1]:find("/lit ranking", 1, true)
+        and not readonlyAPI.GameTooltip.lines[1]:find("Settings", 1, true),
+        "read-only close help points to the available session command")
     readonly:OpenOptions("ranking")
     assert(not readonly.optionsPanel.rankingEnabled:IsEnabled()
         and not readonly.optionsPanel.rankingLocked:IsEnabled(),
         "future-schema Ranking Settings controls cannot change saved preferences")
+    readonly.optionsPanel.rankingInfo.scripts.OnEnter(readonly.optionsPanel.rankingInfo)
+    assert(readonly.optionsPanel.rankingInfo:IsEnabled() and readonlyAPI.GameTooltip:IsShown(),
+        "read-only settings keep ranking explanations available")
     readonlyPanel:SetPoint("CENTER", readonlyAPI.UIParent, "CENTER", 20, 30)
     readonly:SaveRankingPosition()
     readonlyPanel.CloseButton:Click()

@@ -699,8 +699,12 @@ local function CreateOptionsPanel()
 
     local ranking = UI:Section(panel, 20, 116, 680, 414, "Player ranking")
     panel.pages.ranking = ranking
+    panel.rankingInfo = UI:Button(ranking, "Ranking info")
+    panel.rankingInfo:SetPoint("TOPRIGHT", -16, -12)
+    panel.rankingInfo:SetSize(120, 28)
+    OptionTooltip(ranking, panel.rankingInfo, "Ranking values", function() return addon:GetRankingHelpText() end)
     local rankingIntroduction = UI:Label(ranking,
-        "Keep your group's level and XP standings visible while you play.", 14)
+        "Compare your group's level and XP progress while you play.", 14)
     rankingIntroduction:SetPoint("TOPLEFT", 16, -50)
     rankingIntroduction:SetWidth(648)
 
@@ -709,11 +713,9 @@ local function CreateOptionsPanel()
     panel.rankingEnabled:SetSize(28, 28)
     BindPreference(panel, panel.rankingEnabled, function() return addon:GetRankingSettings().enabled end,
         addon.SetRankingEnabled)
-    PreferenceLabel(ranking, panel.rankingEnabled, "Show player ranking overlay",
-        "Show the top five last reported standings, plus your own position when outside the top five.\n\n"
-            .. "Higher levels rank first, then exact XP progress. Equal progress shares a rank. "
-            .. "Offline players use saved progress marked stale. Only incomplete reports stay unranked. "
-            .. "Chat and position sharing can remain off.")
+    PreferenceLabel(ranking, panel.rankingEnabled, "Show ranking overlay",
+        "Show the top five characters, plus your own rank when outside the top five. Chat and position sharing can stay off.\n\n"
+            .. "This preference saves across reloads and characters.")
 
     panel.rankingLocked = UI:Checkbox(ranking)
     panel.rankingLocked:SetPoint("TOPLEFT", 12, -130)
@@ -721,18 +723,11 @@ local function CreateOptionsPanel()
     BindPreference(panel, panel.rankingLocked, function() return addon:GetRankingSettings().locked end,
         addon.SetRankingLocked)
     PreferenceLabel(ranking, panel.rankingLocked, "Lock overlay position",
-        "Unlock to drag the overlay by its title bar. Locking prevents movement; rows always let clicks pass through.\n\n"
-            .. "Visibility and position save across reloads and characters.")
+        "Unlock to drag the title bar, then lock it to keep the overlay in place. Player rows always let clicks pass through.")
     local rankingHint = UI:Label(ranking,
-        "Use /lit ranking to toggle the overlay. The full roster remains in Content > Overview.", 12, "muted")
+        "Use /lit ranking to show or hide it. See Content > Overview for all players.", 12, "muted")
     rankingHint:SetPoint("TOPLEFT", 16, -182)
     rankingHint:SetSize(648, 40)
-    local rankingHelpTitle = UI:Label(ranking, "How to read the ranking", 13)
-    rankingHelpTitle:SetPoint("TOPLEFT", 16, -229)
-    local rankingHelp = UI:Label(ranking, addon:GetRankingHelpText(), 12, "muted")
-    panel.rankingHelp = rankingHelp
-    rankingHelp:SetPoint("TOPLEFT", 16, -251)
-    rankingHelp:SetSize(648, 110)
 
     CreateRestedXPPage(panel)
 
