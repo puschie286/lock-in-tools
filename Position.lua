@@ -123,7 +123,6 @@ function addon:InitializePositions()
     if type(settings.sharing) ~= "boolean" then settings.sharing = false end
     if type(settings.keepLastKnown) ~= "boolean" then settings.keepLastKnown = true end
     if type(settings.showPlayerIcons) ~= "boolean" then settings.showPlayerIcons = true end
-    if type(settings.showTrails) ~= "boolean" then settings.showTrails = true end
     if type(settings.peers) ~= "table" then settings.peers = {} end
     local fingerprint = self:GetGroupFingerprint()
     if settings.groupFingerprint ~= fingerprint or not settings.keepLastKnown then settings.peers = {} end
@@ -212,21 +211,6 @@ function addon:SetShowPlayerIcons(enabled)
     if not allowed then return false, message end
     self.db.position.showPlayerIcons = enabled
     self:Notify("POSITION_VISIBILITY_CHANGED")
-    return true
-end
-
-function addon:GetShowPositionTrails()
-    local settings = type(self.db) == "table" and self.db.position
-    if type(settings) ~= "table" then return true end
-    return IsSecret(settings.showTrails) or type(settings.showTrails) ~= "boolean" or settings.showTrails
-end
-
-function addon:SetShowPositionTrails(enabled)
-    local allowed, message = CanChange(self, enabled)
-    if not allowed then return false, message end
-    if IsSecret(enabled) then return false, "Choose on or off." end
-    self.db.position.showTrails = enabled
-    Refresh(self)
     return true
 end
 
