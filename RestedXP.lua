@@ -406,6 +406,7 @@ end
 local function WithdrawInstalledPack(self, id, saved)
     local state, group = self.restedxpState, CurrentGroup(self)
     group.packs[id], state.decoded[id], state.pending[id], Installed(self)[id] = nil, nil, nil, nil
+    if state.servedPack and state.servedPack.id == id then state.servedPack = nil end
     state.sentOffers[id] = nil
     -- Drop an announcement or transfer that was queued before the native removal.
     for index = #state.queue, 1, -1 do
@@ -488,6 +489,10 @@ RefreshInstalled = function(self)
                 if saved and saved.localInstalled and not inventory[id] then WithdrawInstalledPack(self, id, saved) end
             end
             state.inventory = inventory
+            local served = state.servedPack
+            if served and (not inventory[served.id] or inventory[served.id].revision ~= served.revision) then
+                state.servedPack = nil
+            end
             state.autoReady, state.sharedInstalledGuides, state.unshareableGuides = true, count, skipped
             state.refreshingInstalled = state.refreshAt ~= nil
             if self.AcknowledgeRestedXPInstalledGuides then self:AcknowledgeRestedXPInstalledGuides() end
@@ -951,6 +956,10 @@ ServeWindow = function(self, source, id, hash, first, count)
     local saved = SavedPack(self, id)
     local inventory = state.inventory[id]
     if saved and Revision(saved) == hash and (not saved.localInstalled or state.autoReady) then return Send(saved) end
+    local served = state.servedPack
+    if served and served.id == id and served.revision == hash and inventory and inventory.revision == hash then
+        return Send(served.pack, inventory.label)
+    end
     if not inventory or inventory.revision ~= hash or type(self.PrepareRestedXPInstalledPack) ~= "function" then
         serving.unavailable, request.status = serving.unavailable + 1, "requested guide version unavailable"
         return false
@@ -980,6 +989,10 @@ ServeWindow = function(self, source, id, hash, first, count)
             -- cache must not prevent sending this prepared response directly.
             serving.cacheBypasses = serving.cacheBypasses + 1
             request.cacheProblem = failure
+            -- Keep at most one transient pack (bounded by MAX_BYTES) so later
+            -- windows do not rebuild an export that could not be persisted.
+            state.servedPack = { id = id, revision = hash, pack = pack }
+        else state.servedPack = nil
         end
         Send(stored and SavedPack(self, id) or pack, inventory.label)
         Changed(self, "Requested guide pack is ready to share.")
@@ -1113,7 +1126,7 @@ local function Reset(self, stopped)
     state.refreshAt, state.refreshingInstalled, state.watching, state.autoReady = nil, false, false, false
     state.sentOffers, state.wantSentAt = {}, nil
     state.lastQuerySentAt = nil
-    state.inventory = {}
+    state.inventory, state.servedPack = {}, nil
     if state.benchmarkRunning then
         state.benchmarkRunning = nil
         state.performance.benchmarkCancelled = true

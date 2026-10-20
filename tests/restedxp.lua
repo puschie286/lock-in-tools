@@ -1334,6 +1334,22 @@ do
         and next(beta.db.restedxp.groups[beta.fingerprint].packs) == nil, "both native sources begin uncached")
     assert(alpha:StartRestedXPPeerTest("duplexbeta-testrealm", betaID))
     assert(beta:StartRestedXPPeerTest("duplexalpha-testrealm", alphaID))
+    local heldA, heldB = {}, {}
+    local function HoldRequests(held)
+        return function(wire)
+            if wire:match("^1|W|") then held[#held + 1] = wire; return false end
+            return true
+        end
+    end
+    for _ = 1, 100 do
+        a:advance(0.15); b:advance(0.15)
+        a:deliver(b, HoldRequests(heldA)); b:deliver(a, HoldRequests(heldB))
+        if alpha.restedxpState.incoming and beta.restedxpState.incoming and #heldA > 0 and #heldB > 0 then break end
+    end
+    assert(alpha.restedxpState.incoming and beta.restedxpState.incoming and #heldA > 0 and #heldB > 0,
+        "both requested downloads are active before either publisher begins export work")
+    for _, wire in ipairs(heldA) do b.observed[#b.observed + 1] = wire; b.receive("DuplexAlpha-TestRealm", wire) end
+    for _, wire in ipairs(heldB) do a.observed[#a.observed + 1] = wire; a.receive("DuplexBeta-TestRealm", wire) end
     local alphaReport, betaReport, deferred
     for _ = 1, math.ceil(80 / 0.15) do
         exchange(a, b, 0.15)
@@ -1374,7 +1390,8 @@ do
     assert(group.packs[id] == nil, "serving without cache space does not force the requested native pack into saved data")
     for key, entry in pairs(archived) do assert(group.packs[key] == entry, "serving preserves all existing retained packs") end
     local serving = publisher:GetRestedXPPerformance().serving
-    assert(serving.addressed > 0 and serving.cacheBypasses > 0 and serving.windows > 0 and serving.queueFull == 0,
+    assert(serving.addressed > 0 and serving.cacheBypasses > 0 and serving.windows > 1 and serving.queueFull == 0
+        and #a.prepares == 1 and serving.preparing == 1,
         "publisher diagnostics identify its successful uncached transfer after persistent storage was bypassed")
 end
 
