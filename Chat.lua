@@ -177,9 +177,7 @@ end
 function addon:ScheduleChatCheck(delay)
     self:CancelChatTimer()
     local state = self.chatState
-    local timer
-    timer = C_Timer.NewTimer(delay, function()
-        if state.timer ~= timer then return end
+    state.timer = C_Timer.NewTimer(delay, function()
         state.timer = nil
         if not state.wanted or state.paused or state.failed then
             return
@@ -188,7 +186,6 @@ function addon:ScheduleChatCheck(delay)
             self:JoinChatChannel(false)
         end
     end)
-    state.timer = timer
 end
 
 function addon:FailChatJoin(message)

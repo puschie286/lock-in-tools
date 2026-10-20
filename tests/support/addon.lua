@@ -298,7 +298,7 @@ local function loadAddon(savedVariables, loggedIn)
     prepareMinimap(environment, world)
     world.notificationErrors = loadNotifications(addon, environment)
     for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
-        "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Roster.lua", "Minimap.lua", "Commands.lua" }) do
+        "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua", "Roster.lua", "Minimap.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)

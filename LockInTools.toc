@@ -16,7 +16,9 @@ Core.lua
 Crypto.lua
 Group.lua
 Chat.lua
+DataChannel.lua
 Data.lua
+DataStatus.lua
 Position.lua
 Roster.lua
 PositionMap.lua

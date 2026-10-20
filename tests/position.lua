@@ -124,7 +124,7 @@ local function newAddon(saved, readOnly)
     addon:RegisterNotification("POSITION_CONTACT_CHANGED", function()
         if addon.RefreshOverview then addon:RefreshOverview() end
     end)
-    for _, file in ipairs({ "Crypto.lua", "Group.lua", "Data.lua", "Position.lua" }) do
+    for _, file in ipairs({ "Crypto.lua", "Group.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua" }) do
         loadModule(file, addon, environment)
     end
     addon:InitializeGroup()

@@ -1,0 +1,302 @@
+local _, addon = ...
+
+-- Native group-data membership and lifecycle; message transport lives in Data.lua.
+local RETRY_DELAYS = { 2, 4, 8, 8, 30 }
+local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
+local LEAVE_CACHE_CHECK_LIMIT = 5
+local FAILURE_NOTICES = {
+    WRONG_PASSWORD = "The data-channel password was rejected.",
+    BANNED = "You are banned from the data channel.",
+    YOU_KICKED = "You were removed from the data channel.",
+    INVALID_NAME = "WoW rejected the data-channel name.",
+    CHANNEL_FULL = "The data channel is full.",
+    TOO_MANY_CHANNELS = "Leave another channel before joining group data.",
+    THROTTLED = "WoW is limiting channel requests.",
+    RESTRICTED = "Your account cannot join the data channel.",
+}
+
+local function IsSecret(value)
+    return issecretvalue and issecretvalue(value)
+end
+
+local function SameChannel(first, second)
+    return not IsSecret(first) and not IsSecret(second)
+        and type(first) == "string" and type(second) == "string" and first:lower() == second:lower()
+end
+
+local function ChannelID(name)
+    if not name then return nil end
+    local ok, id = pcall(GetChannelName, name)
+    if ok and id > 0 then return id end
+end
+
+local function CanUseData(self)
+    return self.initialized == true and self.ready == true and not self.savedDataReadOnly and self:HasGroup()
+        and not self:IsGroupSwitching() and not self.dataState.stopped
+end
+
+local function Wanted(self)
+    return CanUseData(self) and self.dataState.wanted
+end
+
+local function Refresh(self)
+    self:Notify("DATA_CHANGED")
+end
+
+function addon:InitializeDataChannel()
+    self:InitializeGroupChannelCleanup()
+    local state = self.dataState
+    state.phase, state.attempts = "idle", 0
+    state.channelName = self:GetGroupDataChannelName()
+    local prefixResults = Enum and Enum.RegisterAddonMessagePrefixResult
+    local sendResults = Enum and Enum.SendAddonMessageResult
+    -- Native capabilities are stable for this UI session; retry connection
+    -- failures without probing API availability again.
+    state.nativeAvailable = C_ChatInfo and type(C_ChatInfo.RegisterAddonMessagePrefix) == "function"
+        and type(C_ChatInfo.SendAddonMessage) == "function" and type(JoinTemporaryChannel) == "function"
+        and type(GetChannelName) == "function" and prefixResults and sendResults
+        and prefixResults.Success ~= nil and prefixResults.DuplicatePrefix ~= nil and sendResults.Success ~= nil
+        or false
+    self.dataEvents = self:RegisterGameEvents({ "CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE",
+        "CHANNEL_LEFT", "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_PASSWORD_REQUEST", "PLAYER_LOGOUT" }, self.OnDataEvent)
+end
+
+function addon:IsDataConnected()
+    local state = self.dataState
+    return state ~= nil and CanUseData(self) and state.connected
+end
+
+-- Resolve on every send because native channel numbers can change.
+function addon:GetDataChannelID()
+    local id = ChannelID(self:GetGroupDataChannelName())
+    if not id then
+        local state = self.dataState
+        self:SetDataConnected(false)
+        state.phase, state.attempts = "joining", 0
+        self:ScheduleDataCheck(1)
+        Refresh(self)
+    end
+    return id
+end
+
+function addon:OnDataLogin()
+    local state = self.dataState
+    self:NotifyDataConnection()
+    state.nativeStarted = true
+    state.wanted = self:HasGroup()
+    if state.wanted then self:JoinDataChannel(false) end
+end
+
+function addon:ResetDataForGroupSwitch()
+    local state = self.dataState
+    if not state then return end
+    self:CancelDataTimer()
+    self:SetDataConnected(false)
+    state.channelName = nil
+    state.phase, state.detail = "idle", nil
+    state.attempts, state.pending, state.failed, state.awaitingLeave = 0, false, false, false
+    state.leaveChecks = 0
+    state.wanted = false
+    Refresh(self)
+end
+
+function addon:ResumeDataAfterGroupSwitch()
+    local state = self.dataState
+    if not state then return end
+    state.channelName, state.wanted = self:GetGroupDataChannelName(), self:HasGroup()
+    if state.nativeStarted and Wanted(self) then self:JoinDataChannel(false) end
+    Refresh(self)
+end
+
+function addon:OnDataGroupChanged()
+    self:ResetDataForGroupSwitch()
+    self:ResumeDataAfterGroupSwitch()
+end
+
+function addon:CancelDataTimer()
+    local state = self.dataState
+    if state.timer then state.timer:Cancel(); state.timer = nil end
+end
+
+function addon:ScheduleDataCheck(delay)
+    self:CancelDataTimer()
+    local state = self.dataState
+    state.timer = C_Timer.NewTimer(delay, function()
+        state.timer = nil
+        if Wanted(self) then self:JoinDataChannel(false) end
+    end)
+end
+
+function addon:FailDataJoin(detail)
+    local state = self.dataState
+    -- Repeated notices must not restart or postpone the same cooldown.
+    if not state.failed then self:CancelDataTimer() end
+    self:SetDataConnected(false)
+    state.failed, state.pending = true, false
+    state.phase, state.detail = "error", detail
+    if Wanted(self) and not state.timer then self:ScheduleDataCheck(FAILURE_RETRY_DELAY) end
+    Refresh(self)
+    return false
+end
+
+function addon:ConfirmDataMembership()
+    local state = self.dataState
+    if not state.nativeAvailable or not Wanted(self) or state.awaitingLeave then return false end
+    local name = self:GetGroupDataChannelName()
+    if not state.prefixRegistered or not ChannelID(name) then return false end
+    if state.connected then
+        if not state.timer then self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL) end
+        return true
+    end
+    self:CancelDataTimer()
+    state.channelName = name
+    state.attempts, state.pending, state.failed = 0, false, false
+    state.phase, state.detail = "joined", nil
+    self:SetDataConnected(true)
+    self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL)
+    Refresh(self)
+    return true
+end
+
+function addon:JoinDataChannel(manual)
+    local state = self.dataState
+    if not state or not self.ready then return false, "Still loading. Please try again after login." end
+    if self:IsGroupSwitching() then return false, "Waiting to leave the previous group." end
+    if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
+    if not self:HasGroup() then return false, "Join a LockInTools group first." end
+    state.nativeStarted = true
+    if manual then
+        self:CancelDataTimer()
+        state.failed, state.stopped = false, false
+        state.attempts, state.wanted = 0, true
+    end
+    if not Wanted(self) then return false end
+    if not state.nativeAvailable then return self:FailDataJoin("The native group-data API is unavailable.") end
+    state.channelName = self:GetGroupDataChannelName()
+    if state.awaitingLeave then
+        -- Native leave notices can arrive before cached membership disappears.
+        if ChannelID(state.channelName) then
+            state.leaveChecks = (state.leaveChecks or 0) + 1
+            if state.leaveChecks < LEAVE_CACHE_CHECK_LIMIT then
+                if not state.timer then self:ScheduleDataCheck(1) end
+                return false
+            end
+            -- A delayed notice or failed leave must not stall recovery forever.
+            state.leaveChecks = 0
+            self:LeaveGroupChannel(state.channelName)
+            if ChannelID(state.channelName) then
+                self:ScheduleDataCheck(FAILURE_RETRY_DELAY)
+                return false
+            end
+        end
+        state.awaitingLeave, state.leaveChecks = false, 0
+    end
+    state.failed = false
+    if not state.prefixRegistered then
+        local ok, result = pcall(C_ChatInfo.RegisterAddonMessagePrefix, self:GetDataPrefix())
+        local results = Enum.RegisterAddonMessagePrefixResult
+        if not ok or IsSecret(result) or (result ~= results.Success and result ~= results.DuplicatePrefix) then
+            return self:FailDataJoin("Could not register group-data messages.")
+        end
+        state.prefixRegistered = true
+    end
+    if self:ConfirmDataMembership() then return true end
+    self:SetDataConnected(false)
+    state.attempts = math.min(state.attempts + 1, #RETRY_DELAYS)
+    state.pending, state.phase, state.detail = true, "joining", nil
+    local ok = pcall(JoinTemporaryChannel, state.channelName, self:GetGroupDataChannelPassword())
+    if not ok then return self:FailDataJoin("The data-channel join request failed.") end
+    if Wanted(self) and not state.failed and not self:ConfirmDataMembership() then
+        self:ScheduleDataCheck(RETRY_DELAYS[state.attempts])
+    end
+    Refresh(self)
+    return not state.failed
+end
+
+function addon:LeaveDataChannel()
+    local state = self.dataState
+    if not state or not self.ready then return false, "Still loading. Please try again after login." end
+    if self:IsGroupSwitching() then return false, "Waiting to leave the previous group." end
+    if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
+    self:CancelDataTimer()
+    state.wanted = self:HasGroup()
+    state.pending, state.failed, state.awaitingLeave, state.attempts = false, false, true, 0
+    state.leaveChecks = 0
+    state.phase, state.detail = "joining", nil
+    self:SetDataConnected(false)
+    local name = self:GetGroupDataChannelName()
+    if name then self:LeaveGroupChannel(name) end
+    if Wanted(self) then self:ScheduleDataCheck(1) end
+    Refresh(self)
+    return true
+end
+
+function addon:OnDataEvent(event, ...)
+    local state = self.dataState
+    if event == "PLAYER_LOGOUT" then
+        self:CancelDataTimer()
+        state.stopped, state.wanted = true, false
+        self:SetDataConnected(false)
+        return
+    end
+    if not CanUseData(self) then return end
+    local name = self:GetGroupDataChannelName()
+    if event == "CHAT_MSG_ADDON" then
+        local prefix, message, distribution, sender = ...
+        if prefix ~= self:GetDataPrefix() or distribution ~= "CHANNEL" or not state.connected then return end
+        return self:OnDataMessage(sender, message)
+    elseif event == "CHANNEL_LEFT" or event == "CHAT_MSG_CHANNEL_NOTICE" then
+        local reason, noticeName
+        if event == "CHANNEL_LEFT" then reason, noticeName = "YOU_LEFT", select(2, ...)
+        else reason, noticeName = ..., select(9, ...) end
+        if not SameChannel(noticeName, name) or IsSecret(reason) then return end
+        if FAILURE_NOTICES[reason] then
+            self:FailDataJoin(FAILURE_NOTICES[reason])
+        elseif reason == "YOU_LEFT" then
+            if state.awaitingLeave then return end
+            state.awaitingLeave, state.pending = true, false
+            state.leaveChecks = 0
+            self:SetDataConnected(false)
+            if not state.failed then
+                state.phase, state.detail, state.attempts = "joining", nil, 0
+                self:ScheduleDataCheck(1)
+            end
+            Refresh(self)
+        elseif reason == "YOU_JOINED" or reason == "YOU_CHANGED" then
+            if state.awaitingLeave then return end
+            if state.nativeAvailable and ChannelID(name) then state.failed, state.wanted = false, true end
+            self:ConfirmDataMembership()
+        end
+    elseif event == "CHANNEL_PASSWORD_REQUEST" then
+        local requestedName = ...
+        if state.pending and SameChannel(requestedName, name) then
+            self:FailDataJoin(FAILURE_NOTICES.WRONG_PASSWORD)
+        end
+    elseif event == "CHANNEL_UI_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
+        if not Wanted(self) then return end
+        if state.awaitingLeave or state.failed then return end
+        if not self:ConfirmDataMembership() then
+            self:SetDataConnected(false)
+            if state.phase == "joined" or not state.timer then
+                if state.phase == "joined" then state.attempts = 0 end
+                state.phase = "joining"
+                self:ScheduleDataCheck(1)
+                Refresh(self)
+            end
+        end
+    end
+end
+
+function addon:GetDataStatusText()
+    if not self.dataState then return "Still loading." end
+    if self.savedDataReadOnly then return "Saved preferences are read-only." end
+    if self:IsGroupSwitching() then return "Leaving the previous group before connecting." end
+    if not self:HasGroup() then return "No group configured." end
+    local state = self.dataState
+    local name = self:GetGroupDataChannelName()
+    local label = self.GetChannelDisplayName and self:GetChannelDisplayName(name) or "LockInTools Data"
+    if self:IsDataConnected() then return "Joined " .. label .. "; channel broadcasts within this internal realm." end
+    if state.phase == "joining" then return "Joining " .. label .. "; reconnecting automatically." end
+    if state.phase == "error" then return (state.detail or "Group data is unavailable.") .. " Retrying automatically in up to 30 seconds." end
+    return label .. " is configured; waiting for a group connection."
+end

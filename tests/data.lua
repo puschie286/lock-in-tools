@@ -124,7 +124,7 @@ local function newAddon(saved, readOnly, withPositions, native)
     world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
     function addon:RefreshPositionPins() end
-    for _, file in ipairs({ "Crypto.lua", "Group.lua", "Data.lua" }) do
+    for _, file in ipairs({ "Crypto.lua", "Group.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua" }) do
         loadModule(file, addon, environment)
     end
     addon:InitializeGroup()

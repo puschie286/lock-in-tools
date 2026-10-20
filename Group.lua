@@ -122,13 +122,10 @@ function addon:ScheduleGroupSwitchCheck(delay)
     local transition = self.groupSwitch
     if not transition then return end
     if transition.timer then transition.timer:Cancel() end
-    local timer
-    timer = C_Timer.NewTimer(delay, function()
-        if self.groupSwitch ~= transition or transition.timer ~= timer then return end
+    transition.timer = C_Timer.NewTimer(delay, function()
         transition.timer = nil
         self:ContinueGroupSwitch()
     end)
-    transition.timer = timer
 end
 
 function addon:ContinueGroupSwitch()

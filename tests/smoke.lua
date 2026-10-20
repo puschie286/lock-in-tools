@@ -2,6 +2,21 @@ local fixtures = dofile("tests/support/addon.lua")
 local loadAddon, settings, contains = fixtures.loadAddon, fixtures.settings, fixtures.contains
 local SECRET, OTHER_SECRET = fixtures.SECRET, fixtures.OTHER_SECRET
 
+-- Fixtures load modules explicitly; also check the native client's load order.
+local manifestFile = assert(io.open("LockInTools.toc", "r"))
+local manifest = manifestFile:read("*a"):gsub("\r\n", "\n")
+manifestFile:close()
+local channelEntry = manifest:find("\nDataChannel.lua\n", 1, true)
+local dataEntry = manifest:find("\nData.lua\n", 1, true)
+local statusEntry = manifest:find("\nDataStatus.lua\n", 1, true)
+local positionEntry = manifest:find("\nPosition.lua\n", 1, true)
+local rosterEntry = manifest:find("\nRoster.lua\n", 1, true)
+assert(channelEntry and dataEntry and channelEntry < dataEntry,
+    "the native addon manifest must load channel management before the data transport")
+assert(dataEntry and statusEntry and positionEntry and rosterEntry
+    and dataEntry < statusEntry and statusEntry < positionEntry and statusEntry < rosterEntry,
+    "the native addon manifest must load status synchronization after transport and before its consumers")
+
 -- Startup, migration, commands, reload and saved-variable preservation.
 local addon, environment, messages, fire, world = loadAddon(nil, false)
 assert(environment.SLASH_LOCKINTOOLS1 == "/lit", "slash command must be /lit")
