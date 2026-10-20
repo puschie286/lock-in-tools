@@ -4,9 +4,9 @@ A World of Warcraft Forever addon for playing with friends. Feature guides: [gro
 
 ## Development setup
 
-1. Copy or link this repository into the Forever client's `Interface/AddOns/LockInTools` folder, with `LockInTools.toc` directly inside it. No build step or third-party runtime dependencies are required.
+1. Copy or link this repository into the Forever client's `Interface/AddOns/LockInTools` folder, with `LockInTools.toc` directly inside it. Selected libraries are bundled in `Libs/`; no build step or separate library installation is required.
 2. Restart WoW and enable **LockInTools** in the AddOns list.
-3. The welcome screen opens on your first login and saves a key for you. Use `/lit` to share your key or enter a friend's, `/lit options` for settings, and `/lit status` to check the addon version and client build.
+3. Content opens on your first login and saves a group key for you. Use `/lit` for the player overview, `/lit options` → Group to share your key or enter a friend's, and `/lit status` to check the addon version and client build.
 
 The local checkout is `C:\Repositories\LockInTools`. The existing junction at `D:\BattleNetLibrary\World of Warcraft\_classic_beta_\Interface\AddOns\LockInTools` points to it.
 
@@ -23,6 +23,6 @@ From the repository root, install the local native Lua 5.1 runtime once, then ru
 .\tools\verify.ps1
 ```
 
-The runtime lives in ignored `tools/lua/`. Verification checks Lua syntax and runs the offline group, chat and welcome-screen tests without downloading anything. Both scripts resolve repository paths themselves, so they also work when invoked by full path from another directory.
+The runtime lives in ignored `tools/lua/`. Verification checks addon, bundled-library and test syntax and runs every offline suite without downloading anything. Both scripts resolve repository paths themselves, so they also work when invoked by full path from another directory.
 
 See [the verification process](tests/testing.md) for coverage, future changes and required in-game checks.

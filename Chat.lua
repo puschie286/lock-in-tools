@@ -90,7 +90,7 @@ end
 function addon:SetChatPhase(phase, detail)
     self.chatState.phase = phase
     self.chatState.detail = detail
-    self:RefreshOptions()
+    self:Notify("CHAT_CHANGED")
 end
 
 function addon:GetChatStatusText(concise)
@@ -366,16 +366,9 @@ function addon:InitializeChat()
     self.chatState = { phase = "idle", attempts = 0, generation = 0 }
     self:InitializeChatDisplay()
     self:InitializeGroupChannelCleanup()
-    self.chatFrame = CreateFrame("Frame")
-    self.chatFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    self.chatFrame:RegisterEvent("CHANNEL_UI_UPDATE")
-    self.chatFrame:RegisterEvent("CHANNEL_LEFT")
-    self.chatFrame:RegisterEvent("CHAT_MSG_CHANNEL_NOTICE")
-    self.chatFrame:RegisterEvent("CHANNEL_PASSWORD_REQUEST")
-    self.chatFrame:RegisterEvent("CHANNEL_ROSTER_UPDATE")
-    self.chatFrame:RegisterEvent("CHANNEL_FLAGS_UPDATED")
-    self.chatFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-    self.chatFrame:SetScript("OnEvent", function(_, event, ...)
+    self.chatEvents = self:RegisterGameEvents({ "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE", "CHANNEL_LEFT",
+        "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_PASSWORD_REQUEST", "CHANNEL_ROSTER_UPDATE", "CHANNEL_FLAGS_UPDATED",
+        "PLAYER_REGEN_ENABLED" }, function(self, event, ...)
         local state = self.chatState
         local configuredName = self:GetGroupChannelName()
         if not self.ready or not configuredName then

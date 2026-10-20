@@ -6,6 +6,12 @@
 ## SavedVariables: LockInToolsDB
 ## OptionalDeps: EllesmereUI
 
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\AceEvent-3.0\AceEvent-3.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+Notifications.lua
 Core.lua
 Crypto.lua
 Group.lua

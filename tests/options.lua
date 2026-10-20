@@ -280,6 +280,13 @@ readOnly.optionsPanel.content:Click()
 assert(readOnly.contentPanel.pages.overview:IsVisible() and not readOnly.optionsPanel:IsShown()
     and readOnly.contentPanel.feedback:GetText():find("Update LockInTools", 1, true),
     "Content retains the newer-schema read-only notice")
+for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED" }) do
+    readOnly:Notify(notification)
+end
+assert(readOnly.optionsPanel.ownSecret:GetText() == "" and readOnly.optionsPanel.secret:GetText() == ""
+    and readOnlyEnvironment.LockInToolsDB == newer and newer.schemaVersion == 4
+    and newer.important == "keep" and newer.group.secret == SECRET and not newer.chat.autoJoin,
+    "hidden read-only Settings stay cleared while background notifications preserve future saved data")
 readOnly.contentPanel.options:Click()
 assert(readOnly.optionsPanel.selectedTab == "chat" and not readOnly.optionsPanel.autoJoin:IsEnabled()
     and readOnly.optionsPanel.feedback:GetText():find("Update LockInTools", 1, true),
@@ -347,6 +354,60 @@ do
         "read-only checkbox rejection preserves the obsolete saved duration")
 end
 
+
+-- Model notifications own status refreshes; action callbacks only finish their local UI work.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOptions(addon, api)
+    addon:OpenOptions("chat")
+    local options = addon.optionsPanel
+    local refresh, refreshes, changes = addon.RefreshOptions, 0, 0
+    addon.RefreshOptions = function(self)
+        refreshes = refreshes + 1
+        return refresh(self)
+    end
+    for _, name in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED" }) do
+        addon:RegisterNotification(name, function() changes = changes + 1 end)
+    end
+    local function action(callback, changesExpected)
+        refreshes, changes = 0, 0
+        callback()
+        assert(refreshes == changes and (changes > 0) == changesExpected,
+            "an action refreshes Settings only through its actual model notifications")
+    end
+    action(function() options.autoJoin:Click() end, true)
+    assert(addon.db.chat.autoJoin and options.autoJoin:GetChecked() and options.feedback:GetText() == "",
+        "notification-driven preference updates preserve the clicked value and local feedback")
+    action(function() options.leave:Click() end, true)
+    assert(options.status:GetText():find("Left", 1, true), "chat leave status updates without an extra UI refresh")
+    action(function() options.join:Click() end, true)
+    assert(options.status:GetText():find("Joining", 1, true), "chat join status updates through model notifications")
+    options.tabs.position:Click()
+    for _, control in ipairs({ options.positionSharing, options.positionRetention, options.positionTrails }) do
+        action(function() control:Click() end, true)
+    end
+    options.tabs.group:Click()
+    options.secret:UserInput(OTHER_SECRET)
+    action(function() options.applyGroup:Click() end, false)
+    assert(options.pendingSecret == OTHER_SECRET and addon:GetGroupSecret() == SECRET,
+        "a pending group confirmation stays local and does not refresh unrelated controls")
+    action(function() options.applyGroup:Click() end, true)
+    assert(addon:GetGroupSecret() == OTHER_SECRET and options.ownSecret:GetText() == OTHER_SECRET
+        and options.secret:GetText() == "" and not options.applyGroup:IsEnabled()
+        and options.applyGroup:GetText() == "Use key" and options.feedback:GetText() == "Group saved.",
+        "confirmed group changes refresh the saved key while local cleanup resets the draft and confirmation")
+    options.secret:UserInput("  " .. OTHER_SECRET:lower() .. "  ")
+    action(function() options.applyGroup:Click() end, false)
+    assert(options.secret:GetText() == "" and not options.applyGroup:IsEnabled()
+        and options.feedback:GetText() == "Group saved.",
+        "reapplying the same group needs no model notification or full refresh to clear its draft")
+    action(function() options.leaveGroup:Click() end, false)
+    action(function() options.leaveGroup:Click() end, true)
+    assert(not addon:HasGroup() and options.ownSecret:GetText() == ""
+        and not options.join:IsEnabled() and options.leaveGroup:GetText() == "Leave group",
+        "group leave keeps its notification-driven enabled states and local confirmation cleanup")
+end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
 print("PASS: Settings group lifecycle, preference callbacks, help, read-only settings and secret cleanup")

@@ -85,6 +85,17 @@ local function newAddon(saved, readOnly)
     world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
     function addon:RefreshPositionPins() world.refreshes = world.refreshes + 1 end
+    addon:RegisterNotification("POSITIONS_CHANGED", function()
+        if addon.RefreshPositionPins then addon:RefreshPositionPins() end
+        if addon.RefreshOptions then addon:RefreshOptions() end
+        if addon.RefreshOverview then addon:RefreshOverview() end
+    end)
+    addon:RegisterNotification("POSITION_VISIBILITY_CHANGED", function()
+        if addon.RefreshPositionPins then addon:RefreshPositionPins() end
+    end)
+    addon:RegisterNotification("POSITION_CONTACT_CHANGED", function()
+        if addon.RefreshOverview then addon:RefreshOverview() end
+    end)
     for _, file in ipairs({ "Crypto.lua", "Group.lua", "Data.lua", "Position.lua" }) do
         loadModule(file, addon, environment)
     end

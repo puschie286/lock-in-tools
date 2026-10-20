@@ -360,3 +360,7 @@ end
 function addon:OpenOverview()
     self:OpenContent()
 end
+
+for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED", "ROSTER_CHANGED" }) do
+    addon:RegisterNotification(notification, function() addon:RefreshOverview() end)
+end

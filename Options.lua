@@ -32,9 +32,7 @@ local function TrackWindowPosition(panel)
     panel:SetUserPlaced(false)
     panel:HookScript("OnDragStop", function() addon:SaveWindowPosition() end)
     panel:HookScript("OnHide", function() addon:SaveWindowPosition() end)
-    local frame = CreateFrame("Frame")
-    frame:RegisterEvent("PLAYER_LOGOUT")
-    frame:SetScript("OnEvent", function() addon:SaveWindowPosition() end)
+    panel.windowEvents = addon:RegisterGameEvents({ "PLAYER_LOGOUT" }, addon.SaveWindowPosition)
 end
 
 local function SetFeedback(panel, message, isError)
@@ -175,7 +173,6 @@ local function ApplyGroup(panel)
     ResetConfirmation(panel)
     ClearKeyDraft(panel)
     SetFeedback(panel, "Group saved.", false)
-    addon:RefreshOptions()
 end
 
 local function BindPreference(panel, checkbox, getter, setter)
@@ -183,7 +180,6 @@ local function BindPreference(panel, checkbox, getter, setter)
         local success, message = setter(addon, button:GetChecked() and true or false)
         if not success then button:SetChecked(getter()) end
         SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
-        addon:RefreshOptions()
     end)
 end
 
@@ -315,7 +311,6 @@ local function CreateOptionsPanel()
 
         ClearKeyDraft(panel)
         SetFeedback(panel, "Group removed. You can rejoin with its key.", false)
-        addon:RefreshOptions()
     end)
     OptionTooltip(group, panel.leaveGroup, "Leave group",
         "Remove this group from every LockInTools feature and clear its cached players. You can rejoin with the same key. Confirmation is required.")
@@ -355,7 +350,6 @@ local function CreateOptionsPanel()
     panel.join:SetScript("OnClick", function()
         SetFeedback(panel)
         addon:JoinChatChannel(true)
-        addon:RefreshOptions()
     end)
     OptionTooltip(chat, panel.join, "Join chat",
         "Connect or retry your group's chat channel. Friends need the same group key, realm and faction. This does not change your login preference.")
@@ -366,7 +360,6 @@ local function CreateOptionsPanel()
     panel.leave:SetScript("OnClick", function()
         SetFeedback(panel)
         addon:LeaveChatChannel()
-        addon:RefreshOptions()
     end)
     OptionTooltip(chat, panel.leave, "Leave chat",
         "Leave chat and pause reconnection for this session. Your group, position sharing and login preference stay unchanged.")
@@ -480,9 +473,8 @@ local function CreateOptionsPanel()
 end
 
 function addon:RefreshOptions()
-    self:RefreshContent()
     local panel = self.optionsPanel
-    if not panel or not self.initialized then
+    if not panel or not panel:IsVisible() or not self.initialized then
         return
     end
 
@@ -565,15 +557,20 @@ local function CreateContentPanel()
     return panel
 end
 
-function addon:RefreshContent()
+local function RefreshContentFeedback(self)
     local panel = self.contentPanel
     if not panel or not self.initialized then return end
-    self:RefreshOverview()
     if self.savedDataReadOnly then
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
     elseif self.invalidGroupSecret then
         SetFeedback(panel, "Your saved key is invalid. Open Settings > Group to replace it.", true)
     end
+end
+
+function addon:RefreshContent()
+    if not self.contentPanel or not self.initialized then return end
+    self:RefreshOverview()
+    RefreshContentFeedback(self)
 end
 
 function addon:OpenContent()
@@ -603,3 +600,8 @@ end
 function addon:OpenWelcome()
     self:OpenContent()
 end
+
+for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED" }) do
+    addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
+end
+addon:RegisterNotification("GROUP_CHANGED", function() RefreshContentFeedback(addon) end)

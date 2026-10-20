@@ -46,7 +46,7 @@ local function Active(self)
 end
 
 local function Refresh(self)
-    if self.RefreshOverview then self:RefreshOverview() end
+    self:Notify("ROSTER_CHANGED")
 end
 
 local function NativeNumber(callback, maximum, ...)
@@ -193,10 +193,8 @@ function addon:InitializeRoster()
     end, function(sender, stamp, metadata)
         return self:ReceivePlayerContact(sender, stamp, metadata)
     end)
-    self.rosterFrame = CreateFrame("Frame")
-    for _, event in ipairs({ "PLAYER_LEVEL_UP", "GROUP_ROSTER_UPDATE", "PARTY_LEADER_CHANGED",
-        "PLAYER_XP_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }) do self.rosterFrame:RegisterEvent(event) end
-    self.rosterFrame:SetScript("OnEvent", function(_, event, value)
+    self.rosterEvents = self:RegisterGameEvents({ "PLAYER_LEVEL_UP", "GROUP_ROSTER_UPDATE", "PARTY_LEADER_CHANGED",
+        "PLAYER_XP_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }, function(self, event, value)
         if event == "PLAYER_LOGOUT" then self:OnRosterLogout(); return end
         local state = self.rosterState
         if event == "PLAYER_LEVEL_UP" and Number(value, 1000) and value > 0 then

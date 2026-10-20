@@ -1,150 +1,209 @@
--- This harness is never loaded by the addon.
+-- Exercise the real bundled DataBroker and DBIcon against native API mocks.
 local fixtures = dofile("tests/support/addon.lua")
-local loadAddon = fixtures.loadAddon
-local settings = fixtures.settings
-local contains = fixtures.contains
-local SECRET = fixtures.SECRET
-local OTHER_SECRET = fixtures.OTHER_SECRET
+local loadAddon, settings = fixtures.loadAddon, fixtures.settings
+local contains, SECRET = fixtures.contains, fixtures.SECRET
 
--- Native minimap entry point, account-wide placement and saved-data safety.
+local function near(actual, expected)
+    return type(actual) == "number" and math.abs(actual - expected) < 0.000001
+end
+local function at(button, parent, x, y)
+    return button.point[1] == "CENTER" and button.point[2] == parent and button.point[3] == "CENTER"
+        and near(button.point[4], x) and near(button.point[5], y)
+end
+local function library(api, name) return api.LibStub(name) end
+local function drag(button, world, x, y)
+    world.cursorX, world.cursorY = x, y
+    button.scripts.OnDragStart(button)
+    assert(button.scripts.OnUpdate, "native DBIcon drag callbacks install cursor updates")
+    button.scripts.OnUpdate(button)
+end
+
+-- Registration, public broker callbacks and minimap navigation remain one entry point.
 do
-    local function near(actual, expected)
-        return type(actual) == "number" and math.abs(actual - expected) < 0.000001
-    end
-    local function at(button, parent, x, y)
-        return button.point[1] == "CENTER" and button.point[2] == parent and button.point[3] == "CENTER"
-            and near(button.point[4], x) and near(button.point[5], y)
-    end
-    local entry, api, entryMessages, entryEvent, entryWorld = loadAddon(settings(nil, false), false)
+    local entry, api, messages, event, world = loadAddon(settings(nil, false), false)
+    local brokerLibrary = library(api, "LibDataBroker-1.1")
+    local icons = library(api, "LibDBIcon-1.0")
+    local observer, created = {}, 0
+    brokerLibrary.RegisterCallback(observer, "LibDataBroker_DataObjectCreated", function(_, name)
+        if name == "LockInTools" then created = created + 1 end
+    end)
     entry:InitializeMinimapButton()
-    assert(not entry.minimapButton and entryWorld.minimapButtonCreations == 0,
-        "the minimap button waits until login")
-    entryEvent("ADDON_LOADED", "LockInTools")
-    assert(not entry.minimapButton and not entry.db.minimap,
-        "saved-variable initialization does not create a button or minimap settings")
-    entryEvent("PLAYER_LOGIN")
+    assert(not entry.minimapButton and not brokerLibrary:GetDataObjectByName("LockInTools")
+        and world.minimapButtonCreations == 0, "launcher creation waits until login")
+    event("ADDON_LOADED", "LockInTools")
+    assert(not entry.minimapButton, "saved-variable initialization does not create the launcher")
+    event("PLAYER_LOGIN")
     local button = entry.minimapButton
-    local diagonal = 78 / math.sqrt(2)
-    assert(button and entryWorld.minimapButtonCreations == 1
-        and api.LockInToolsMinimapButton == button and button.parent == api.Minimap
+    local broker = brokerLibrary:GetDataObjectByName("LockInTools")
+    local diagonal = (70 + icons.radius) / math.sqrt(2)
+    assert(button == icons:GetMinimapButton("LockInTools") and button == api.LibDBIcon10_LockInTools
+        and button.parent == api.Minimap and button.dataObject == broker and created == 1
+        and broker.type == "launcher" and (broker.label or broker.text) == "LockInTools"
         and at(button, api.Minimap, -diagonal, -diagonal),
-        "login creates one native button at the default minimap position")
-    assert(button.width == 31 and button.height == 31 and button.strata == "MEDIUM" and button.level == 18
-        and button.clicks[1] == "LeftButtonUp" and button.clicks[2] == "RightButtonUp"
-        and button.drags[1] == "LeftButton" and not button.drags[2],
-        "the native button registers both click actions and left-button dragging")
-    entryEvent("PLAYER_LOGIN")
+        "login registers one public broker and its real native minimap button")
+    assert(button.width == 31 and button.height == 31 and button.strata == "MEDIUM"
+        and button.drags[1] == "LeftButton" and not button.drags[2]
+        and type(button.scripts.OnClick) == "function", "the bundled icon owns native button setup")
+    event("PLAYER_LOGIN")
     entry:InitializeMinimapButton()
-    assert(entryWorld.minimapButtonCreations == 1 and #api.Minimap.hooks == 1
-        and not entry.optionsPanel and not entry.contentPanel and not entry.welcomePanel and not entry.db.minimap,
-        "repeated login and initialization reuse the button without building windows or saving defaults")
+    assert(world.minimapButtonCreations == 1 and created == 1
+        and not entry.optionsPanel and not entry.contentPanel and not entry.welcomePanel,
+        "repeated initialization reuses the launcher without building windows")
+
     button:Click("LeftButton")
     button:Click("RightButton")
     button:Click("MiddleButton")
-    assert(entryWorld.contentOpened == 1 and entryWorld.optionsOpened == 1
-        and entryWorld.overviewOpened == 0 and entryWorld.welcomeOpened == 0,
-        "left-click opens Content and right-click opens Settings while other clicks do nothing")
+    assert(world.contentOpened == 1 and world.optionsOpened == 1
+        and world.overviewOpened == 0 and world.welcomeOpened == 0,
+        "left-click opens Content and right-click opens Settings; other buttons do nothing")
     button.scripts.OnEnter(button)
-    assert(api.GameTooltip.shown and api.GameTooltip.owner == button and api.GameTooltip.anchor == "ANCHOR_LEFT"
-        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 2
-        and api.GameTooltip.lines[1] == "Left-click: Content" and api.GameTooltip.lines[2] == "Right-click: Settings",
-        "hover labels the two screen shortcuts without a drag note")
+    local tooltip = icons.tooltip
+    assert(tooltip:IsShown() and tooltip.owner == button and tooltip.text == "LockInTools"
+        and #tooltip.lines == 2 and tooltip.lines[1] == "Left-click: Content"
+        and tooltip.lines[2] == "Right-click: Settings", "DBIcon displays the broker's shortcut tooltip")
     button.scripts.OnLeave(button)
-    assert(not api.GameTooltip.shown)
+    assert(not tooltip:IsShown(), "leaving the minimap icon dismisses the library tooltip")
 
-    api.Minimap.scale = 2
-    api.Minimap:SetSize(140, 100)
-    entryWorld.cursorX, entryWorld.cursorY = (1000 + 78) * 2, (600 + 58) * 2
-    button.scripts.OnDragStart(button)
-    button.scripts.OnEnter(button)
-    assert(button.scripts.OnUpdate and not api.GameTooltip.shown,
-        "dragging installs cursor updates and suppresses the tooltip")
-    button.scripts.OnUpdate(button)
-    assert(at(button, api.Minimap, 78 / math.sqrt(2), 58 / math.sqrt(2)) and not entry.db.minimap,
-        "dragging accounts for minimap scale and unequal radii without saving intermediate positions")
-    local cursorReads = entryWorld.cursorReads
-    entryWorld.cursorX, entryWorld.cursorY = 0, 0
-    button.scripts.OnDragStop(button)
-    assert(not button.scripts.OnUpdate and near(entry.db.minimap.angle, 45)
-        and entryWorld.cursorReads == cursorReads
-        and entryWorld.contentOpened == 1 and entryWorld.optionsOpened == 1 and entryWorld.welcomeOpened == 0,
-        "drag stop saves the last displayed angle without a cursor resample or opening a window")
-    api.Minimap:SetSize(200, 160)
-    assert(at(button, api.Minimap, 108 / math.sqrt(2), 88 / math.sqrt(2)),
-        "minimap resizing refreshes the saved angular placement")
-    local resumed, resumedApi, _, resumedEvent, resumedWorld = loadAddon(entry.db, true)
-    resumedEvent("ADDON_LOADED", "LockInTools")
-    assert(resumed.ready and resumedWorld.minimapButtonCreations == 1
-        and at(resumed.minimapButton, resumedApi.Minimap, diagonal, diagonal),
-        "late loading restores account-wide placement during login initialization")
-
-    entryWorld.cursorX, entryWorld.cursorY = (1000 - 108) * 2, 600 * 2
-    button.scripts.OnDragStart(button)
-    button.scripts.OnUpdate(button)
-    cursorReads = entryWorld.cursorReads
-    entryWorld.cursorX, entryWorld.cursorY = 0, 0
-    button:Hide()
-    assert(not button.scripts.OnUpdate and near(entry.db.minimap.angle, 180)
-        and entryWorld.cursorReads == cursorReads and not api.GameTooltip.shown,
-        "hiding mid-drag saves the displayed position and stops updates without sampling a hidden cursor")
-    assert(not contains(entryMessages, SECRET), "minimap interaction never prints the group key")
-
-    for _, invalid in ipairs({ false, "bad", { angle = "45" }, { angle = 0 / 0 },
-        { angle = math.huge }, { angle = -math.huge } }) do
-        local saved = settings(nil, false)
-        saved.minimap = invalid
-        local originalAngle = type(invalid) == "table" and invalid.angle
-        local repaired, repairedApi, _, _, repairedWorld = loadAddon(saved, false)
-        repairedWorld:initialize()
-        assert(at(repaired.minimapButton, repairedApi.Minimap, -diagonal, -diagonal)
-            and saved.minimap == invalid,
-            "invalid and non-finite saved positions fall back without replacing their saved field")
-        if type(invalid) == "table" then
-            assert(invalid.angle == originalAngle or (invalid.angle ~= invalid.angle and originalAngle ~= originalAngle),
-                "reading an invalid angle does not rewrite it")
-        end
+    -- An external display can discover and use the same object, and receives real LDB updates.
+    local found = 0
+    for name, object in brokerLibrary:DataObjectIterator() do
+        if name == "LockInTools" and object == broker then found = found + 1 end
     end
-    local normalizedSettings = settings(nil, false)
-    normalizedSettings.minimap = { angle = -450, futureField = "keep" }
-    local normalized, normalizedApi, _, _, normalizedWorld = loadAddon(normalizedSettings, false)
-    normalizedWorld:initialize()
-    assert(at(normalized.minimapButton, normalizedApi.Minimap, 0, -78)
-        and normalizedSettings.minimap.angle == -450 and normalizedSettings.minimap.futureField == "keep",
-        "finite saved angles normalize for placement while preserving saved data")
-
-    local squareSettings = settings(nil, false)
-    squareSettings.minimap = { angle = 45 }
-    local square, squareApi, _, _, squareWorld = loadAddon(squareSettings, false)
-    squareWorld.minimapShape = "SQUARE"
-    squareWorld:initialize()
-    assert(at(square.minimapButton, squareApi.Minimap, 78, 78),
-        "square minimaps project diagonal placement onto their rim")
-    squareWorld.minimapShape = "CORNER-TOPLEFT"
-    squareApi.Minimap:SetSize(140, 140)
-    assert(at(square.minimapButton, squareApi.Minimap, diagonal, diagonal),
-        "other minimap shapes retain the circular placement fallback")
-
-    local futureSettings = settings(nil, false)
-    futureSettings.schemaVersion = 4
-    futureSettings.minimap = { angle = 120, futureField = "keep" }
-    local originalMinimap = futureSettings.minimap
-    local readOnly, readOnlyApi, _, _, readOnlyWorld = loadAddon(futureSettings, false)
-    readOnlyWorld:initialize()
-    local readOnlyButton = readOnly.minimapButton
-    readOnlyButton:Click("LeftButton")
-    readOnlyButton:Click("RightButton")
-    readOnlyWorld.cursorX, readOnlyWorld.cursorY = 1078, 600
-    readOnlyButton.scripts.OnDragStart(readOnlyButton)
-    readOnlyButton.scripts.OnUpdate(readOnlyButton)
-    readOnlyButton.scripts.OnDragStop(readOnlyButton)
-    assert(readOnlyWorld.contentOpened == 1 and readOnlyWorld.optionsOpened == 1 and readOnlyWorld.welcomeOpened == 0
-        and at(readOnlyButton, readOnlyApi.Minimap, 78, 0)
-        and readOnlyApi.LockInToolsDB == futureSettings and futureSettings.minimap == originalMinimap
-        and originalMinimap.angle == 120 and originalMinimap.futureField == "keep"
-        and futureSettings.schemaVersion == 4 and not readOnly.db.minimap,
-        "read-only profiles permit button access and temporary dragging without writing any minimap settings")
+    assert(found == 1, "DataBroker displays discover exactly one addon launcher")
+    broker.OnClick({}, "LeftButton")
+    broker.OnClick({}, "RightButton")
+    broker.OnTooltipShow(api.GameTooltip)
+    assert(world.contentOpened == 2 and world.optionsOpened == 2
+        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 2,
+        "external broker displays share navigation and tooltip callbacks")
+    local changes = {}
+    brokerLibrary.RegisterCallback(observer, "LibDataBroker_AttributeChanged_LockInTools",
+        function(_, name, key, value, object)
+            changes[#changes + 1] = { name, key, value, object }
+        end)
+    local originalIcon = broker.icon
+    broker.icon = "Interface\\Icons\\INV_Misc_Book_09"
+    assert(#changes == 1 and changes[1][1] == "LockInTools" and changes[1][2] == "icon"
+        and changes[1][4] == broker and button.icon.path == broker.icon,
+        "real broker attribute notifications refresh the actual DBIcon texture")
+    broker.iconR, broker.iconG, broker.iconB = 0.2, 0.4, 0.6
+    local red, green, blue = button.icon:GetVertexColor()
+    assert(near(red, 0.2) and near(green, 0.4) and near(blue, 0.6),
+        "icon attribute updates propagate through library display callbacks")
+    broker.icon = originalIcon
+    brokerLibrary.UnregisterAllCallbacks(observer)
+    assert(not contains(messages, SECRET), "launcher and display interactions never print the group key")
 end
 
+-- Native scaled dragging, resize placement, persistence and hidden-button cleanup.
+do
+    local entry, api, _, _, world = loadAddon(settings(nil, false), false)
+    world:initialize()
+    local button, icons = entry.minimapButton, library(api, "LibDBIcon-1.0")
+    api.Minimap.scale = 2
+    api.Minimap:SetSize(140, 100)
+    drag(button, world, (1000 + 60) * 2, (600 + 60) * 2)
+    button.scripts.OnEnter(button)
+    assert(not icons.tooltip:IsShown() and button.highlightLocked
+        and at(button, api.Minimap, (70 + icons.radius) / math.sqrt(2), (50 + icons.radius) / math.sqrt(2)),
+        "library dragging respects cursor scale and minimap dimensions while suppressing tooltip display")
+    local cursorReads = world.cursorReads
+    world.cursorX, world.cursorY = 0, 0
+    button.scripts.OnDragStop(button)
+    assert(not button.scripts.OnUpdate and not button.highlightLocked
+        and near(entry.db.minimap.minimapPos, 45) and world.cursorReads == cursorReads,
+        "drag stop retains the displayed position without resampling the cursor")
+    api.Minimap:SetSize(200, 160)
+    assert(at(button, api.Minimap, (100 + icons.radius) / math.sqrt(2), (80 + icons.radius) / math.sqrt(2)),
+        "minimap resizing preserves angular placement")
+    local resumed, resumedApi, _, resumedEvent, resumedWorld = loadAddon(entry.db, true)
+    resumedEvent("ADDON_LOADED", "LockInTools")
+    local resumedIcons = library(resumedApi, "LibDBIcon-1.0")
+    assert(resumed.ready and resumedWorld.minimapButtonCreations == 1
+        and at(resumed.minimapButton, resumedApi.Minimap,
+            (70 + resumedIcons.radius) / math.sqrt(2), (70 + resumedIcons.radius) / math.sqrt(2)),
+        "late loading restores saved account-wide placement without waiting for a second login event")
 
-assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: native minimap button, navigation, dragging and saved-data safety")
+    drag(button, world, (1000 - 100) * 2, 600 * 2)
+    cursorReads = world.cursorReads
+    world.cursorX, world.cursorY = 0, 0
+    button:Hide()
+    assert(not button.scripts.OnUpdate and not button.highlightLocked and world.cursorReads == cursorReads
+        and near(entry.db.minimap.minimapPos, 180) and not icons.tooltip:IsShown(),
+        "hiding mid-drag stops native updates and preserves the last displayed position")
+    assert(world.contentOpened == 0 and world.optionsOpened == 0,
+        "dragging and hiding never open either addon screen")
+end
+
+-- Legacy storage migrates once; valid new placement wins without disturbing other settings.
+do
+    local saved = settings(nil, false)
+    saved.minimap = { angle = -450, futureField = "keep" }
+    local entry, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    local icons = library(api, "LibDBIcon-1.0")
+    assert(near(saved.minimap.minimapPos, 270) and saved.minimap.futureField == "keep"
+        and at(entry.minimapButton, api.Minimap, 0, -(70 + icons.radius)),
+        "legacy angles migrate to normalized DBIcon placement without dropping unrelated data")
+    saved.minimap.minimapPos, saved.minimap.angle = 0, 180
+    local preferred, preferredApi, _, _, preferredWorld = loadAddon(saved, false)
+    preferredWorld:initialize()
+    assert(at(preferred.minimapButton, preferredApi.Minimap,
+        70 + library(preferredApi, "LibDBIcon-1.0").radius, 0),
+        "current DBIcon placement takes precedence over a retained legacy angle")
+    for _, invalid in ipairs({ false, "bad", { angle = "45" }, { minimapPos = "45" },
+        { minimapPos = 0 / 0 }, { minimapPos = math.huge }, { minimapPos = -math.huge } }) do
+        local broken = settings(nil, false)
+        broken.minimap = invalid
+        local repaired, repairedApi, _, _, repairedWorld = loadAddon(broken, false)
+        repairedWorld:initialize()
+        local diagonal = (70 + library(repairedApi, "LibDBIcon-1.0").radius) / math.sqrt(2)
+        assert(at(repaired.minimapButton, repairedApi.Minimap, -diagonal, -diagonal),
+            "malformed or non-finite saved positions use a safe default")
+    end
+end
+
+-- Real square-map placement and dragging stay bounded to its supported rim.
+do
+    local saved = settings(nil, false)
+    saved.minimap = { minimapPos = 0 }
+    local entry, api, _, _, world = loadAddon(saved, false)
+    world.minimapShape = "SQUARE"
+    world:initialize()
+    local button, icons = entry.minimapButton, library(api, "LibDBIcon-1.0")
+    local radius = 70 + icons.radius
+    assert(at(button, api.Minimap, radius, 0), "square-map placement reaches the side at cardinal angles")
+    drag(button, world, 1060, 660)
+    button.scripts.OnDragStop(button)
+    assert(near(saved.minimap.minimapPos, 45) and button.point[4] > radius / math.sqrt(2)
+        and near(button.point[4], button.point[5]) and button.point[4] <= radius,
+        "the real square-map projection places diagonal drags beyond the circular rim without escaping its bounds")
+end
+
+-- The library receives a detached settings table when saved data is from the future.
+do
+    local future = settings(nil, false)
+    future.schemaVersion = 4
+    future.minimap = { minimapPos = 120, angle = 160, futureField = "keep", nested = { value = true } }
+    local originalMinimap, originalNested = future.minimap, future.minimap.nested
+    local entry, api, _, _, world = loadAddon(future, false)
+    world:initialize()
+    local button = entry.minimapButton
+    assert(entry.savedDataReadOnly and button.db ~= future.minimap and entry.db ~= future,
+        "read-only launcher settings share no mutable table with the saved future profile")
+    button:Click("LeftButton")
+    button:Click("RightButton")
+    drag(button, world, 1100, 600)
+    button.scripts.OnDragStop(button)
+    assert(world.contentOpened == 1 and world.optionsOpened == 1 and near(button.db.minimapPos, 0)
+        and at(button, api.Minimap, 70 + library(api, "LibDBIcon-1.0").radius, 0)
+        and api.LockInToolsDB == future and future.schemaVersion == 4 and future.group.secret == SECRET
+        and future.minimap == originalMinimap and future.minimap.nested == originalNested
+        and originalMinimap.minimapPos == 120 and originalMinimap.angle == 160
+        and originalMinimap.futureField == "keep" and originalNested.value,
+        "read-only users can navigate and temporarily drag while the original saved profile remains untouched")
+end
+
+assert(_G.LibStub == nil and _G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil,
+    "real libraries and addon fixtures stay isolated")
+print("PASS: real DataBroker/DBIcon navigation, callbacks, placement migration and saved-data safety")

@@ -21,7 +21,7 @@ The script downloads a pinned archive from the [LuaBinaries release files](https
 Run after changing addon Lua, tests or verification tooling, and before handoff or committing. Both scripts locate the repository themselves and work from another directory when invoked by full path. Verification uses only the installed local runtime and performs no downloads.
 
 1. Require Lua 5.1, matching the addon's syntax target.
-2. Parse every root-level addon Lua file and every Lua file under `tests/` with `luac -p`, without producing bytecode files. Parse `PositionPins.xml` for XML syntax.
+2. Parse every root-level addon Lua file and every Lua file under `Libs/` and `tests/` with `luac -p`, without producing bytecode files. Parse root-level and bundled-library XML files for XML syntax.
 3. Run every top-level `tests/*.lua` suite in a separate Lua process. New suites are discovered automatically.
 
 | Suite | Main coverage |
@@ -30,18 +30,19 @@ Run after changing addon Lua, tests or verification tooling, and before handoff 
 | `group.lua` | Crypto reference vectors, friendly/legacy keys, generation, validation and group lifecycle. |
 | `startup-data.lua` | Production startup, independent data connections, routing, preferences and recovery. |
 | `chat.lua` | Native chat joins, labels, retries, channel cleanup and group switching. |
-| `minimap.lua` | Minimap navigation, tooltips, dragging and saved placement. |
+| `minimap.lua` | Real DataBroker/DBIcon registration and callbacks, navigation, tooltips, dragging, placement migration and read-only persistence. |
 | `options.lua` | Group-key callbacks, confirmation, privacy, immediate preferences and help. |
 | `welcome.lua` | Initial Content setup, saved-key stability, generation failures and damaged/read-only profiles. |
 | `interface.lua` | Shared-window navigation, lazy views, remembered Settings pages and saved placement. |
 | `overview-ui.lua` | Scrolling, sorting, party actions, progress bars and tooltips. |
 | `theme.lua` | Native styling, optional EllesmereUI skins, live changes and lazy-view styling. |
+| `notifications.lua` | Real AceEvent native/message dispatch, independent owners, isolated failures and batched group cleanup. |
 | `data.lua` | Shared transport, native lifecycle, request/response dispatch and status protocol. |
 | `position.lua` | Position preferences, sampling, freshness, retention and class discovery. |
 | `position-map.lua` | Native map providers, projection, pins, interpolation, trails and filters. |
 | `overview.lua` | Presence, level/XP/party metadata, freshness and native action eligibility. |
 
-The production suites share native API fixtures in `tests/support/addon.lua` and widget fixtures in `tests/support/ui.lua`. These helpers are syntax-checked recursively but are not standalone suites or addon files. Keep strict mocks for native visibility, events, focus and widget callbacks in these helpers.
+The production suites share native API fixtures in `tests/support/addon.lua` and widget fixtures in `tests/support/ui.lua`. Fixtures load the real bundled libraries in isolated environments; native API and widget mocks supply their client-facing surfaces. These helpers are syntax-checked recursively but are not standalone suites or addon files. Keep strict mocks for native visibility, events, focus and widget callbacks in these helpers.
 
 For a focused run, invoke a suite from the repository root:
 
@@ -53,7 +54,7 @@ Replace `tests/options.lua` with another suite path as needed. A focused run doe
 
 `tests/position.lua` checks opt-in settings, two-second sampling, unchanged-coordinate suppression, the 15-second heartbeat threshold with a normal 16-second cadence, latest-sample retries, unavailable positions, ordering, 60-second offline detection, retained-location persistence with restored peers offline, suppression resets and read-only data. Class checks cover one request per connection/enable cycle, bounded failed-send retries, multi-client class exchange without periodic announcements, independent ordering, retained classes, legacy position compatibility and group cleanup without extending position freshness. `tests/position-map.lua` checks native map-provider callbacks, lazy loading, active/offline class icons, unknown-class fallback, pooled texture-state resets, parent-map projection, overlapping city/region conversion, unavailable/off-map conversion results and cleanup. Native rendering remains an in-game check.
 
-`tests/data.lua` checks data-channel credential separation, shared feature routing, framing/packet budget, failure isolation and position integration. Native-channel mocks cover prefix registration, login joins independent of chat/position preferences, continuing asynchronous retries with delays capped at 30 seconds, automatic reconnection after explicit/native leaves, a 15-second membership check for silent loss, immediate retry commands, current-route filtering, channel renumbering, unavailable APIs/send errors and stopping old transport/retries on group changes, logout or read-only settings. Group-switch checks cover pending joins, backoff, rejection cooldowns, membership checks, leave reconciliation, stale callbacks and rapid successive switches. The production startup checks in `tests/startup-data.lua` also exercise position sending/receiving with readable channel aliases, native-name fallback, renumbering, cleanup and old-route rejection after switching groups. Production uses CHANNEL broadcasts without roster discovery or whisper fallback; mocks establish behavior, not server delivery.
+`tests/data.lua` checks data-channel credential separation, shared feature routing, framing/packet budget, failure isolation and position integration. Native-channel mocks cover prefix registration, login joins independent of chat/position preferences, continuing asynchronous retries with delays capped at 30 seconds, automatic reconnection after explicit/native leaves, a 15-second membership check for silent loss, immediate retry commands, prefix/format validation on the connected transport, channel renumbering, unavailable APIs/send errors and stopping old transport/retries on group changes, logout or read-only settings. Group-switch checks cover pending joins, backoff, rejection cooldowns, membership checks, leave reconciliation, stale callbacks and rapid successive switches. The production startup checks in `tests/startup-data.lua` also exercise position sending/receiving with readable channel aliases, native-name fallback, renumbering and cleanup after switching groups. Receive handling does not depend on channel numbers or names in event metadata. Production uses CHANNEL broadcasts without roster discovery or whisper fallback; mocks establish behavior, not server delivery.
 
 Request/response checks in `tests/data.lua` exercise generic snapshot registrations, multi-peer replies, correlation and requester filtering, self-echo/duplicate suppression, expiry, packet limits, callback/send failures and cleanup across transport/group changes. These mocks establish dispatch behavior, not native delivery.
 
@@ -69,7 +70,7 @@ Chat and position options checks in `tests/options.lua` cover clickable checkbox
 
 Player-icon filter checks cover a default-on account-wide preference, persistence, rejected invalid/read-only/uninitialized changes, and continued sampling, receiving, discovery and retention while hidden. Map checks cover native filter registration, immediate pin removal/restoration, current locations when shown again and lazy map loading; actual dropdown placement and rendering remain in-game checks.
 
-Minimap-button checks in `tests/minimap.lua` cover login creation, reused controls, left/right navigation, tooltips, scaled dragging, saved position restoration, invalid saved values and read-only data preservation. Actual icon rendering and mouse behavior remain part of the [interface in-game checks](../feature/interface.md#limits-and-in-game-checks).
+Minimap-button checks in `tests/minimap.lua` exercise the actual bundled LibDataBroker and LibDBIcon, including broker discovery and attribute callbacks, login creation, reused controls, left/right navigation, tooltips, scaled round/square dragging, saved placement, legacy-angle migration, invalid values and detached read-only settings. Actual icon rendering, external broker displays and mouse behavior remain part of the [interface in-game checks](../feature/interface.md#limits-and-in-game-checks).
 
 Window-position checks in `tests/interface.lua` cover account-wide saving, unchanged placement across Content/Settings view changes, restoration after reinitialization, centered defaults for missing or malformed values, and temporary movement without writes on read-only profiles. Group keys, privacy and feature preferences must remain unchanged. Actual placement after reload, login or character changes requires the interface in-game checks.
 

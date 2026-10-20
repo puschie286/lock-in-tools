@@ -22,7 +22,9 @@ local function newAddon(saved)
     function addon:OnGroupChanged(oldChannel)
         self.changes[#self.changes + 1] = { oldChannel = oldChannel, newChannel = self:GetGroupChannelName() }
     end
-    function addon:RefreshOptions() self.refreshes = self.refreshes + 1 end
+    addon:RegisterNotification("GROUP_CHANGED", function()
+        addon.refreshes = addon.refreshes + 1
+    end)
     loadModule("Crypto.lua", addon, environment)
     loadModule("Group.lua", addon, environment)
     addon:InitializeGroup()

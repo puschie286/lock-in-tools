@@ -61,7 +61,7 @@ function addon:Initialize()
     end
 
     self.initialized = true
-    self.frame:UnregisterEvent("ADDON_LOADED")
+    self.startupEvents:UnregisterEvent("ADDON_LOADED")
     self:InitializeGroup()
     self:InitializeChat()
     self:InitializeData()
@@ -80,7 +80,7 @@ function addon:OnLogin()
     end
 
     self.ready = true
-    self.frame:UnregisterEvent("PLAYER_LOGIN")
+    self.startupEvents:UnregisterEvent("PLAYER_LOGIN")
     self:InitializeMinimapButton()
 
     if self.savedDataReadOnly then
@@ -115,13 +115,7 @@ function addon:SetShowWelcome(enabled)
     self:Print("Login message and initial Content view " .. (enabled and "enabled." or "disabled."))
 end
 
-addon.frame = CreateFrame("Frame")
-addon.frame:RegisterEvent("ADDON_LOADED")
-addon.frame:RegisterEvent("PLAYER_LOGIN")
-addon.frame:SetScript("OnEvent", function(_, event, loadedAddonName)
-    if event == "ADDON_LOADED" and loadedAddonName == addonName then
-        addon:Initialize()
-    elseif event == "PLAYER_LOGIN" then
-        addon:OnLogin()
-    end
+addon.startupEvents = addon:RegisterGameEvents({ "ADDON_LOADED" }, function(self, _, loadedAddonName)
+    if loadedAddonName == addonName then self:Initialize() end
 end)
+addon.startupEvents:RegisterEvent("PLAYER_LOGIN", function() addon:OnLogin() end)

@@ -61,8 +61,8 @@ do
     connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "NameOnly", nil, 0, nil, dataRoom:lower())
     connectedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "AliasOnly", nil, 0, nil, "LockInTools Data")
     assert(connected:GetSharedPositions()["nameonly-testrealm"]
-        and not connected:GetSharedPositions()["aliasonly-testrealm"],
-        "name-only position routing uses the actual channel name, never the display alias")
+        and connected:GetSharedPositions()["aliasonly-testrealm"],
+        "valid position payloads are accepted independently of native or display channel names")
     assert(connected:SetPositionSharing(false))
     connectedWorld:advance(2)
     assert(#connectedWorld.dataSends == 1 and connected:IsDataConnected()
@@ -110,10 +110,10 @@ do
             == "18. LockInTools Data", "positions use the new native number while the readable alias stays the same")
     connectedEvent("CHAT_MSG_ADDON", switchedSend.prefix, switchedSend.message, "CHANNEL", "OldRoute", nil, 0, 14, dataRoom)
     connectedEvent("CHAT_MSG_ADDON", switchedSend.prefix, switchedSend.message, "CHANNEL", "NewFriend", nil, 0, 18, newDataRoom)
-    assert(not connected:GetSharedPositions()["oldroute-testrealm"]
+    assert(connected:GetSharedPositions()["oldroute-testrealm"].online
         and connected:GetSharedPositions()["newfriend-testrealm"].online
         and connected.db.position.peers["newfriend-testrealm"],
-        "alias-enabled group switching rejects old position packets and accepts the new group's updates")
+        "after reconnection, valid position packets do not depend on current channel metadata")
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 
@@ -164,9 +164,10 @@ do
     resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "NamePeer", nil, 0, nil, dataRoom:lower())
     resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "AliasPeer", nil, 0, nil, "LockInTools Data")
     resumedEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "OldPeer", nil, 0, 7, dataRoom)
-    assert(#received == 2 and received[1].sender == "NumberPeer" and received[2].sender == "NamePeer"
+    assert(#received == 4 and received[1].sender == "NumberPeer" and received[2].sender == "NamePeer"
+        and received[3].sender == "AliasPeer" and received[4].sender == "OldPeer"
         and received[1].payload == "current-state",
-        "feature-only delivery accepts the current number or native name and rejects aliases and old numbers")
+        "feature-only delivery validates payloads independently of channel names and numbers")
     resumedWorld.channels[dataRoom:lower()] = nil
     resumedWorld:notice("YOU_LEFT", dataRoom, 14)
     resumedWorld:advance(1)
@@ -283,6 +284,8 @@ do
     local stopped, _, _, stoppedEvent, stoppedWorld = loadAddon(settings(nil, false), false)
     stoppedWorld:initialize()
     stoppedEvent("PLAYER_LOGOUT")
+    assert(stopped.dataState.stopped and stopped.rosterState.stopped,
+        "independent data and roster logout owners both receive the shared native event")
     stoppedEvent("PLAYER_ENTERING_WORLD")
     stoppedWorld:advance(90)
     assert(#stoppedWorld.dataJoinCalls == 1 and not stopped:IsDataConnected(),

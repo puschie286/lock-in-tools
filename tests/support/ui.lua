@@ -186,7 +186,7 @@ local function loadOptions(uiAddon, uiEnvironment)
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
     end
     uiEnvironment.CreateFrame = function(frameType, name, parent, template)
-        if frameType == "Button" and name == "LockInToolsMinimapButton" then
+        if frameType == "Button" and name == "LibDBIcon10_LockInTools" then
             return createEventFrame(frameType, name, parent, template)
         end
         if frameType == "Frame" and not name and not template and not parent then

@@ -112,6 +112,7 @@ local function newAddon(saved, readOnly, name)
     end
     function addon:RefreshOverview() world.refreshes = world.refreshes + 1 end
     world.notificationErrors = loadNotifications(addon, environment)
+    addon:RegisterNotification("ROSTER_CHANGED", function() addon:RefreshOverview() end)
     function addon:RefreshOptions() end
     function addon:GetSharedPositions()
         return self.db.position.sharing and world.positions or {}

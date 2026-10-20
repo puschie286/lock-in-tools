@@ -301,6 +301,10 @@ function addon:RefreshPositionPins()
     if self.positionMapProvider then self.positionMapProvider:RefreshAllData() end
 end
 
+for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_VISIBILITY_CHANGED" }) do
+    addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
+end
+
 function addon:InitializePositionMap()
     RegisterMapFilter(self)
     if not self.positionMapProvider and WorldMapFrame and WorldMapFrame.AddDataProvider
@@ -315,11 +319,9 @@ function addon:InitializePositionMap()
     end
 
     if self.positionMapProvider and self.positionMapFilterRegistered then
-        if self.positionMapFrame then self.positionMapFrame:UnregisterEvent("ADDON_LOADED") end
-    elseif not self.positionMapFrame then
-        self.positionMapFrame = CreateFrame("Frame")
-        self.positionMapFrame:RegisterEvent("ADDON_LOADED")
-        self.positionMapFrame:SetScript("OnEvent", function(_, _, loadedAddon)
+        if self.positionMapEvents then self.positionMapEvents:UnregisterEvent("ADDON_LOADED") end
+    elseif not self.positionMapEvents then
+        self.positionMapEvents = self:RegisterGameEvents({ "ADDON_LOADED" }, function(self, _, loadedAddon)
             if loadedAddon == "Blizzard_WorldMap" or loadedAddon == "Blizzard_Menu" then
                 self:InitializePositionMap()
             end

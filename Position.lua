@@ -63,9 +63,7 @@ local function RequestClasses(self)
 end
 
 local function Refresh(self)
-    if self.RefreshPositionPins then self:RefreshPositionPins() end
-    if self.RefreshOptions then self:RefreshOptions() end
-    if self.RefreshOverview then self:RefreshOverview() end
+    self:Notify("POSITIONS_CHANGED")
 end
 
 local function SavePeer(self, sender)
@@ -196,7 +194,7 @@ function addon:SetShowPlayerIcons(enabled)
     local allowed, message = CanChange(self, enabled)
     if not allowed then return false, message end
     self.db.position.showPlayerIcons = enabled
-    if self.RefreshPositionPins then self:RefreshPositionPins() end
+    self:Notify("POSITION_VISIBILITY_CHANGED")
     return true
 end
 
@@ -340,8 +338,8 @@ function addon:ReceivePosition(sender, payload)
     if kind == "P" or not self.db.position.keepLastKnown
         or (state.peers[canonical] and wasOnline ~= true) then
         Refresh(self)
-    elseif self.RefreshOverview then
-        self:RefreshOverview()
+    else
+        self:Notify("POSITION_CONTACT_CHANGED")
     end
     return true
 end

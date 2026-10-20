@@ -168,6 +168,8 @@ do
     positioning:OpenContent()
     local content = positioning.contentPanel
     local window = positioning.mainPanel
+    assert(window.windowEvents and type(window.windowEvents.UnregisterAllEvents) == "function",
+        "window persistence owns an independent real AceEvent subscription")
     local function placed(window, owner, point, relativePoint, x, y)
         local actualPoint, relativeTo, actualRelativePoint, actualX, actualY = window:GetPoint()
         return actualPoint == point and relativeTo == owner and actualRelativePoint == relativePoint
@@ -278,6 +280,92 @@ do
         and future.windowPosition == original and original.point == "TOPLEFT" and original.relativePoint == "TOPLEFT"
         and original.x == 80 and original.y == -60 and original.futureField == "keep",
         "drag, hide and logout preserve newer-schema account-wide window data unchanged")
+end
+
+-- Status notifications update only affected views, without duplicate overview renders.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOptions(addon, api)
+    addon:OpenContent()
+    addon:OpenOptions()
+    addon:OpenContent()
+    local refreshOverview, refreshOptions = addon.RefreshOverview, addon.RefreshOptions
+    local overviewCalls, optionsCalls = 0, 0
+    addon.RefreshOverview = function(self)
+        overviewCalls = overviewCalls + 1
+        return refreshOverview(self)
+    end
+    addon.RefreshOptions = function(self)
+        optionsCalls = optionsCalls + 1
+        return refreshOptions(self)
+    end
+    local function check(event, expectedOverview, expectedOptions)
+        overviewCalls, optionsCalls = 0, 0
+        addon:Notify(event)
+        assert(overviewCalls == expectedOverview and optionsCalls == expectedOptions,
+            event .. " refreshes each affected view once and leaves unrelated views alone")
+    end
+    check("POSITIONS_CHANGED", 1, 1)
+    check("CHAT_CHANGED", 0, 1)
+    check("DATA_CHANGED", 0, 1)
+    check("POSITION_CONTACT_CHANGED", 1, 0)
+    check("ROSTER_CHANGED", 1, 0)
+    check("POSITION_VISIBILITY_CHANGED", 0, 0)
+    check("GROUP_CHANGED", 1, 1)
+end
+
+-- Hidden Settings avoid control writes; their existing OnShow path restores current model state.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOptions(addon, api)
+    addon:OpenOptions("group")
+    local options = addon.optionsPanel
+    options.secret:UserInput(OTHER_SECRET)
+    options.applyGroup:Click()
+    addon:OpenContent()
+    assert(options.secret:GetText() == "" and options.ownSecret:GetText() == ""
+        and options.pendingSecret == nil, "hiding Settings performs its normal key and confirmation cleanup")
+    local writes = 0
+    for _, widget in ipairs({ options.groupStatus, options.newKeyLabel, options.status, options.positionStatus,
+        options.secret, options.ownSecret, options.applyGroup, options.createGroup, options.leaveGroup,
+        options.selectKey, options.autoJoin, options.positionSharing, options.positionRetention,
+        options.positionTrails, options.join, options.leave }) do
+        for _, name in ipairs({ "SetText", "SetEnabled", "SetChecked" }) do
+            local original = widget[name]
+            widget[name] = function(self, ...)
+                writes = writes + 1
+                return original(self, ...)
+            end
+        end
+    end
+    assert(addon:SetChatAutoJoin(true))
+    assert(addon:SetPositionSharing(true))
+    assert(addon:SetPositionRetention(false))
+    assert(addon:SetShowPositionTrails(false))
+    assert(addon:SetGroupSecret("hidden-friends"))
+    world:completeJoin(addon:GetGroupChannelName(), 17)
+    world:completeJoin(addon:GetGroupDataChannelName(), 18)
+    assert(writes == 0 and not options:IsVisible() and options.secret:GetText() == ""
+        and options.ownSecret:GetText() == "", "background model notifications never write hidden Settings controls")
+    addon:OpenOptions()
+    assert(writes > 0 and options.selectedTab == "group" and options.ownSecret:GetText() == "hidden-friends"
+        and options.secret:GetText() == "" and options.pendingSecret == nil
+        and options.autoJoin:GetChecked() and options.positionSharing:GetChecked()
+        and not options.positionRetention:GetChecked() and not options.positionTrails:GetChecked()
+        and options.status:GetText() == "Status: " .. addon:GetChatStatusText(true)
+        and options.positionStatus:GetText() == "Sharing: " .. addon:GetPositionStatusText(true),
+        "reopening catches up saved keys, preferences and connection status without restoring an old draft")
+    addon.mainPanel:Hide()
+    writes = 0
+    addon:LeaveChatChannel()
+    assert(addon:SetPositionSharing(false))
+    assert(writes == 0, "closing the whole window also suppresses background Settings writes")
+    addon:OpenOptions("position")
+    assert(not options.positionSharing:GetChecked()
+        and options.status:GetText() == "Status: " .. addon:GetChatStatusText(true),
+        "a directly requested Settings page catches up after the whole window was hidden")
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")

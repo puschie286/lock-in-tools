@@ -1,5 +1,6 @@
 -- This harness is never loaded by the addon.
 -- Server membership changes are asynchronous, as they are in the client.
+local loadNotifications = dofile("tests/support/notifications.lua")
 local function isRosterMessage(message)
     return message:match("^1|roster|") or message:match("^1|[QR]|roster|")
 end
@@ -292,7 +293,11 @@ local function loadAddon(savedVariables, loggedIn)
     }, { __index = _G })
     environment._G = environment
     local addon = {}
-    for _, file in ipairs({ "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Roster.lua", "Minimap.lua", "Commands.lua" }) do
+    local _, prepareMinimap = dofile("tests/support/ui.lua")
+    prepareMinimap(environment, world)
+    world.notificationErrors = loadNotifications(addon, environment)
+    for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
+        "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "Data.lua", "Position.lua", "Roster.lua", "Minimap.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)
@@ -319,7 +324,7 @@ local function loadAddon(savedVariables, loggedIn)
         local count = #frames
         for index = 1, count do
             local frame = frames[index]
-            if frame.events[event] then frame.onEvent(frame, event, ...) end
+            if frame.events[event] and frame.onEvent then frame.onEvent(frame, event, ...) end
         end
     end
     function world:advance(seconds)

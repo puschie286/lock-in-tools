@@ -414,10 +414,13 @@ do
     assert(#received == 1 and received[1][1] == "Left-TestRealm" and received[1][2] == "a|b")
     second:incoming(sent.message, "Left", { id = 19, prefix = "OTHER" })
     second:incoming(sent.message, "Left", { id = 19, distribution = "WHISPER" })
+    assert(#received == 1, "Unrelated prefixes and distributions never enter feature routing")
     second:incoming(sent.message, "Left", { id = 99, name = right:GetGroupDataChannelName() })
-    assert(#received == 1, "Unrelated prefixes, distributions and channel IDs never enter feature routing")
+    assert(#received == 2, "Receiver routing does not depend on the local channel number")
     second:incoming(sent.message, "Left", { name = right:GetGroupDataChannelName():lower() })
-    assert(#received == 2, "Use the channel base name only when a native local ID is unavailable")
+    second:incoming(sent.message, "Left", { name = "LockInTools Data" })
+    second:incoming(sent.message, "Left")
+    assert(#received == 5, "Receiver routing accepts valid payloads with native, display or absent channel metadata")
     first.channels[left:GetGroupDataChannelName():lower()].id = 9
     assert(left:SendData("echo", "renumbered") and first.nativeSends[#first.nativeSends].target == "9")
     first.sendResult = 11
@@ -537,9 +540,9 @@ for _, scenario in ipairs(switchStates) do
     end
     clock:incoming("1|echo|old route", "Oldfriend", { id = 7, name = oldName })
     clock:incoming("1|echo|old name", "Oldfriend", { name = oldName })
-    assert(deliveries == 0, scenario[1])
+    assert(deliveries == 2, "After reconnection, reception ignores old channel metadata: " .. scenario[1])
     clock:incoming("1|echo|new route", "Newfriend", { id = 12 })
-    assert(deliveries == 1, scenario[1])
+    assert(deliveries == 3, scenario[1])
     local watchdog, joined = state.timer, #clock.joins
     assert(switching:LeaveGroup() and watchdog.cancelled and state.timer == nil, scenario[1])
     watchdog.callback(watchdog)
@@ -751,9 +754,9 @@ do
     assert(switching:IsDataConnected() and #clock.joins == 1 and not clock.channels[oldName:lower()],
         "Late notices from the old channel cannot interrupt the new group or restore abandoned membership")
     clock:incoming("1|echo|old route", "Oldfriend", { id = 4, name = oldName })
-    assert(switching:IsDataConnected() and deliveries == 0)
+    assert(switching:IsDataConnected() and deliveries == 1)
     clock:incoming("1|echo|new route", "Newfriend", { id = 12 })
-    assert(deliveries == 1, "Only the new group's confirmed route dispatches after switching")
+    assert(deliveries == 2, "Connected reception ignores channel metadata after switching")
     clock:fire("PLAYER_LOGOUT")
     calls = #clock.joins
     clock:fire("CHANNEL_LEFT", 12, switching:GetGroupDataChannelName())
@@ -768,7 +771,7 @@ do
     clock:incoming("1|echo|after logout", "Newfriend", { id = 12 })
     assert(#clock.joins == calls and not switching:IsDataConnected() and switching.dataState.timer == nil
         and clock:activeTimers() == 0, "Logout cancels recovery and closes feature delivery")
-    assert(deliveries == 1)
+    assert(deliveries == 2)
 end
 
 -- Native rejection notices back off, retain automatic recovery and accept a late successful join.
@@ -1069,13 +1072,14 @@ for _, action in ipairs({ "replace", "disconnect", "switch", "logout" }) do
             clock:member(12)
             clock:incoming("1|Q|snapshot|old-route|", "Friend", { id = 7 })
             clock:incoming("1|R|snapshot|" .. oldID .. "|self-testrealm|old-route", "Friend", { id = 7 })
-            assert(calls == 1 and responses == 0, "Old native routes cannot dispatch snapshots after a group switch")
+            assert(calls == 2 and responses == 0,
+                "Valid requests ignore channel metadata, while replaced request IDs still reject stale responses")
         elseif action == "disconnect" then clock:connect() end
         assert(not current:ReceiveData("Friend", "1|R|snapshot|" .. oldID .. "|self-testrealm|stale"), action)
         local fresh, id = current:RequestData("snapshot", "fresh")
         assert(fresh and id ~= oldID and current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|current"), action)
         assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-request|"), "Reply caches belong to one transport lifetime")
-        assert(calls == 2 and responses == 1)
+        assert(calls == (action == "switch" and 3 or 2) and responses == 1)
     else
         assert(not current:ReceiveData("Friend", "1|Q|snapshot|after-logout|"))
         assert(not current:RequestData("snapshot", "after logout"))

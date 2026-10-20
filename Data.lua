@@ -103,7 +103,7 @@ local function Wanted(self)
 end
 
 local function Refresh(self)
-    if self.RefreshOptions then self:RefreshOptions() end
+    self:Notify("DATA_CHANGED")
 end
 
 local function Disconnect(self)
@@ -121,12 +121,8 @@ function addon:InitializeData()
         channelName = self:GetGroupDataChannelName(), nextRequestID = 0,
         requestSession = string.format("%x-%x", GetServerTime(), math.floor(GetTime() * 1000) % 2147483647) }
     ResetRequests(self.dataState)
-    self.dataFrame = CreateFrame("Frame")
-    for _, event in ipairs({ "CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE",
-        "CHANNEL_LEFT", "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_PASSWORD_REQUEST", "PLAYER_LOGOUT" }) do
-        self.dataFrame:RegisterEvent(event)
-    end
-    self.dataFrame:SetScript("OnEvent", function(_, event, ...) self:OnDataEvent(event, ...) end)
+    self.dataEvents = self:RegisterGameEvents({ "CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE",
+        "CHANNEL_LEFT", "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_PASSWORD_REQUEST", "PLAYER_LOGOUT" }, self.OnDataEvent)
 end
 
 function addon:IsDataConnected()
@@ -814,14 +810,9 @@ function addon:OnDataEvent(event, ...)
         or (state.send and state.send ~= state.nativeSend) then return end
     local name = self:GetGroupDataChannelName()
     if event == "CHAT_MSG_ADDON" then
-        local prefix, message, distribution, sender, _, _, localID, channelName = ...
+        local prefix, message, distribution, sender = ...
         if IsSecret(prefix) or IsSecret(distribution) or prefix ~= PREFIX or distribution ~= "CHANNEL"
             or state.send ~= state.nativeSend or not self:IsDataConnected() then return end
-        local currentID = ChannelID(name)
-        if not currentID or IsSecret(localID) or IsSecret(channelName) then return end
-        if type(localID) == "number" and localID > 0 then
-            if localID ~= currentID then return end
-        elseif not SameChannel(channelName, name) then return end
         return self:ReceiveData(sender, message)
     elseif event == "CHANNEL_LEFT" or event == "CHAT_MSG_CHANNEL_NOTICE" then
         local reason, noticeName

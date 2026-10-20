@@ -23,6 +23,7 @@ try {
 
     $sourceFiles = @(
         Get-ChildItem -LiteralPath $repositoryRoot -Filter '*.lua' -File
+        Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'Libs') -Filter '*.lua' -File -Recurse
         Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File -Recurse
     )
     foreach ($file in $sourceFiles) {
@@ -33,8 +34,14 @@ try {
     }
     Write-Host "PASS: Lua 5.1 syntax ($($sourceFiles.Count) files)"
 
-    [xml](Get-Content -LiteralPath (Join-Path $repositoryRoot 'PositionPins.xml') -Raw) | Out-Null
-    Write-Host 'PASS: position pin XML syntax'
+    $xmlFiles = @(
+        Get-ChildItem -LiteralPath $repositoryRoot -Filter '*.xml' -File
+        Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'Libs') -Filter '*.xml' -File -Recurse
+    )
+    foreach ($file in $xmlFiles) {
+        [xml](Get-Content -LiteralPath $file.FullName -Raw) | Out-Null
+    }
+    Write-Host "PASS: XML syntax ($($xmlFiles.Count) files)"
 
     $suites = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File | Sort-Object Name
     foreach ($suite in $suites) {

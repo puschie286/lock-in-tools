@@ -6,6 +6,9 @@ local SECRET, OTHER_SECRET = fixtures.SECRET, fixtures.OTHER_SECRET
 local addon, environment, messages, fire, world = loadAddon(nil, false)
 assert(environment.SLASH_LOCKINTOOLS1 == "/lit", "slash command must be /lit")
 assert(environment.LockInToolsDB == nil, "initialize only after ADDON_LOADED")
+fire("PLAYER_LOGIN")
+assert(not addon.ready and environment.LockInToolsDB == nil,
+    "an early login event cannot initialize saved settings before addon loading completes")
 fire("ADDON_LOADED", "AnotherAddon")
 assert(not addon.initialized)
 fire("ADDON_LOADED", "LockInTools")
@@ -18,6 +21,11 @@ assert(world.contentOpened == 1 and world.welcomeOpened == 0,
     "show Content after login when initial setup is enabled and no group is configured")
 fire("PLAYER_LOGIN")
 assert(#messages == 1 and world.contentOpened == 1, "do not repeat Content on duplicate login events")
+local originalData, originalRoster, originalStartup = addon.dataState, addon.rosterState, addon.startupEvents
+fire("ADDON_LOADED", "LockInTools")
+assert(addon.dataState == originalData and addon.rosterState == originalRoster
+    and addon.startupEvents == originalStartup and world.minimapButtonCreations == 1,
+    "repeated startup events preserve existing models, subscriptions and the singleton minimap button")
 world:advance(30)
 assert(#world.joinCalls == 0 and #world.dataJoinCalls == 0,
     "an unconfigured group must not join a channel")
@@ -56,6 +64,10 @@ assert(reloaded:GetGroupSecret() == SECRET, "retain group across reload")
 assert(reloaded:GetGroupFingerprint() == addon:GetGroupFingerprint())
 assert(reloaded:GetGroupChannelName() == addon:GetGroupChannelName())
 assert(reloaded:GetGroupChannelPassword() == addon:GetGroupChannelPassword())
+reloadEvent("PLAYER_LOGIN")
+reloadEvent("ADDON_LOADED", "LockInTools")
+assert(reloadWorld.minimapButtonCreations == 1 and #reloadedMessages == 0,
+    "loading after login then receiving delayed startup events performs initialization only once")
 reloadWorld:advance(1)
 assert(reloadWorld.lastJoinPassword == reloaded:GetGroupChannelPassword())
 assert(not contains(messages, SECRET) and not contains(reloadedMessages, SECRET), "never print the group secret")

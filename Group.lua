@@ -56,11 +56,17 @@ local function CanChange(self)
 end
 
 local function NotifyChanged(self, previousChannel)
-    if self.OnDataGroupChanged then self:OnDataGroupChanged() end
-    if self.OnGroupChanged then self:OnGroupChanged(previousChannel) end
-    if self.OnPositionGroupChanged then self:OnPositionGroupChanged() end
-    if self.OnRosterGroupChanged then self:OnRosterGroupChanged() end
-    if self.RefreshOptions then self:RefreshOptions() end
+    -- Lifecycle order is deliberate; views observe the completed transition.
+    self:BeginNotificationBatch()
+    local ok, problem = pcall(function()
+        if self.OnDataGroupChanged then self:OnDataGroupChanged() end
+        if self.OnGroupChanged then self:OnGroupChanged(previousChannel) end
+        if self.OnPositionGroupChanged then self:OnPositionGroupChanged() end
+        if self.OnRosterGroupChanged then self:OnRosterGroupChanged() end
+        self:Notify("GROUP_CHANGED")
+    end)
+    self:EndNotificationBatch(not ok)
+    if not ok then error(problem, 0) end
 end
 
 function addon:GenerateGroupKey()
@@ -192,13 +198,9 @@ function addon:CleanupGroupChannels()
 end
 
 function addon:InitializeGroupChannelCleanup()
-    if self.groupChannelCleanupFrame then return end
-    local frame = CreateFrame("Frame")
-    self.groupChannelCleanupFrame = frame
-    frame:RegisterEvent("CHAT_MSG_CHANNEL_NOTICE")
-    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    frame:RegisterEvent("UPDATE_CHAT_WINDOWS")
-    frame:SetScript("OnEvent", function(_, event, ...)
+    if self.groupChannelCleanupEvents then return end
+    self.groupChannelCleanupEvents = self:RegisterGameEvents({ "CHAT_MSG_CHANNEL_NOTICE",
+        "PLAYER_ENTERING_WORLD", "UPDATE_CHAT_WINDOWS" }, function(self, event, ...)
         if not self.ready or self.savedDataReadOnly then return end
         if event == "CHAT_MSG_CHANNEL_NOTICE" then
             local reason, name = ..., select(9, ...)

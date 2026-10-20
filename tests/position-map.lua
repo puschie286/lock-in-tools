@@ -81,6 +81,7 @@ local function LoadMap(enableTrails)
     }, { __index = _G })
     world.environment, world.mapAPI = environment, environment.C_Map
     world.notificationErrors = loadNotifications(addon, environment)
+    world.libraryFrames = #world.frames
     for _, file in ipairs({ "Position.lua", "PositionMap.lua" }) do
         local chunk = assert(loadfile(file))
         setfenv(chunk, environment)
@@ -231,15 +232,27 @@ end
 local addon, world = LoadMap()
 addon.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
 addon:InitializePositionMap()
+local mapEvents = addon.positionMapEvents
 addon:InitializePositionMap()
-assert(#world.frames == 1 and world.added == 0, "wait for native map without duplicate event frames")
+assert(#world.frames == world.libraryFrames and world.added == 0 and addon.positionMapEvents == mapEvents,
+    "wait for native map with one owner on the shared event frame")
+local otherAddonLoads = 0
+local otherEvents = addon:RegisterGameEvents({ "ADDON_LOADED" }, function(self)
+    assert(self == addon, "native event callbacks receive the addon as self")
+    otherAddonLoads = otherAddonLoads + 1
+end)
 assert(world.menuRegistrations == 1, "register the filter once before the world map loads")
 world:fire("ADDON_LOADED", "UnrelatedAddon")
 assert(world.added == 0)
 world:loadNativeMap(false)
 world:fire("ADDON_LOADED", "Blizzard_WorldMap")
 assert(world.added == 1 and #world.map.pins == 0, "attach while hidden without creating pins")
-assert(not world.frames[1].events.ADDON_LOADED, "release the late-load event when attached")
+world:fire("ADDON_LOADED", "AnotherAddon")
+assert(otherAddonLoads == 3 and world.frames[1].events.ADDON_LOADED,
+    "attaching the map unregisters only its owner while another addon-load listener remains")
+otherEvents:UnregisterAllEvents()
+assert(not world.frames[1].events.ADDON_LOADED,
+    "the shared frame releases native addon-load events once the last owner unregisters")
 addon:InitializePositionMap()
 assert(world.added == 1, "attach the provider only once")
 
@@ -284,8 +297,18 @@ local early, earlyWorld = LoadMap()
 earlyWorld:loadNativeMap(true)
 early.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
 early:InitializePositionMap()
-assert(earlyWorld.added == 1 and #earlyWorld.map.pins == 1 and #earlyWorld.frames == 0,
+assert(earlyWorld.added == 1 and #earlyWorld.map.pins == 1 and #earlyWorld.frames == earlyWorld.libraryFrames,
     "an already loaded world map refreshes immediately without a late-load event")
+early.db.position.showPlayerIcons = false
+early:Notify("POSITION_VISIBILITY_CHANGED")
+assert(#earlyWorld.map.pins == 0, "the map independently subscribes to icon visibility notifications")
+early.db.position.showPlayerIcons = true
+early:Notify("POSITIONS_CHANGED")
+assert(#earlyWorld.map.pins == 1, "position notifications refresh the loaded map without an options view")
+early.positions = {}
+early:Notify("GROUP_CHANGED")
+assert(#earlyWorld.map.pins == 0 and #earlyWorld.notificationErrors == 0,
+    "group cleanup notifications independently remove old map pins")
 
 local filtered, filterWorld = LoadMap()
 filterWorld:loadNativeMap(true)
@@ -339,14 +362,16 @@ delayedMenuWorld:loadNativeMap(true)
 delayedMenu:InitializePositionMap()
 delayedMenu:InitializePositionMap()
 assert(delayedMenuWorld.added == 1 and delayedMenuWorld.menuRegistrations == 0
-    and #delayedMenuWorld.frames == 1, "missing menu APIs preserve the map provider and use one late-load listener")
+    and #delayedMenuWorld.frames == delayedMenuWorld.libraryFrames,
+    "missing menu APIs preserve the map provider and use one late-load listener")
 delayedMenuWorld.environment.Menu = {}
 delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
 assert(delayedMenuWorld.menuRegistrations == 0, "an unavailable menu registration function is safe")
 delayedMenuWorld.environment.Menu = nativeMenu
 delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
 assert(delayedMenuWorld.added == 1 and delayedMenuWorld.menuRegistrations == 1
-    and not delayedMenuWorld.frames[1].events.ADDON_LOADED, "late menu loading registers without duplicating the existing provider")
+    and not delayedMenuWorld.frames[1].events.ADDON_LOADED,
+    "late menu loading registers without duplicating the existing provider")
 delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
 delayedMenu:InitializePositionMap()
 assert(delayedMenuWorld.menuRegistrations == 1, "repeated initialization never duplicates menu entries")
@@ -879,7 +904,8 @@ Near(trailPin.x, 0.225)
 Near(trailPin.y, 0.4375)
 assert(HasTrailEndpoint(trailWorld, trailPin.x, trailPin.y),
     "the displayed trail head follows every frame between half-second history samples")
-assert(#trailWorld.frames == 0, "trails use pin callbacks without allocating a provider animation frame")
+assert(#trailWorld.frames == trailWorld.libraryFrames,
+    "trails use pin callbacks without allocating a provider animation frame")
 
 local trailMotion = trails.positionMapProvider.positions.alice
 local historyBeforeRefresh = trailMotion.trail
