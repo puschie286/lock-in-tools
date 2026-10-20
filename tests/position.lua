@@ -1,4 +1,4 @@
--- Position model checks run without a live transport or the WoW map UI.
+-- Position model checks use mocked native channels without the WoW map UI.
 local loadNotifications = dofile("tests/support/notifications.lua")
 local function loadModule(file, addon, environment)
     local chunk, problem
@@ -32,6 +32,7 @@ local function newAddon(saved, readOnly)
     local world = {
         now = 0, epoch = 2000000000, timers = {}, messages = {}, name = "Self",
         map = 37, x = 0.25, y = 0.75, samples = 0, refreshes = 0, sent = {},
+        channels = {}, joinEnabled = false, sendAttempts = {},
     }
     local function timer(delay, callback, repeating)
         local result = { at = world.now + delay, callback = callback, interval = repeating and delay }
@@ -54,6 +55,33 @@ local function newAddon(saved, readOnly)
         GetNormalizedRealmName = function() return "TestRealm" end,
         GetRealmName = function() return "Test Realm" end,
         IsLoggedIn = function() return true end,
+        Enum = {
+            RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1 },
+            SendAddonMessageResult = { Success = 0, InvalidChatType = 1 },
+        },
+        JoinTemporaryChannel = function(name)
+            if world.joinEnabled then world.channels[name] = 1 end
+        end,
+        LeaveChannelByName = function(name) world.channels[name] = nil end,
+        GetChannelName = function(name) return world.channels[name] or 0 end,
+        C_ChatInfo = {
+            RegisterAddonMessagePrefix = function() return 0 end,
+            SendAddonMessage = function(prefix, wire, distribution, target)
+                assert(prefix == "LockInToolsData" and distribution == "CHANNEL" and target == "1")
+                local packet = { at = world.now, wire = wire, payload = wire:match("^1|position|(.*)$") }
+                world.sendAttempts[#world.sendAttempts + 1] = packet
+                if world.sendThrows then error("Native send failed") end
+                if world.sendResult == 1 or (world.acceptClass == false and wire:match("^1|Q|position%-class|")) then
+                    return 1
+                end
+                world.sent[#world.sent + 1] = packet
+                if world.bus then
+                    packet.sender = world.name .. "-Test Realm"
+                    world.bus.sent[#world.bus.sent + 1], world.bus.queue[#world.bus.queue + 1] = packet, packet
+                end
+                return 0
+            end,
+        },
         C_Map = {
             GetBestMapForUnit = function(unit)
                 assert(unit == "player")
@@ -102,6 +130,11 @@ local function newAddon(saved, readOnly)
     addon:InitializeGroup()
     addon:InitializeData()
     addon:InitializePositions()
+    -- Test convenience adapter: all shared-data receives still enter through
+    -- the native event path with WoW's prefix and distribution arguments.
+    function addon:ReceiveData(sender, wire)
+        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), wire, "CHANNEL", sender)
+    end
     function world:login()
         addon.ready = true
         addon:OnDataLogin()
@@ -136,13 +169,18 @@ local function newAddon(saved, readOnly)
     function world:unavailable(timestamp)
         return "1|U|" .. tostring(timestamp or self.epoch + math.floor(self.now))
     end
+    function world:disconnect()
+        self.joinEnabled = false
+        local name = addon:GetGroupDataChannelName()
+        self.channels[name] = nil
+        if addon.ready then addon:OnDataEvent("CHANNEL_LEFT", 1, name) end
+    end
     function world:connect()
-        addon:SetDataTransport(function(prefix, wire)
-            assert(prefix == addon:GetDataPrefix())
-            local payload = wire:match("^1|position|(.*)$")
-            self.sent[#self.sent + 1] = { at = self.now, wire = wire, payload = payload }
-            return true
-        end)
+        if addon:IsDataConnected() then self:disconnect() end
+        self.joinEnabled = true
+        local name = addon:GetGroupDataChannelName()
+        if addon.ready then addon:JoinDataChannel(true)
+        elseif name then self.channels[name] = 1 end
     end
     return addon, world
 end
@@ -312,7 +350,7 @@ assert(addon:GetSharedPositions()["friend-testrealm"].x == 0.41)
 assert(world.refreshes > 0, "Accepted updates request a map refresh")
 
 -- An absent or failing transport never builds a backlog of old samples.
-addon:SetDataTransport(nil)
+world:disconnect()
 assert(addon:GetPositionStatusText():find("Waiting", 1, true), "An unwired feature must report that it is waiting for a connection")
 world:advance(20)
 assert(#world.sent == 2)
@@ -321,12 +359,13 @@ world:connect()
 world:advance(2)
 assert(#world.sent == 3 and tonumber(fields(world.sent[3].payload)[5]) == 0.65,
     "Reconnect sends only the next current sample")
-local attempts = 0
-addon:SetDataTransport(function() attempts = attempts + 1; return false end)
+local attempts = #world.sendAttempts
+world.sendResult = 1
+world.x = 0.7
 world:advance(4)
-assert(attempts == 2 and #world.sent == 3)
+assert(#world.sendAttempts == attempts + 2 and #world.sent == 3)
 assert(addon:GetPositionStatusText():find("unavailable", 1, true))
-world:connect()
+world.sendResult = nil
 world:advance(2)
 assert(#world.sent == 4, "Failed sends must not be replayed after transport recovery")
 
@@ -397,6 +436,7 @@ addon, world = newAddon(copy(saved))
 world:login()
 world:connect()
 assert(addon:GetSharedPositions()["friend-testrealm"])
+world.joinEnabled = false
 addon:SetGroupSecret("other-group")
 assert(next(addon:GetSharedPositions()) == nil, "Switching immediately hides old locations")
 world:advance(0)
@@ -505,28 +545,22 @@ end
 -- Acceptance alone advances suppression; failures retry current data without a queue.
 do
     local retrying, clock = newAddon()
-    local attempts, accept, throws = {}, true, false
-    retrying:SetDataTransport(function(prefix, wire)
-        assert(prefix == retrying:GetDataPrefix())
-        local payload = assert(wire:match("^1|position|(.*)$"))
-        attempts[#attempts + 1] = { at = clock.now, payload = payload }
-        if throws then error("Disconnected") end
-        return accept
-    end)
+    local attempts = clock.sendAttempts
+    clock:connect()
     clock:login()
     retrying:SetPositionSharing(true)
     clock:advance(2)
-    accept, clock.x = false, 0.6
+    clock.sendResult, clock.x = 1, 0.6
     clock:advance(2)
     assert(#attempts == 2 and retrying:GetPositionStatusText():find("unavailable", 1, true))
-    accept, clock.x = true, 0.25
+    clock.sendResult, clock.x = nil, 0.25
     clock:advance(2)
     assert(#attempts == 3 and tonumber(fields(attempts[3].payload)[5]) == 0.25,
         "Retry current data even when movement returns to the last accepted position")
-    throws, clock.x = true, 0.8
+    clock.sendThrows, clock.x = true, 0.8
     clock:advance(2)
     assert(#attempts == 4 and retrying:GetPositionStatusText():find("unavailable", 1, true))
-    throws, clock.x = false, 0.9
+    clock.sendThrows, clock.x = false, 0.9
     clock:advance(2)
     assert(#attempts == 5 and tonumber(fields(attempts[5].payload)[5]) == 0.9)
     assert(not retrying:GetPositionStatusText():find("unavailable", 1, true))
@@ -747,7 +781,12 @@ do
     for _, reset in ipairs({
         function() clock:connect() end,
         function() classes:SetPositionSharing(false); classes:SetPositionSharing(true) end,
-        function() classes:SetGroupSecret("class-tests-next-group"); clock:advance(0); clock:connect() end,
+        function()
+            clock.joinEnabled = false
+            classes:SetGroupSecret("class-tests-next-group")
+            clock:advance(0)
+            clock:connect()
+        end,
     }) do
         local before = #clock.sent
         reset()
@@ -769,34 +808,32 @@ end
 -- Failed native requests retry briefly and independently of successful position delivery.
 do
     local classes, clock = newAddon()
-    local acceptClass, attempts = false, {}
+    local attempts = clock.sendAttempts
+    clock.acceptClass = false
     clock.environment.UnitClass = function() return "Localized class", "MAGE" end
-    classes:SetDataTransport(function(_, wire)
-        attempts[#attempts + 1] = wire
-        return not classRequest(wire) or acceptClass
-    end)
+    clock:connect()
     clock:login()
     classes:SetPositionSharing(true)
-    assert(#attempts == 1 and classRequest(attempts[1]))
-    acceptClass = true
+    assert(#attempts == 1 and classRequest(attempts[1].wire))
+    clock.acceptClass = true
     clock:advance(2)
-    assert(#attempts == 3 and attempts[2]:match("^1|position|1|P|")
-        and classRequest(attempts[3]), "Failed requests retry on the next two-second tick")
+    assert(#attempts == 3 and attempts[2].wire:match("^1|position|1|P|")
+        and classRequest(attempts[3].wire), "Failed requests retry on the next two-second tick")
     assert(not classes:GetPositionStatusText():find("unavailable", 1, true),
         "An optional class request failure does not report position delivery as failed")
     clock:advance(14)
     assert(#attempts == 3, "An accepted request stops retrying")
     clock:advance(2)
-    assert(#attempts == 4 and attempts[4]:match("^1|position|1|P|"))
+    assert(#attempts == 4 and attempts[4].wire:match("^1|position|1|P|"))
 
-    acceptClass = false
+    clock.acceptClass = false
     classes:SetPositionSharing(false)
     classes:SetPositionSharing(true)
     local before = #attempts
     clock:advance(4)
     local requestCount = 1
     for index = before + 1, #attempts do
-        if classRequest(attempts[index]) then requestCount = requestCount + 1 end
+        if classRequest(attempts[index].wire) then requestCount = requestCount + 1 end
     end
     assert(requestCount == 3, "A rejected class request gets at most three native attempts per session")
     before = #attempts
@@ -851,16 +888,12 @@ do
         local instance, clock = newAddon()
         clock.name, clock.now = name, self.now
         clock.environment.UnitClass = function() return "Localized class", class end
+        clock.bus = self
         clock:login()
         instance:SetPositionSharing(sharing ~= false)
         local peer = { addon = instance, clock = clock }
         self.peers[#self.peers + 1] = peer
-        instance:SetDataTransport(function(prefix, wire)
-            assert(prefix == instance:GetDataPrefix())
-            local packet = { sender = name .. "-Test Realm", wire = wire, at = clock.now }
-            self.sent[#self.sent + 1], self.queue[#self.queue + 1] = packet, packet
-            return true
-        end)
+        clock:connect()
         self:flush()
         return instance, clock
     end

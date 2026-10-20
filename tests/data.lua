@@ -29,18 +29,20 @@ local function equal(left, right)
 end
 
 local function newAddon(saved, readOnly, withPositions, native)
+    native = native or {}
     local world = {
         now = 0, epoch = 2000000000, timers = {}, sent = {}, messages = {}, frames = {},
         x = 0.25, y = 0.75, map = 37, joins = {}, leaves = {}, channels = {}, nativeSends = {}, prefixCalls = {},
         sendResult = 0, sendCalls = 0, restrictionChecks = 0,
     }
+    world.sent = world.nativeSends
     local environment = setmetatable({
         bit = false, bit32 = false, C_ChatInfo = false,
         GetTime = function() return world.now end,
         GetServerTime = function() return world.epoch + math.floor(world.now) end,
         GetChannelName = function() return 0, nil end,
         GetNormalizedRealmName = function() return "TestRealm" end,
-        UnitFullName = function(unit) assert(unit == "player"); return native and native.playerName or "Self", "Test Realm" end,
+        UnitFullName = function(unit) assert(unit == "player"); return native.playerName or "Self", "Test Realm" end,
         CreateFrame = function(kind)
             assert(kind == "Frame")
             local frame = { events = {} }
@@ -66,56 +68,54 @@ local function newAddon(saved, readOnly, withPositions, native)
     }, { __index = _G })
     environment._G = environment
     environment.C_Timer.After = environment.C_Timer.NewTimer
-    if native then
-        environment.Enum = {
-            RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1, InvalidPrefix = 2 },
-            SendAddonMessageResult = { Success = 0, AddOnMessageLockdown = 11 },
-        }
-        environment.GetChannelName = function(identifier)
-            if type(identifier) == "string" then
-                local channel = world.channels[identifier:lower()]
-                if channel then return channel.id, channel.name end
-            else
-                for _, channel in pairs(world.channels) do if channel.id == identifier then return channel.id, channel.name end end
-            end
-            return 0, nil
+    environment.Enum = {
+        RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1, InvalidPrefix = 2 },
+        SendAddonMessageResult = { Success = 0, AddOnMessageLockdown = 11 },
+    }
+    environment.GetChannelName = function(identifier)
+        if type(identifier) == "string" then
+            local channel = world.channels[identifier:lower()]
+            if channel then return channel.id, channel.name end
+        else
+            for _, channel in pairs(world.channels) do if channel.id == identifier then return channel.id, channel.name end end
         end
-        environment.JoinTemporaryChannel = function(name, password)
-            world.joins[#world.joins + 1] = { name = name, password = password, at = world.now }
-            if world.joinThrows then error("Native join unavailable") end
-            return 0, name
-        end
-        environment.LeaveChannelByName = function(name)
-            world.leaves[#world.leaves + 1] = name
-            if world.leaveThrows then error("Native leave unavailable") end
-            if not world.holdLeaves then world.channels[name:lower()] = nil end
-        end
-        environment.C_ChatInfo = {
-            RegisterAddonMessagePrefix = function(prefix)
-                world.prefixCalls[#world.prefixCalls + 1] = prefix
-                if world.prefixThrows then error("Prefix registration unavailable") end
-                return world.prefixResult or 0
-            end,
-            SendAddonMessage = function(prefix, message, distribution, target)
-                world.sendCalls = world.sendCalls + 1
-                assert(distribution == "CHANNEL", "Shared data uses one native channel broadcast, never whispers")
-                if world.sendThrows then error("Native send unavailable") end
-                world.nativeSends[#world.nativeSends + 1] = {
-                    prefix = prefix, message = message, distribution = distribution, target = target, at = world.now,
-                }
-                return world.sendResult
-            end,
-            AreOutgoingAddonChatMessagesRestricted = function()
-                world.restrictionChecks = world.restrictionChecks + 1
-                error("The native result, not a realm restriction precheck, decides acceptance")
-            end,
-        }
-        environment.DEFAULT_CHAT_FRAME = {
-            channelList = { "General" },
-            AddChannel = function() error("Shared data must not appear in native chat") end,
-            AddMessage = function(_, message) world.messages[#world.messages + 1] = message end,
-        }
+        return 0, nil
     end
+    environment.JoinTemporaryChannel = function(name, password)
+        world.joins[#world.joins + 1] = { name = name, password = password, at = world.now }
+        if world.joinThrows then error("Native join unavailable") end
+        return 0, name
+    end
+    environment.LeaveChannelByName = function(name)
+        world.leaves[#world.leaves + 1] = name
+        if world.leaveThrows then error("Native leave unavailable") end
+        if not world.holdLeaves then world.channels[name:lower()] = nil end
+    end
+    environment.C_ChatInfo = {
+        RegisterAddonMessagePrefix = function(prefix)
+            world.prefixCalls[#world.prefixCalls + 1] = prefix
+            if world.prefixThrows then error("Prefix registration unavailable") end
+            return world.prefixResult or 0
+        end,
+        SendAddonMessage = function(prefix, message, distribution, target)
+            world.sendCalls = world.sendCalls + 1
+            assert(distribution == "CHANNEL", "Shared data uses one native channel broadcast, never whispers")
+            if world.sendThrows then error("Native send unavailable") end
+            world.nativeSends[#world.nativeSends + 1] = {
+                prefix = prefix, message = message, distribution = distribution, target = target, at = world.now,
+            }
+            return world.sendResult
+        end,
+        AreOutgoingAddonChatMessagesRestricted = function()
+            world.restrictionChecks = world.restrictionChecks + 1
+            error("The native result, not a realm restriction precheck, decides acceptance")
+        end,
+    }
+    environment.DEFAULT_CHAT_FRAME = {
+        channelList = { "General" },
+        AddChannel = function() error("Shared data must not appear in native chat") end,
+        AddMessage = function(_, message) world.messages[#world.messages + 1] = message end,
+    }
     local addon = {
         db = saved or { schemaVersion = 3, group = { secret = "otter-4827" } },
         initialized = true, ready = false, savedDataReadOnly = readOnly,
@@ -128,7 +128,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         loadModule(file, addon, environment)
     end
     addon:InitializeGroup()
-    if native and native.configure then native.configure(environment, world) end
+    if native.configure then native.configure(environment, world) end
     addon:InitializeData()
     if withPositions then
         loadModule("Position.lua", addon, environment)
@@ -160,11 +160,17 @@ local function newAddon(saved, readOnly, withPositions, native)
             metadata.distribution or "CHANNEL", sender, nil, 0, metadata.id, metadata.name)
     end
     function world:connect(accepted)
-        addon:SetDataTransport(function(prefix, message)
-            self.sent[#self.sent + 1] = { at = self.now, prefix = prefix, message = message }
-            if accepted == "throw" then error("Transport unavailable") end
-            return accepted ~= false
-        end)
+        self.sendResult, self.sendThrows = accepted == false and 11 or 0, accepted == "throw"
+        if not addon.dataState.nativeStarted then self:login() end
+        if addon.dataState.awaitingLeave then self:advance(1) end
+        if addon:HasGroup() then self:member(7) end
+    end
+    function world:disconnect()
+        addon:LeaveDataChannel()
+    end
+    -- Test convenience only: every receive uses the actual native event path.
+    function addon:ReceiveData(sender, message)
+        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, "CHANNEL", sender)
     end
     function world:activeTimers()
         local count = 0
@@ -205,7 +211,7 @@ end, function(connected) connectionChanges[#connectionChanges + 1] = connected e
 assert(#connectionChanges == 1 and connectionChanges[1] == false)
 assert(not addon:IsDataConnected() and not addon:SendData("echo", "before login"))
 addon.ready = true
-assert(not addon:SendData("echo", "without a backend"))
+assert(not addon:SendData("echo", "without membership"))
 assert(not addon:ReceiveData("Friend", "1|echo|before connection"))
 world:connect()
 assert(addon:IsDataConnected() and connectionChanges[#connectionChanges] == true)
@@ -240,16 +246,13 @@ assert(addon:ReceiveData("Friend", "1|echo|" .. maximumPayload))
 local receivedBefore = #incoming
 for _, message in ipairs({
     "2|echo|wrong version", "1|unknown|missing handler", "1|echo", "1||missing feature",
-    "1|Upper|bad identifier", "1|echo|" .. maximumPayload .. "x",
+    "1|Upper|bad identifier",
 }) do
     assert(not addon:ReceiveData("Friend", message))
 end
 assert(#incoming == receivedBefore)
 assert(not addon:SendData("unregistered", "payload") and not addon:SendData("echo", false))
 assert(not addon:SendData("echo", "native\000separator"))
-assert(not addon:ReceiveData("Friend", "1|echo|native\000separator"))
-assert(not addon:ReceiveData("", "1|echo|no sender") and not addon:ReceiveData(nil, "1|echo|no sender"))
-assert(not addon:ReceiveData("Friend", false))
 addon.ready = false
 assert(not addon:IsDataConnected() and not addon:SendData("echo", "not ready")
     and not addon:ReceiveData("Friend", "1|echo|not ready"))
@@ -268,21 +271,22 @@ assert(addon:RegisterDataFeature("good_notice", function() end, function(connect
 end))
 assert(notified[#notified] == true, "A late subscriber receives the current connection state")
 local previousNotices = #connectionChanges
+world:disconnect()
 world:connect()
-assert(#connectionChanges == previousNotices + 1 and notified[#notified] == true,
-    "Replacing a backend notifies features even when it stays connected")
-addon:SetDataTransport(nil)
+assert(#connectionChanges == previousNotices + 2 and notified[#notified] == true,
+    "A native reconnect notifies features of departure and connection")
+world:disconnect()
 assert(not addon:IsDataConnected() and notified[#notified] == false)
 assert(not addon:SendData("echo", "disconnected") and not addon:ReceiveData("Friend", "1|echo|disconnected"))
 
--- Failed backend calls never queue payloads for a later connection.
+-- Failed native sends never queue payloads for a later connection.
 world:connect(false)
 assert(not addon:SendData("echo", "failed payload"))
 world:connect("throw")
 assert(not addon:SendData("echo", "raised payload"))
 local attempts = #world.sent
 world:connect()
-assert(#world.sent == attempts, "Binding a backend must not flush failed or disconnected messages")
+assert(#world.sent == attempts, "Reconnecting must not flush failed or disconnected messages")
 assert(addon:SendData("echo", "current payload") and #world.sent == attempts + 1)
 assert(world.sent[#world.sent].message == "1|echo|current payload")
 assert(equal(addon.db, database), "The communication helper must not persist its runtime state")
@@ -360,36 +364,6 @@ world:connect()
 world:advance(2)
 assert(#world.sent == positionSends + 1, "The new connection announces current data without inherited suppression")
 
--- An explicitly supplied transport owns delivery across native login and channel events.
-do
-    local alternate, clock = newAddon(nil, false, false, {})
-    alternate:RegisterDataFeature("echo", function() end)
-    clock:connect()
-    clock:login()
-    clock:member(7)
-    clock:fire("PLAYER_ENTERING_WORLD")
-    clock:notice("YOU_JOINED")
-    clock:notice("YOU_LEFT")
-    clock:advance(120)
-    assert(alternate:IsDataConnected() and #clock.joins == 0 and #clock.prefixCalls == 0,
-        "Native lifecycle events must not start or replace an explicit transport")
-    assert(alternate:SendData("echo", "alternate") and #clock.sent == 1 and #clock.nativeSends == 0)
-    clock:fire("PLAYER_LOGOUT")
-    assert(not alternate:IsDataConnected(), "Logout still disconnects an explicit transport")
-end
-do
-    local replacement, clock = newAddon(nil, false, false, {})
-    replacement:RegisterDataFeature("echo", function() end)
-    clock:login()
-    assert(#clock.joins == 1)
-    clock:connect()
-    clock:member(7)
-    clock:advance(120)
-    assert(replacement:IsDataConnected() and #clock.joins == 1,
-        "An already scheduled native retry cannot reclaim a replacement transport")
-    assert(replacement:SendData("echo", "replacement") and #clock.sent == 1 and #clock.nativeSends == 0)
-end
-
 -- Login joins a separate data channel even when chat autojoin and position sharing are off.
 do
     local profile = { schemaVersion = 3, group = { secret = "otter-4827" }, chat = { autoJoin = false } }
@@ -450,37 +424,23 @@ do
     assert(first.restrictionChecks == 0 and second.restrictionChecks == 0)
 end
 
--- WoW event delivery uses the native dispatcher; direct/custom callers retain
--- their input boundary. Both routes still require a recognized protocol.
+-- Native events trust WoW's argument types while validating the addon protocol.
 do
-    local current, clock = newAddon(nil, false, false, {})
+    local current, clock = newAddon()
     local received = {}
     assert(current:RegisterDataFeature("echo", function(sender, payload)
         received[#received + 1] = { sender = sender, payload = payload }
     end))
-    clock:login()
-    clock:member(7)
-    local marker = {}
-    clock.environment.issecretvalue = function(value) return rawequal(value, marker) end
-    for _, sender in ipairs({ false, 123, "", marker, "Friend|forged", "Friend\000forged",
-        "Friend\nforged", "Friend\127forged", string.rep("a", 129) }) do
-        assert(not current:ReceiveData(sender, "1|echo|direct"))
-    end
-    for _, message in ipairs({ false, 123, marker, "1|echo|bad\000data", string.rep("x", 256) }) do
-        assert(not current:ReceiveData("Friend", message))
-    end
-    assert(#received == 0)
-    assert(current:ReceiveData("Friend", "1|echo|direct"))
-    current.ReceiveData = function() error("Native delivery must not re-enter the arbitrary-input boundary") end
+    clock:connect()
     clock:incoming("1|echo|native", "Friend-TestRealm")
-    assert(#received == 2 and received[2].sender == "Friend-TestRealm" and received[2].payload == "native")
+    assert(#received == 1 and received[1].sender == "Friend-TestRealm" and received[1].payload == "native")
     for _, frame in ipairs({ "2|echo|wrong version", "1|echo", "1||missing feature",
         "1|Upper|bad feature", "1|unknown|unregistered feature" }) do
         clock:incoming(frame, "Friend")
     end
     clock:incoming("1|echo|other prefix", "Friend", { prefix = "OTHER" })
     clock:incoming("1|echo|other distribution", "Friend", { distribution = "WHISPER" })
-    assert(#received == 2, "Native trust preserves envelope, registration and route checks")
+    assert(#received == 1, "Native trust preserves envelope, registration and route checks")
 end
 
 -- Missing joins retry indefinitely with capped delays and a single timer despite UI-event storms.
@@ -737,15 +697,11 @@ do
     clock:member(4)
     clock:login()
     assert(switching:IsDataConnected() and #clock.joins == 0, "Login accepts confirmed restored membership")
-    local oldSend = switching.dataState.send
     clock.channels.unrelated = { id = 50, name = "Unrelated" }
     switching:SetGroupSecret("different-native-group")
     clock:advance(0)
     assert(not switching:IsDataConnected() and #clock.leaves == 2 and clock.leaves[2] == oldName and clock.channels.unrelated)
     clock.channels[oldName:lower()] = { id = 4, name = oldName }
-    local calls = clock.sendCalls
-    assert(not oldSend("LockInToolsData", "1|echo|stale") and clock.sendCalls == calls,
-        "A saved sender closure cannot use restored membership from the previous group")
     clock:advance(1)
     assert(#clock.joins == 1 and clock.joins[1].name == switching:GetGroupDataChannelName())
     clock:member(12)
@@ -848,10 +804,6 @@ for _, capability in ipairs({ "register", "send", "join", "channel", "registerRe
     clock:member(7)
     assert(not missing:IsDataConnected() and #clock.prefixCalls == 0 and #clock.joins == 0,
         "A previously missing native capability remains unavailable until reload: " .. capability)
-    missing:RegisterDataFeature("echo", function() end)
-    clock:connect()
-    assert(missing:SendData("echo", "alternate transport"),
-        "An explicit backend does not require native capabilities: " .. capability)
 end
 
 -- Removing the configured group cancels both retry and healthy membership timers.
@@ -901,7 +853,6 @@ local function newRequestBus()
             if result == 0 then
                 bus.queue[#bus.queue + 1] = { sender = name .. "-TestRealm", message = message,
                     channel = current:GetGroupDataChannelName() }
-                if bus.synchronous then bus:pump() end
             end
             return result
         end
@@ -950,15 +901,6 @@ do
     for _, client in ipairs(bus.clients) do client.world:advance(35) end
     assert(#alice.world.nativeSends + #bob.world.nativeSends + #carol.world.nativeSends == sent,
         "Snapshot requests and replies do not schedule periodic rebroadcasts")
-end
-
--- Pending correlation is installed before sending, including reentrant transports.
-do
-    local bus = newRequestBus()
-    bus.synchronous = true
-    local alice = bus.clients[1]
-    assert(alice.addon:RequestData("snapshot", "immediate"))
-    assert(#alice.responses == 2 and #alice.requests == 0 and #bus.queue == 0)
 end
 
 local function requestFixture(onRequest, onResponse, native)
@@ -1023,17 +965,13 @@ do
     for _, frame in ipairs({
         "1|Q|snapshot||payload", "1|Q|snapshot|bad.id|payload", "1|Q|snapshot|" .. string.rep("x", 33) .. "|payload",
         "1|Q|Upper|id|payload", "1|Q|" .. string.rep("a", 33) .. "|id|payload", "1|Q|missing|id|payload",
-        "1|Q|snapshot|id", "1|Q|snapshot|id|bad\000data", string.rep("x", 256),
+        "1|Q|snapshot|id",
         "1|R|snapshot||self-testrealm|payload", "1|R|snapshot|bad.id|self-testrealm|payload",
         "1|R|snapshot|id||payload", "1|R|snapshot|id|self-testrealm", "2|Q|snapshot|id|payload",
     }) do
         assert(not current:ReceiveData("Friend", frame), frame)
     end
-    for _, sender in ipairs({ "Friend|forged", "Friend\000forged", string.rep("a", 129) }) do
-        assert(not current:ReceiveData(sender, "1|Q|snapshot|bad-sender|"))
-    end
-    assert(requests == 0 and responses == 0)
-    assert(#clock.nativeSends == sent, "Invalid direct sender names cannot become response headers")
+    assert(requests == 0 and responses == 0 and #clock.nativeSends == sent)
     local header = "1|R|snapshot|maximum|friend-testrealm|"
     response = string.rep("x", 255 - #header)
     assert(current:ReceiveData("Friend", "1|Q|snapshot|maximum|"))
@@ -1047,7 +985,7 @@ do
     local marker = {}
     clock.environment.issecretvalue = function(value) return rawequal(value, marker) end
     assert(not current:RegisterDataRequest(marker, function() end, function() end))
-    assert(not current:RequestData("snapshot", marker) and not current:ReceiveData(marker, "1|Q|snapshot|secret|"))
+    assert(not current:RequestData("snapshot", marker))
     clock.environment.UnitFullName = function() return marker, marker end
     clock.environment.NameUtil = { GetUnmodifiedUnitFullName = function() return marker end }
     assert(not current:IsDataSelf("Self") and not current:RequestData("snapshot", ""),
@@ -1090,42 +1028,31 @@ do
     assert(clock.nativeSends[#clock.nativeSends].message == "1|R|other|healthy|friend-testrealm|working")
 end
 
--- Rebinding and group lifecycle changes clear correlation before features can request a fresh snapshot.
-for _, action in ipairs({ "replace", "disconnect", "switch", "logout" }) do
+-- Native reconnects, group changes and logout invalidate request correlation.
+for _, action in ipairs({ "disconnect", "switch", "logout" }) do
     local calls, responses = 0, 0
     local current, clock = requestFixture(function() calls = calls + 1; return "own" end,
         function() responses = responses + 1 end)
     local accepted, oldID = current:RequestData("snapshot", "old")
     assert(accepted and current:ReceiveData("Friend", "1|Q|snapshot|peer-request|"))
-    local send = current.dataState.send
-    assert(current:SetDataTransport(send) and current.dataState.pendingRequests[oldID],
-        "Reconfirming the same transport preserves an outstanding snapshot")
-    if action == "replace" then clock:connect()
-    elseif action == "disconnect" then current:SetDataTransport(nil)
+    if action == "disconnect" then clock:disconnect()
     elseif action == "switch" then current:SetGroupSecret("snapshot-other-group"); clock:advance(0)
     else clock:fire("PLAYER_LOGOUT") end
     assert(next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil, action)
     if action ~= "logout" then
-        if action == "switch" then
-            clock:advance(1)
-            clock:member(12)
-            clock:incoming("1|Q|snapshot|old-route|", "Friend", { id = 7 })
-            clock:incoming("1|R|snapshot|" .. oldID .. "|self-testrealm|old-route", "Friend", { id = 7 })
-            assert(calls == 2 and responses == 0,
-                "Valid requests ignore channel metadata, while replaced request IDs still reject stale responses")
-        elseif action == "disconnect" then clock:connect() end
+        clock:connect()
         assert(not current:ReceiveData("Friend", "1|R|snapshot|" .. oldID .. "|self-testrealm|stale"), action)
         local fresh, id = current:RequestData("snapshot", "fresh")
         assert(fresh and id ~= oldID and current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|current"), action)
-        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-request|"), "Reply caches belong to one transport lifetime")
-        assert(calls == (action == "switch" and 3 or 2) and responses == 1)
+        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-request|"), "Reply caches belong to one native connection")
+        assert(calls == 2 and responses == 1)
     else
         assert(not current:ReceiveData("Friend", "1|Q|snapshot|after-logout|"))
         assert(not current:RequestData("snapshot", "after logout"))
     end
 end
 
--- Reset occurs before connection callbacks, and a handler cannot send a previous group's reply through a new transport.
+-- Connection callbacks can request a new snapshot after native cleanup.
 do
     local responses = 0
     local current, clock = requestFixture(nil, function() responses = responses + 1 end)
@@ -1134,17 +1061,10 @@ do
     current:RegisterDataFeature("connection_snapshot", function() end, function(connected)
         if connected then local accepted; accepted, freshID = current:RequestData("snapshot", "new"); assert(accepted) end
     end)
+    clock:disconnect()
     clock:connect()
     assert(current.dataState.pendingRequests[freshID] and not current.dataState.pendingRequests[oldID])
     assert(current:ReceiveData("Friend", "1|R|snapshot|" .. freshID .. "|self-testrealm|fresh") and responses == 1)
-    assert(current:RegisterDataRequest("switching", function()
-        clock:connect()
-        return "must not cross transports"
-    end, function() end))
-    local before = #clock.sent
-    assert(not current:ReceiveData("Friend", "1|Q|switching|old-lifetime|"))
-    assert(#clock.sent == before + 1 and clock.sent[#clock.sent].message:match("^1|Q|snapshot|"),
-        "A connection callback may request fresh data, but the old callback's reply must be discarded")
 end
 
 local function statusFixture(values, accepted, native)
@@ -1157,13 +1077,7 @@ local function statusFixture(values, accepted, native)
         function(sender, stamp, metadata)
             contacts[#contacts + 1] = { sender = sender, stamp = stamp, metadata = metadata }
         end))
-    if native then
-        clock:login()
-        clock:member(7)
-    else
-        current.ready = true
-        clock:connect(accepted)
-    end
+    clock:connect(accepted)
     return current, clock, samples, connections, contacts
 end
 
@@ -1242,11 +1156,10 @@ do
     local current, clock, samples, connections = statusFixture(values)
     assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|3|F|[^|]+|2000000000|1|"))
     assert(clock.sent[1].message:find("1=24|2=10|3=100|4=known", 1, true))
-    local send = current.dataState.send
-    current:SetDataTransport(send)
+    current:JoinDataChannel(false)
     current:OnDataLogin()
     clock:advance(25)
-    assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 1)
+    assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 2, "One membership check and one shared status timer")
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].at == 30 and clock.sent[2].message:match("^1|status|3|H|[^|]+|2000000030|1$"))
     values.xp = 20
@@ -1311,7 +1224,7 @@ do
     assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|3|D|")
         and clock.sent[2].message:find("4=a%7Cb%3Dc%25|8=true", 1, true)
         and not clock.sent[2].message:find("1=", 1, true))
-    assert(clock:activeTimers() == 1 and current.dataState.features.status and current.dataState.requests.status
+    assert(clock:activeTimers() == 2 and current.dataState.features.status and current.dataState.requests.status
         and not current.dataState.features.player and not current.dataState.features.future)
     local initial = full("friend-1", 2000000005, 10, "1=25|4=future%7Cvalue|3=|6=old")
     assert(receive(current, "Friend", initial))
@@ -1379,61 +1292,6 @@ do
     assert(samples[#samples].fields.xp == "0" and samples[#samples].metadata.synchronized)
     assert(not receive(current, "Unknown", delta("unknown-1", 2000000040, 2, 1, "2=99")))
     assert(not contacts[#contacts].metadata.hasBaseline)
-end
-
--- Nested deliveries finish the current callback set first; neither a receiver
--- nor a contact callback can mix a newer table with an older sample's metadata.
-do
-    local current, _, samples = statusFixture({ level = 24 })
-    local delivered, nested = {}, false
-    assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
-        function(sender, fields, _, revision)
-            delivered[#delivered + 1] = "alpha:" .. revision .. ":" .. fields.level
-            if not nested then
-                nested = true
-                assert(receive(current, sender, full("peer", 2000000001, 2, "1=26")))
-            end
-        end))
-    assert(current:RegisterDataStatusProvider("beta", function() return {} end,
-        function(_, fields, _, revision) delivered[#delivered + 1] = "beta:" .. revision .. ":" .. fields.level end))
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25")))
-    assert(table.concat(delivered, ",") == "alpha:1:25,beta:1:25,alpha:2:26,beta:2:26"
-        and #samples == 2 and samples[1].fields.level == "25" and samples[2].fields.level == "26")
-    local contactNested = false
-    assert(current:RegisterDataStatusProvider("contact_nested", function() return {} end, function() end, nil,
-        function(sender, _, metadata)
-            if metadata.kind == "heartbeat" and not contactNested then
-                contactNested = true
-                assert(receive(current, sender, full("peer", 2000000030, 3, "1=27")))
-            end
-        end))
-    assert(receive(current, "Friend", heartbeat("peer", 2000000030, 3)))
-    assert(samples[#samples].fields.level == "27" and samples[#samples].metadata.kind == "full")
-end
-
--- Status snapshots received through nested requests and replies keep their
--- decoded fields until delivery, including unknown IDs and escaped values.
-do
-    local current, clock, samples = statusFixture({ level = 24 })
-    local requestID = clock.sent[1].message:match("^1|Q|status|([^|]+)|")
-    local nested = false
-    assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
-        function(sender)
-            if nested then return end
-            nested = true
-            assert(current:ReceiveData(sender, "1|Q|status|nested|"
-                .. full("peer", 2000000001, 2, "1=26|4=a%7Cb%3Dc%25|9=future")))
-            assert(current:ReceiveData("FRIEND-Test Realm", "1|R|status|" .. requestID .. "|self-testrealm|"
-                .. full("peer", 2000000002, 3, "1=27|4=a%7Cb%3Dc%25|9=changed")))
-        end))
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25")))
-    assert(#samples == 3 and samples[1].fields.level == "25" and samples[2].fields.level == "26"
-        and samples[3].fields.level == "27" and samples[3].fields.xpState == "a|b=c%"
-        and samples[3].fields[9] == nil and samples[3].sequence == 3)
-    assert(receive(current, "Friend", delta("peer", 2000000003, 4, 3, "4|9|2=20")))
-    assert(equal(samples[4].fields, { level = "27", xp = "20" }))
-    assert(receive(current, "Friend", full("peer", 2000000004, 4, "1=27|2=20")),
-        "Queued snapshots preserve the baseline used by later removals and comparisons")
 end
 
 -- A group switch requested during delivery blocks new work immediately while
@@ -1549,8 +1407,7 @@ end
 do
     local values = { xpState = "x" }
     local current, clock = statusFixture(values)
-    local sender, requestID = string.rep("a", 118) .. "-TestRealm", string.rep("r", 32)
-    assert(#sender == 128)
+    local sender, requestID = "Friend-TestRealm", string.rep("r", 32)
     assert(current:ReceiveData(sender, "1|Q|status|" .. requestID .. "|3|S"))
     local response = clock.sent[#clock.sent].message
     values.xpState = string.rep("x", 256 - #response)
@@ -1601,19 +1458,14 @@ do
     values.xp = 2
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].message:find("2=2", 1, true))
-    current:SetDataTransport(nil)
-    assert(clock:activeTimers() == 0 and not connections[#connections])
+    clock:disconnect()
+    assert(not connections[#connections])
     clock:connect()
     assert(#clock.sent == 3 and clock.sent[3].message:match("^1|Q|status|") and connections[#connections])
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=7")))
-    current:SetDataTransport(nil); clock:connect()
+    clock:disconnect(); clock:connect()
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "2=8")))
-    local reject = false
-    current:SetDataTransport(function(_, message)
-        clock.sent[#clock.sent + 1] = { at = clock.now, message = message }
-        return not reject
-    end)
-    reject = true
+    clock.sendResult = 11
     assert(receive(current, "Friend", heartbeat("peer", 2000000005, 2)))
     clock:advance(5)
     assert(clock.sent[#clock.sent].message:match("|3|S$"))
@@ -1652,12 +1504,10 @@ do
         "New group revisions restart only under a fresh session and complete snapshot")
 end
 
--- Real multi-client fan-out converges with synchronous delivery as well as a
--- queued native transport, without per-feature schedulers or response loops.
-for _, synchronous in ipairs({ false, true }) do
+-- Native multi-client fan-out converges without response loops.
+do
     local bus = newRequestBus()
     local values, learned = {}, {}
-    bus.synchronous = synchronous
     for index, client in ipairs(bus.clients) do
         values[index], learned[index] = { level = index + 20, xp = index }, {}
         assert(client.addon:RegisterDataStatusProvider("player", function() return values[index] end,
@@ -1742,10 +1592,9 @@ do
     alice.world:advance(5); bus:pump()
     assert(player(bob, "Alice").level == 25 and player(bob, "Alice").xp == 0
         and player(bob, "Alice").xpMax == 1200 and counts(alice) == 2)
-    local send = alice.addon.dataState.send
-    alice.addon:SetDataTransport(nil)
+    alice.world:disconnect()
     assert(player(alice, "Bob").xpStale)
-    alice.addon:SetDataTransport(send)
+    alice.world:connect()
     assert(player(alice, "Bob").xp == nil)
     bus:pump()
     assert(player(alice, "Bob").xp == 200 and not player(alice, "Bob").xpStale)

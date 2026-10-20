@@ -5,8 +5,6 @@ local settings = fixtures.settings
 local contains = fixtures.contains
 local SECRET = fixtures.SECRET
 local OTHER_SECRET = fixtures.OTHER_SECRET
-local isRosterMessage = fixtures.isRosterMessage
-local isStatusMessage = fixtures.isStatusMessage
 
 -- Production startup connects shared data independently of human chat and position preferences.
 do
@@ -175,7 +173,8 @@ do
     clock:completeJoin(switching:GetGroupChannelName(), 8)
     clock:completeJoin(switching:GetGroupDataChannelName(), 12)
     assert(switching:IsDataConnected()
-        and not switching:ReceiveData("OldFriend", "1|R|snapshot|" .. request .. "|self-testrealm|old"))
+        and not switching:OnDataEvent("CHAT_MSG_ADDON", switching:GetDataPrefix(),
+            "1|R|snapshot|" .. request .. "|self-testrealm|old", "CHANNEL", "OldFriend"))
     clock.holdLeaves = false
     clock:completeJoin(oldChat, 3)
     clock:completeJoin(oldData, 7)
@@ -267,9 +266,9 @@ do
         and state.timer == timer and not timer:IsCancelled(),
         "re-saving enabled sharing preserves the current shared retry delay")
     pendingWorld:completeJoin(pending:GetGroupDataChannelName(), 7)
-    local send = state.send
+    local connectedTimer = state.timer
     assert(pending:SetPositionSharing(true))
-    assert(#pendingWorld.dataJoinCalls == 2 and state.send == send and pending:IsDataConnected(),
+    assert(#pendingWorld.dataJoinCalls == 2 and state.timer == connectedTimer and pending:IsDataConnected(),
         "saving enabled sharing leaves a connected data transport intact")
     assert(pending:SetGroupSecret(OTHER_SECRET))
     assert(pending:IsGroupSwitching() and not pending:IsDataConnected())
@@ -280,17 +279,6 @@ do
     assert(#pendingWorld.dataJoinCalls == 3
         and pendingWorld.dataJoinCalls[3] == pending:GetGroupDataChannelName(),
         "the deferred switch joins the newly selected group once")
-    local alternateSends = 0
-    local alternate = function(_, message)
-        if not isRosterMessage(message) and not isStatusMessage(message) then alternateSends = alternateSends + 1 end
-        return true
-    end
-    assert(pending:SetDataTransport(alternate))
-    assert(pending:SetPositionSharing(true))
-    pendingWorld:advance(2)
-    assert(pending:IsDataConnected() and state.send == alternate and alternateSends == 1
-        and #pendingWorld.dataJoinCalls == 3,
-        "saving enabled sharing preserves an existing alternate transport and uses it for positions")
 end
 
 -- Failed shared joins retry indefinitely at a capped pace without feature involvement.

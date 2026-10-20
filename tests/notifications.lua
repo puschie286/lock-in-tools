@@ -158,7 +158,8 @@ do
         listeners[#listeners + 1] = addon:RegisterNotification(name, function(event, ...)
             assert(select("#", ...) == 0, "model invalidations never carry group keys")
             assert(not addon:IsDataConnected() and not addon:SendData("echo", "disconnected send")
-                and not addon:ReceiveData("Friend", "1|echo|disconnected receive"),
+                and not addon:OnDataEvent("CHAT_MSG_ADDON", addon:GetDataPrefix(),
+                    "1|echo|disconnected receive", "CHANNEL", "Friend"),
                 "subscribers cannot use the previous group's disconnected transport")
             if addon:IsGroupSwitching() then
                 assert(addon:GetGroupChannelName() == oldChat and addon:GetGroupDataChannelName() == oldData

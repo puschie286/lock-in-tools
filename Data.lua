@@ -75,17 +75,6 @@ local function PruneRequests(state)
     return now
 end
 
-local function SendFrame(self, message)
-    if not self:IsDataConnected() then return false, "Group data is disconnected." end
-    if #message > MAX_MESSAGE_BYTES or message:find("\000", 1, true) then
-        return false, "Data message exceeds the supported format."
-    end
-    -- No queue or automatic retry: each feature decides when its data is current.
-    local ok, accepted = pcall(self.dataState.send, PREFIX, message)
-    if not ok or accepted ~= true then return false, "Data message was not accepted." end
-    return true
-end
-
 local function ValidRequestID(id)
     return id and #id <= 32 and id:match("^[a-zA-Z0-9_-]+$")
 end
@@ -107,18 +96,49 @@ local function CanUseData(self)
 end
 
 local function Wanted(self)
-    local state = self.dataState
-    return CanUseData(self)
-        and state.wanted
-        and (not state.send or state.send == state.nativeSend)
+    return CanUseData(self) and self.dataState.wanted
 end
 
 local function Refresh(self)
     self:Notify("DATA_CHANGED")
 end
 
+local NotifyConnection
+
+local function SetConnected(self, connected)
+    local state = self.dataState
+    if state.connected == connected then return end
+    state.connected = connected
+    ResetRequests(state)
+    NotifyConnection(self)
+end
+
 local function Disconnect(self)
-    if self.dataState.send then self:SetDataTransport(nil) end
+    SetConnected(self, false)
+end
+
+local function SendFrame(self, message)
+    if not self:IsDataConnected() then return false, "Group data is disconnected." end
+    if #message > MAX_MESSAGE_BYTES or message:find("\000", 1, true) then
+        return false, "Data message exceeds the supported format."
+    end
+    -- Channel numbers can change without a reconnect. Resolve each send, and
+    -- recover a silently lost membership before accepting any more feature data.
+    local id = ChannelID(self:GetGroupDataChannelName())
+    if not id then
+        local state = self.dataState
+        Disconnect(self)
+        state.phase, state.attempts = "joining", 0
+        self:ScheduleDataCheck(1)
+        Refresh(self)
+        return false, "Group data is disconnected."
+    end
+    -- No queue or automatic retry: each feature decides when its data is current.
+    local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, "CHANNEL", tostring(id))
+    if not ok or IsSecret(result) or result ~= Enum.SendAddonMessageResult.Success then
+        return false, "Data message was not accepted."
+    end
+    return true
 end
 
 function addon:GetDataPrefix()
@@ -130,7 +150,7 @@ function addon:InitializeData()
     self:InitializeGroupChannelCleanup()
     local prefixResults = Enum and Enum.RegisterAddonMessagePrefixResult
     local sendResults = Enum and Enum.SendAddonMessageResult
-    self.dataState = { features = {}, requests = {}, phase = "idle", attempts = 0,
+    self.dataState = { features = {}, requests = {}, connected = false, phase = "idle", attempts = 0,
         channelName = self:GetGroupDataChannelName(), nextRequestID = 0,
         -- Native capabilities are stable for this UI session; retry connection
         -- failures without probing API availability again.
@@ -149,10 +169,10 @@ end
 
 function addon:IsDataConnected()
     local state = self.dataState
-    return state ~= nil and CanUseData(self) and state.send ~= nil
+    return state ~= nil and CanUseData(self) and state.connected
 end
 
-local function NotifyConnection(self)
+NotifyConnection = function(self)
     local connected = self:IsDataConnected()
     for _, feature in pairs(self.dataState.features) do
         if feature.connectionChanged then pcall(feature.connectionChanged, connected) end
@@ -413,31 +433,6 @@ local function ProcessStatus(self, sender, message, requested)
     return true
 end
 
-local function ReceiveStatus(self, sender, message, requested)
-    local status = self.dataState.status
-    if status.receiving then
-        if #status.receiveQueue >= 64 then return false end
-        status.receiveQueue[#status.receiveQueue + 1] = {
-            sender = sender, message = message, requested = requested, generation = status.generation }
-        return true
-    end
-    -- Deliver one coherent sample to all consumers before processing a nested
-    -- transport callback. Otherwise one provider could see an old revision with
-    -- the fields of a newer sample received reentrantly by another provider.
-    status.receiving, status.receiveQueue = true, {}
-    local ok, accepted = pcall(ProcessStatus, self, sender, message, requested)
-    local count = 0
-    while #status.receiveQueue > 0 and count < 64 do
-        local nextMessage = table.remove(status.receiveQueue, 1)
-        count = count + 1
-        if nextMessage.generation == status.generation then
-            pcall(ProcessStatus, self, nextMessage.sender, nextMessage.message, nextMessage.requested)
-        end
-    end
-    status.receiving, status.receiveQueue = false, {}
-    return ok and accepted
-end
-
 local function ScheduleStatus(self)
     local status = self.dataState.status
     if status.timer or not status.connected or not self:IsDataConnected() then return end
@@ -452,18 +447,18 @@ end
 
 local function StatusConnectionChanged(self, connected)
     local state, status = self.dataState, self.dataState.status
-    -- Another feature callback may have changed the route reentrantly.
-    connected = self:IsDataConnected()
-    local send = connected and state.send or nil
-    if status.connected == connected and status.send == send then return end
-    status.generation = status.generation + 1
+    if status.connected == connected then return end
     if status.timer then status.timer:Cancel(); status.timer = nil end
-    status.connected, status.send = connected, send
+    status.connected = connected
     status.received, status.lastBroadcast, status.lastAttemptAt = {}, nil, nil
-    status.receiveQueue = {}
     status.current, status.revision, status.broadcastRevision = nil, 0, 0
     status.forceFull, status.resyncNeeded, status.lastResyncAttemptAt, status.lastTrafficAt = false, false, nil, nil
-    status.session = state.requestSession .. "-" .. status.generation
+    if connected then
+        -- Revisions restart after reconnecting. Peers need a fresh wire session
+        -- even when the group and server timestamp are unchanged.
+        status.sessionSequence = status.sessionSequence + 1
+        status.session = state.requestSession .. "-" .. status.sessionSequence
+    end
     status.requestNeeded = connected
     for _, name in ipairs(StatusNames(status.providers)) do
         local callback = status.providers[name].connectionChanged
@@ -486,20 +481,19 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     local first = not state.status
     if first then
         if state.features.status or state.requests.status then return false, "Status data is already registered." end
-        state.status = { providers = {}, received = {}, generation = 0, revision = 0 }
+        state.status = { providers = {}, received = {}, sessionSequence = 0, revision = 0 }
     end
     local status = state.status
     status.providers[name] = { collect = collect, receive = receive, connectionChanged = connectionChanged, contact = contact }
     if first then
         self:RegisterDataRequest("status", function(sender, payload, budget)
-            local generation = status.generation
             if payload ~= "3|S" then
                 local message = DecodeStatus(payload)
                 if not message or message.kind ~= "F" then return nil end
-                ReceiveStatus(self, sender, message, true)
+                ProcessStatus(self, sender, message, true)
             end
             local fields, revision = CurrentStatus(self)
-            if fields == nil or status.generation ~= generation then return nil end
+            if fields == nil then return nil end
             local response = EncodeStatus(self, "F", fields, revision)
             -- A recipient of an unpublished full snapshot cannot apply a later
             -- patch against the older broadcast baseline. Publish a full next.
@@ -508,11 +502,11 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
             -- A reply never marks a changed snapshot as broadcast to all peers.
         end, function(sender, payload)
             local message = DecodeStatus(payload)
-            return message and message.kind == "F" and ReceiveStatus(self, sender, message, true) or false
+            return message and message.kind == "F" and ProcessStatus(self, sender, message, true) or false
         end)
         self:RegisterDataFeature("status", function(sender, payload)
             local message = DecodeStatus(payload)
-            return message and ReceiveStatus(self, sender, message) or false
+            return message and ProcessStatus(self, sender, message) or false
         end, function(connected) StatusConnectionChanged(self, connected) end)
     elseif connectionChanged then pcall(connectionChanged, self:IsDataConnected()) end
     return true
@@ -521,17 +515,16 @@ end
 function addon:DataStatusTick()
     local state = self.dataState
     local status = state and state.status
-    if not status or status.ticking or self:IsGroupSwitching() then return false end
+    if not status or self:IsGroupSwitching() then return false end
     if not self:IsDataConnected() then
         StatusConnectionChanged(self, false)
         return false
     end
-    local generation, now = status.generation, GetTime()
+    local now = GetTime()
     if status.lastAttemptAt and now - status.lastAttemptAt < STATUS_INTERVAL then ScheduleStatus(self); return false end
-    status.ticking = true
     local fields, revision = CurrentStatus(self)
     local sent = false
-    if fields ~= nil and generation == status.generation and self:IsDataConnected() then
+    if fields ~= nil and self:IsDataConnected() then
         local payload, request, broadcast
         if status.requestNeeded then
             payload, request, broadcast = EncodeStatus(self, "F", fields, revision), true, true
@@ -556,22 +549,18 @@ function addon:DataStatusTick()
             end
             if request then sent = self:RequestData("status", payload)
             else sent = self:SendData("status", payload) end
-            if generation == status.generation then
-                if sent then
-                    if broadcast then
-                        status.requestNeeded, status.lastBroadcast, status.broadcastRevision = false, fields, revision
-                        -- Synchronous callbacks can collect newer local state.
-                        status.forceFull = status.revision ~= revision
-                    end
-                    if payload ~= "3|S" then status.lastTrafficAt = now end
-                elseif payload == "3|S" then
-                    status.resyncNeeded = true
+            if sent then
+                if broadcast then
+                    status.requestNeeded, status.lastBroadcast, status.broadcastRevision = false, fields, revision
+                    status.forceFull = false
                 end
+                if payload ~= "3|S" then status.lastTrafficAt = now end
+            elseif payload == "3|S" then
+                status.resyncNeeded = true
             end
         end
     end
-    status.ticking = false
-    if generation == status.generation then ScheduleStatus(self) end
+    ScheduleStatus(self)
     return sent
 end
 
@@ -616,29 +605,11 @@ function addon:RequestData(feature, payload)
     PruneRequests(state)
     state.nextRequestID = state.nextRequestID + 1
     local id = state.requestSession .. "-" .. string.format("%d", state.nextRequestID)
-    local request = { feature = feature, targets = targets, expires = GetTime() + REQUEST_WINDOW, responders = {} }
-    -- Install before sending so an immediate transport response can already correlate.
-    state.pendingRequests[id] = request
     local accepted, problem = SendFrame(self, "1|Q|" .. feature .. "|" .. id .. "|" .. payload)
-    if not accepted then
-        if state.pendingRequests[id] == request then state.pendingRequests[id] = nil end
-        return false, problem
-    end
+    if not accepted then return false, problem end
+    state.pendingRequests[id] = { feature = feature, targets = targets,
+        expires = GetTime() + REQUEST_WINDOW, responders = {} }
     return true, id
-end
-
--- Features share this transport boundary; native acceptance is not a peer receipt.
-function addon:SetDataTransport(send)
-    local state = self.dataState
-    if not state then return false, "Group data is still loading." end
-    if send ~= nil and type(send) ~= "function" then return false, "Invalid data connection." end
-    if send and (self.savedDataReadOnly or not self:HasGroup() or self:IsGroupSwitching() or state.stopped) then
-        return false, "A writable group configuration is required."
-    end
-    if state.send ~= send then ResetRequests(state) end
-    state.send = send
-    NotifyConnection(self)
-    return true
 end
 
 function addon:OnDataLogin()
@@ -655,7 +626,6 @@ function addon:ResetDataForGroupSwitch()
     self:CancelDataTimer()
     Disconnect(self)
     state.channelName = nil
-    state.nativeSend = nil
     state.phase, state.detail = "idle", nil
     state.attempts, state.pending, state.failed, state.awaitingLeave = 0, false, false, false
     state.leaveChecks = 0
@@ -710,7 +680,7 @@ function addon:ConfirmDataMembership()
     if not state.nativeAvailable or not Wanted(self) or state.awaitingLeave then return false end
     local name = self:GetGroupDataChannelName()
     if not state.prefixRegistered or not ChannelID(name) then return false end
-    if state.phase == "joined" and state.send == state.nativeSend then
+    if state.connected then
         if not state.timer then self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL) end
         return true
     end
@@ -718,23 +688,7 @@ function addon:ConfirmDataMembership()
     state.channelName = name
     state.attempts, state.pending, state.failed = 0, false, false
     state.phase, state.detail = "joined", nil
-    local send
-    send = function(prefix, message)
-        if not Wanted(self) or state.send ~= send then return false end
-        local id = ChannelID(name)
-        if not id then
-            Disconnect(self)
-            state.phase, state.attempts = "joining", 0
-            self:ScheduleDataCheck(1)
-            Refresh(self)
-            return false
-        end
-        -- Resolve local channel numbers for every send; no queue and no whisper fallback.
-        local ok, result = pcall(C_ChatInfo.SendAddonMessage, prefix, message, "CHANNEL", tostring(id))
-        return ok and not IsSecret(result) and result == Enum.SendAddonMessageResult.Success
-    end
-    state.nativeSend = send
-    self:SetDataTransport(send)
+    SetConnected(self, true)
     self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL)
     Refresh(self)
     return true
@@ -824,13 +778,11 @@ function addon:OnDataEvent(event, ...)
         ResetRequests(state)
         return
     end
-    if not CanUseData(self)
-        or (state.send and state.send ~= state.nativeSend) then return end
+    if not CanUseData(self) then return end
     local name = self:GetGroupDataChannelName()
     if event == "CHAT_MSG_ADDON" then
         local prefix, message, distribution, sender = ...
-        if prefix ~= PREFIX or distribution ~= "CHANNEL"
-            or state.send ~= state.nativeSend or not self:IsDataConnected() then return end
+        if prefix ~= PREFIX or distribution ~= "CHANNEL" or not state.connected then return end
         return DispatchData(self, sender, message)
     elseif event == "CHANNEL_LEFT" or event == "CHAT_MSG_CHANNEL_NOTICE" then
         local reason, noticeName
@@ -894,10 +846,9 @@ local function ReceiveRequest(self, sender, message)
     local key = normalized .. "|" .. feature .. "|" .. id
     if state.repliedRequests[key] then return false end
     state.repliedRequests[key] = now + REQUEST_WINDOW
-    local send = state.send
     local header = "1|R|" .. feature .. "|" .. id .. "|" .. normalized .. "|"
     local ok, response = pcall(registration.onRequest, sender, payload, MAX_MESSAGE_BYTES - #header)
-    if not ok or IsSecret(response) or type(response) ~= "string" or state.send ~= send then return false end
+    if not ok or IsSecret(response) or type(response) ~= "string" then return false end
     return SendFrame(self, header .. response)
 end
 
@@ -918,8 +869,8 @@ local function ReceiveResponse(self, sender, message)
     return ok and accepted ~= false
 end
 
--- Native events already supply ordinary bounded strings. Decode only our wire
--- protocol here; alternate transports enter through ReceiveData below.
+-- Native events supply ordinary bounded strings. Only the addon protocol needs
+-- decoding; all receives enter through the connected native-channel event.
 DispatchData = function(self, sender, message)
     if message:sub(1, 4) == "1|Q|" then return ReceiveRequest(self, sender, message) end
     if message:sub(1, 4) == "1|R|" then return ReceiveResponse(self, sender, message) end
@@ -929,14 +880,6 @@ DispatchData = function(self, sender, message)
     if not registration then return false end
     local ok, accepted = pcall(registration.receive, sender, payload)
     return ok and accepted ~= false
-end
-
-function addon:ReceiveData(sender, message)
-    if not self:IsDataConnected() or IsSecret(sender) or type(sender) ~= "string" or sender == ""
-        or #sender > 128 or sender:find("[|%z\001-\031\127]")
-        or IsSecret(message) or type(message) ~= "string" or #message > MAX_MESSAGE_BYTES
-        or message:find("\000", 1, true) then return false end
-    return DispatchData(self, sender, message)
 end
 
 function addon:GetDataStatusText()
