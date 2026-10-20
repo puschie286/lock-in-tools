@@ -41,10 +41,75 @@ end
 function addon:GetRankingHelpText()
     return "Rank: higher level first, then exact XP progress; equal progress shares a rank.\n"
         .. "XP %: progress toward the next level. MAX: confirmed maximum level.\n"
-        .. "Stale / ~: last saved progress, which may have changed; these values still count in the ranking.\n"
+        .. "Dimmed progress: last saved values, which may have changed; these values still count in the ranking.\n"
         .. "Awaiting XP: no usable level and XP report yet (new discovery, older saved data or a level-up). "
         .. "These characters have no rank until progress is available.\n"
         .. "Hover a player for exact XP and location; right-click for Invite or Request to join."
+end
+
+local function Age(stamp)
+    if type(stamp) ~= "number" then return "age unknown" end
+    local seconds = math.max(0, math.floor(GetServerTime() - stamp))
+    if seconds < 60 then return seconds .. "s ago" end
+    if seconds < 3600 then return math.floor(seconds / 60) .. "m ago" end
+    if seconds < 86400 then return math.floor(seconds / 3600) .. "h ago" end
+    return math.floor(seconds / 86400) .. "d ago"
+end
+
+local function LocationName(self, player)
+    -- Cached coordinates stay private when either side has stopped sharing.
+    if not self.db.position or not self.db.position.sharing then return "Position sharing is off" end
+    if player.sharing == false then return "Not sharing" end
+    if not player.map then return "Unknown location" end
+    if C_Map and type(C_Map.GetMapInfo) == "function" then
+        local ok, info = pcall(C_Map.GetMapInfo, player.map)
+        if ok and type(info) == "table" and type(info.name) == "string" then return info.name end
+    end
+    return "Map " .. tostring(player.map)
+end
+
+function addon:GetCompactPlayerTooltipLines(player)
+    local lines = { "#" .. (player.rank or "?") .. " - " .. self:GetPlayerDisplayName(player.name) }
+    if player.xpState ~= "max" then
+        local progress = "Awaiting XP"
+        if player.level and player.xpState == "known" and type(player.xp) == "number"
+            and type(player.xpMax) == "number" and player.xpMax > 0 then
+            local missing = math.max(0, player.xpMax - player.xp)
+            -- Round missing progress up so a pending level never reads as 0% needed.
+            local percent = string.format("%.1f", math.ceil(missing * 1000 / player.xpMax) / 10)
+                :gsub("%.0$", "") .. "%"
+            progress = percent .. " (" .. missing .. " XP)"
+        end
+        lines[#lines + 1] = "Lv " .. (player.level or "?") .. " - " .. progress
+    end
+    local location = LocationName(self, player)
+    if not player.online and not player.isSelf then location = location .. " - " .. Age(player.seenAt) end
+    lines[#lines + 1] = location
+    return lines
+end
+
+function addon:ShowCompactPlayerTooltip(owner, entries, preserveAnchor)
+    if not GameTooltip or not owner or type(entries) ~= "table" or #entries == 0 then return false end
+    if preserveAnchor then
+        -- A periodic refresh must not reclaim another widget's shared tooltip.
+        if not GameTooltip:IsOwned(owner) or not GameTooltip:IsShown() then return false end
+    else
+        GameTooltip_SetDefaultAnchor(GameTooltip, owner)
+    end
+    if GameTooltip.ClearLines then GameTooltip:ClearLines() end
+    for index, entry in ipairs(entries) do
+        local lines = self:GetCompactPlayerTooltipLines(entry.player)
+        if index == 1 then
+            if entry.red then GameTooltip:SetText(lines[1], entry.red, entry.green, entry.blue)
+            else GameTooltip:SetText(lines[1]) end
+        else
+            if entry.red then GameTooltip:AddLine(lines[1], entry.red, entry.green, entry.blue)
+            else GameTooltip:AddLine(lines[1]) end
+        end
+        for line = 2, #lines do GameTooltip:AddLine(lines[line]) end
+    end
+    GameTooltip:Show()
+    return true
 end
 
 local function Editable(self, value)

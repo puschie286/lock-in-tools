@@ -152,6 +152,8 @@ do
     page.scripts.OnUpdate(page, 1)
     assert(menu:IsShown() and menu.playerID == "alpha-testrealm" and not menu.invite:IsEnabled()
         and snapshotCalls == 0, "contact expiry disables actions without changing menu identity or requesting status")
+    assert(page.rows[1].position:GetText() == "Elwynn Forest",
+        "offline region labels show the saved location without a prefix")
     api.UIParent:Hide()
     assert(content:IsShown() and page:IsShown() and not page:IsVisible()
         and not page.active and not page.scripts.OnUpdate and not menu:IsShown(),
@@ -195,6 +197,9 @@ end
 -- Player actions also work on independent surfaces without opening Content.
 do
     local actions, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    end
     local scroll = 0
     world:initialize()
     world:completeJoin(actions:GetGroupDataChannelName(), 7)
@@ -215,6 +220,16 @@ do
     assert(not menu:IsShown() and not menu.playerID and not actions.activePlayerActionMenu,
         "the shared menu rejects self targets before selecting or showing actions")
     menu:Open("alpha-testrealm", anchor)
+    local tooltip = api.GameTooltip
+    assert(not menu.request:IsEnabled(), "an unavailable action still exposes hover help")
+    menu.request.scripts.OnEnter(menu.request)
+    assert(tooltip:IsShown() and tooltip:IsOwned(menu.request) and tooltip.anchor == "ANCHOR_CURSOR",
+        "disabled player-action help follows global tooltip positioning")
+    menu.invite.scripts.OnEnter(menu.invite)
+    menu.request.scripts.OnLeave(menu.request)
+    menu:Refresh()
+    assert(tooltip:IsShown() and tooltip:IsOwned(menu.invite) and tooltip.anchor == "ANCHOR_CURSOR",
+        "enabled action help keeps global positioning across refresh and another owner's leave")
     otherMenu:Open("alpha-testrealm", otherAnchor)
     assert(not menu:IsShown() and not menu.playerID and not menu.anchor and not api.GameTooltip.shown
         and otherMenu:IsShown() and actions.activePlayerActionMenu == otherMenu,
@@ -242,13 +257,18 @@ end
 -- Level progress fits the pooled Overview rows and explains exact values without requesting on each refresh.
 do
     local progressAddon, api, _, _, progressWorld = loadAddon(settings(SECRET, false), false)
+    local anchorOwners = {}
+    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        anchorOwners[#anchorOwners + 1] = owner
+        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    end
     progressWorld:initialize()
     local now, snapshots = api.GetServerTime(), 0
     local players = {
         { id = "alpha", name = "Alpha-Other Realm", level = 24, xp = 420, xpMax = 1000, xpState = "known", online = true },
         { id = "bravo", name = "Bravo", level = 24, xp = 0, xpMax = 1000, xpState = "known", online = true },
         { id = "charlie", name = "Charlie", level = 24, xp = 999, xpMax = 1000, xpState = "known", online = true },
-        { id = "delta", name = "Delta", level = 60, xpState = "max", online = true },
+        { id = "delta", name = "Delta", level = 60, xpState = "max", online = false },
         { id = "echo", name = "Echo", level = 24, xpState = "unavailable", online = true },
         { id = "foxtrot", name = "Foxtrot", xpState = "unavailable", online = true },
         { id = "golf", name = "Golf", level = 24, xp = 500, xpMax = 1000, xpState = "known", online = true, xpStale = true },
@@ -269,35 +289,54 @@ do
     local content, tooltip = progressAddon.contentPanel, api.GameTooltip
     local page = content.overviewPage
     local row = page.rows[1]
-    assert(row.level:GetText() == "24" and row.progress:GetText() == "· 42%"
+    assert(row.level:GetText() == "24" and row.progress:GetText() == "42%"
         and row.progressTrack:IsShown() and row.progressFill:IsShown()
         and math.abs(row.progressFill:GetWidth() - row.progressTrack:GetWidth() * 0.42) < 0.000001,
         "known XP displays the numeric level, floored percentage and proportional thin fill")
-    assert(page.rows[2].progress:GetText() == "· 0%" and page.rows[2].progressTrack:IsShown()
-        and not page.rows[2].progressFill:IsShown() and page.rows[3].progress:GetText() == "· 99%",
+    assert(row.progress.point[1] == "LEFT" and row.progress.point[2] == row.level
+        and row.progress.point[3] == "RIGHT" and row.progress.point[4] == 6 and row.progress.point[5] == 0
+        and row.progress.justifyH == "RIGHT" and row.progress:GetHeight() == 12
+        and row.level:GetWidth() + row.progress.point[4] + row.progress:GetWidth() <= row.levelCell:GetWidth(),
+        "the percentage is right aligned beside the level value on the same horizontal line within the Level column")
+    assert(row.name:GetWidth() == 124 and page.headers.name:GetWidth() == 124
+        and page.headers.level.point[2] == 148 and row.levelCell.point[2] == 132
+        and row.levelCell:GetWidth() == 80
+        and page.headers.region.point[2] == 236 and page.headers.region:GetWidth() == 196
+        and row.position.point[2] == 220 and row.position:GetWidth() == 196
+        and row.progressTrack:GetWidth() == 36 and row.progressTrack.point[3] == -24,
+        "a shorter Name column gives Region more room while keeping the Level cell and XP bar dimensions")
+    assert(page.rows[2].progress:GetText() == "0%" and page.rows[2].progressTrack:IsShown()
+        and not page.rows[2].progressFill:IsShown() and page.rows[3].progress:GetText() == "99%",
         "zero XP shows an empty track and near-level XP never rounds up to 100 percent")
-    assert(page.rows[4].progress:GetText() == "· MAX" and not page.rows[4].progressTrack:IsShown()
+    assert(page.rows[4].progress:GetText() == "MAX" and page.rows[4].progress.alpha == 0.55
+        and not page.rows[4].progressTrack:IsShown()
         and not page.rows[4].progressFill:IsShown()
-        and page.rows[5].progress:GetText() == "· —" and not page.rows[5].progressTrack:IsShown()
+        and page.rows[5].progress:GetText() == "—" and not page.rows[5].progressTrack:IsShown()
         and page.rows[6].level:GetText() == "—" and page.rows[6].progress:GetText() == "",
         "maximum level, unavailable XP and unknown level have distinct states without an ordinary XP bar")
-    assert(page.rows[7].progress:GetText() == "· ~50%"
-        and page.rows[8].progress:GetText() == "· ~75%",
-        "explicit stale progress and inactive players have a visible marker")
+    assert(page.rows[7].progress:GetText() == "50%" and page.rows[8].progress:GetText() == "75%"
+        and page.rows[7].progress.alpha == 0.55 and page.rows[8].progress.alpha == 0.55
+        and page.rows[7].progressFill.textureColor[4] == 0.35
+        and page.rows[8].progressFill.textureColor[4] == 0.35,
+        "stale and offline progress omit the tilde while retaining dimmed percentages and bars")
     row.levelCell.scripts.OnEnter(row.levelCell)
     assert(tooltip.shown and tooltip.owner == row.levelCell
         and tooltip.lines[1] == "XP: 420 / 1000" and tooltip.lines[2] == "To next level: 580 XP"
         and #tooltip.lines == 2, "the whole Level cell explains exact XP and remaining XP without report details")
+    assert(#anchorOwners == 1 and anchorOwners[1] == row.levelCell and tooltip.anchor == "ANCHOR_CURSOR",
+        "Overview progress follows the global tooltip position")
     progressWorld:advance(13)
     page.scripts.OnUpdate(page, 1)
     assert(#tooltip.lines == 2 and tooltip.lines[1] == "XP: 420 / 1000"
-        and row.progress:GetText() == "· 42%" and snapshots == 0,
+        and row.progress:GetText() == "42%" and snapshots == 0,
         "refreshing remote progress does not add report details, mark unchanged XP stale or request status")
+    assert(#anchorOwners == 2 and anchorOwners[2] == row.levelCell and tooltip.anchor == "ANCHOR_CURSOR",
+        "live Overview refresh honors the global tooltip positioning hook")
     row.levelCell.scripts.OnLeave(row.levelCell)
     assert(not tooltip.shown, "leaving the Level cell dismisses progress details")
     page:SetOffset(2)
-    assert(not tooltip.shown and page.rows[1].playerID == "charlie" and page.rows[1].progress:GetText() == "· 99%"
-        and page.rows[7].playerID == "india" and page.rows[7].progress:GetText() == "· 20%",
+    assert(not tooltip.shown and page.rows[1].playerID == "charlie" and page.rows[1].progress:GetText() == "99%"
+        and page.rows[7].playerID == "india" and page.rows[7].progress:GetText() == "20%",
         "scrolling dismisses old tooltips and keeps unchanged online progress current")
     page.rows[1].levelCell.scripts.OnEnter(page.rows[1].levelCell)
     page:SetOffset(0)

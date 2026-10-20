@@ -37,6 +37,12 @@ function addon:InitializeMinimapButton()
             elseif mouseButton == "RightButton" then self:OpenOptions() end
         end,
         OnTooltipShow = function(tooltip)
+            -- LibDBIcon anchors its shared tooltip before this callback. Other
+            -- broker displays own their tooltip placement and only need content.
+            if tooltip == icons.tooltip then
+                tooltip:ClearAllPoints()
+                GameTooltip_SetDefaultAnchor(tooltip, tooltip:GetOwner())
+            end
             tooltip:SetText(NAME)
             tooltip:AddLine("Left-click: Content", 1, 1, 1)
             tooltip:AddLine("Right-click: Settings", 1, 1, 1)

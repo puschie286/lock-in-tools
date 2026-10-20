@@ -22,12 +22,13 @@ end
 local function LoadMap()
     local addon = {
         positions = {}, initialized = true, positionState = {},
-        db = { position = { showPlayerIcons = true } },
+        db = { position = { showPlayerIcons = true, sharing = true } },
     }
     local world = {
         frames = {}, added = 0, created = 0, released = 0, rectangles = {},
         bounds = {}, secretValues = {}, worldConversions = 0, now = 0,
-        menuModifiers = {}, menuRegistrations = 0,
+        menuModifiers = {}, menuRegistrations = 0, serverNow = 1000,
+        overviewPlayers = {}, rankingPlayers = {}, mapNames = { [101] = "Elwynn Forest" },
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
@@ -35,6 +36,7 @@ local function LoadMap()
         CreateVector2D = Vector,
         C_AddOns = { GetAddOnMetadata = function() return "test" end },
         GetTime = function() return world.now end,
+        GetServerTime = function() return world.serverNow end,
         Menu = { ModifyMenu = function(tag, callback)
             world.menuRegistrations = world.menuRegistrations + 1
             assert(not world.menuModifiers[tag], "register each menu modifier only once")
@@ -45,7 +47,11 @@ local function LoadMap()
             WARRIOR = { r = 0.78, g = 0.61, b = 0.43 },
             MAGE = { r = 0.25, g = 0.78, b = 0.92 },
         },
-        C_Map = { GetMapRectOnMap = function(source, target)
+        C_Map = { GetMapInfo = function(mapID)
+            local name = world.mapNames[mapID]
+            if name then return { name = name } end
+        end,
+        GetMapRectOnMap = function(source, target)
             local rectangle = world.rectangles[source .. ":" .. target]
             if rectangle then return unpack(rectangle) end
         end,
@@ -84,9 +90,12 @@ local function LoadMap()
     function tooltip:Hide() self.shown, self.owner, self.hideCount = false, nil, self.hideCount + 1 end
     function tooltip:IsShown() return self.shown end
     world.tooltip, environment.GameTooltip = tooltip, tooltip
+    environment.GameTooltip_SetDefaultAnchor = function(target, owner)
+        target:SetOwner(owner, "ANCHOR_NONE")
+    end
     world.environment, world.mapAPI = environment, environment.C_Map
     world.notificationErrors = loadNotifications(addon, environment)
-    for _, file in ipairs({ "Core.lua", "Position.lua", "PositionMap.lua" }) do
+    for _, file in ipairs({ "Core.lua", "Position.lua", "Ranking.lua", "PositionMap.lua" }) do
         local chunk = assert(loadfile(file))
         setfenv(chunk, environment)
         chunk("LockInTools", addon)
@@ -96,6 +105,8 @@ local function LoadMap()
     addon.initialized = true
     world.libraryFrames = #world.frames
     function addon:GetSharedPositions() return self.positions end
+    function addon:GetOverviewPlayers() return world.overviewPlayers end
+    function addon:GetPlayerRanking() return { players = world.rankingPlayers } end
     -- Simulate a virtual template retaining its mixin table before map load.
     world.templateMixin = assert(environment.LockInToolsPositionPinMixin)
 
@@ -243,6 +254,11 @@ local function FindPin(testWorld, name)
         if candidate.playerName == name then return candidate end
     end
     error("missing map pin for " .. name)
+end
+
+local function CheckTooltip(tooltip, expected, message)
+    assert(tooltip.title == expected[1] and #tooltip.lines == #expected - 1, message)
+    for index = 2, #expected do assert(tooltip.lines[index - 1].text == expected[index], message) end
 end
 
 local addon, world = LoadMap()
@@ -416,10 +432,12 @@ local function CheckSharedTooltips()
     assert(#shared.positionMapProvider.pins == 3 and alice.provider == shared.positionMapProvider,
         "the provider tracks only its acquired pins for shared tooltips")
     sharedWorld:hover(zed)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 2 and tooltip:IsOwned(zed),
+    assert(tooltip:IsOwned(zed),
         "hovering any coincident dot shows all players in one owned tooltip")
-    assert(tooltip.lines[1].text == "Bob" and tooltip.lines[2].text == "Zed",
-        "shared tooltips contain only alphabetically sorted character names, including offline players")
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest",
+        "#? - Bob", "Lv ? - Awaiting XP", "Elwynn Forest - age unknown",
+        "#? - Zed", "Lv ? - Awaiting XP", "Elwynn Forest" },
+        "overlapping players have alphabetically sorted compact blocks without a count heading or blank lines")
     alice:OnMouseLeave()
     assert(tooltip:IsShown() and tooltip:IsOwned(zed), "another pin's leave callback cannot hide the owned tooltip")
     sharedWorld:leave(zed)
@@ -428,23 +446,26 @@ local function CheckSharedTooltips()
     bob.centerX, bob.centerY = 309, 449
     zed.centerX, zed.centerY = 312, 440
     sharedWorld:hover(alice)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest",
+        "#? - Zed", "Lv ? - Awaiting XP", "Elwynn Forest" },
         "overlap includes touching 12-pixel dots but excludes diagonal hover-rectangle overlap")
     alice.effectiveScale, alice.centerX, alice.centerY = 2, 150, 220
     bob.centerX, bob.centerY = 400, 440
     zed.effectiveScale, zed.centerX, zed.centerY = 0.5, 630, 880
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest",
+        "#? - Zed", "Lv ? - Awaiting XP", "Elwynn Forest" },
         "overlap uses screen-space centers and the sum of differently scaled dot radii")
     alice.effectiveScale, zed.effectiveScale = nil, nil
     for _, candidate in ipairs({ alice, bob, zed }) do candidate.centerX, candidate.centerY = nil, nil end
     alice.x, bob.x, zed.x = 0.2, 0.211, 0.24
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Bob",
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest",
+        "#? - Bob", "Lv ? - Awaiting XP", "Elwynn Forest - age unknown" },
         "rendered map geometry identifies close normalized coordinates")
     sharedWorld.map.zoom = 2
     sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 0,
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest" },
         "zooming separates dots without receiving new position data")
     sharedWorld:leave(alice)
     assert(alice:GetScript("OnUpdate") == nil and not tooltip:IsShown(), "stationary dots do no idle work after hover")
@@ -466,8 +487,81 @@ local function CheckSharedTooltips()
 end
 CheckSharedTooltips()
 
+local function CheckCompactPlayerDetails()
+    local compact, compactWorld = LoadMap()
+    compactWorld:loadNativeMap(true)
+    compactWorld.mapNames[102] = "Duskwood"
+    local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true, stamp = 800 }
+    local player = { id = "alice-realm", name = "Alice-Realm", level = 30,
+        xpState = "known", xp = 420, xpMax = 1000, online = true, sharing = true, map = 102, seenAt = 875 }
+    compact.positions.alice = peer
+    compactWorld.overviewPlayers = { player }
+    for index = 1, 6 do
+        compactWorld.rankingPlayers[index] = { id = "other" .. index .. "-realm",
+            name = "Other" .. index .. "-Realm", rank = index, level = 40,
+            xpState = "known", xp = 500, xpMax = 1000, online = true }
+    end
+    local ranked = {}
+    for key, value in pairs(player) do ranked[key] = value end
+    ranked.rank = 7
+    compactWorld.rankingPlayers[7] = ranked
+    compact:InitializePositionMap()
+    local pin, tooltip = FindPin(compactWorld, peer.name), compactWorld.tooltip
+    compactWorld:hover(pin)
+    CheckTooltip(tooltip, { "#7 - Alice", "Lv 30 - 58% (580 XP)", "Elwynn Forest" },
+        "map tooltip uses the full group ranking, exact missing XP and the pin's current location")
+    assert(tooltip:IsOwned(pin), "compact player details keep native pin ownership")
+
+    player.xp, ranked.xp = 421, 421
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#7 - Alice", "Lv 30 - 57.9% (579 XP)", "Elwynn Forest" },
+        "hover refresh reads new XP without requiring another position sample")
+    player.online, ranked.online, player.xpStale, ranked.xpStale = false, false, true, true
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#7 - Alice", "Lv 30 - 57.9% (579 XP)", "Elwynn Forest - 2m ago" },
+        "offline players retain saved XP and show contact age rather than the older position timestamp")
+
+    player.level, ranked.level, player.xpState, ranked.xpState, ranked.rank = 60, 60, "max", "max", 1
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#1 - Alice", "Elwynn Forest - 2m ago" },
+        "confirmed maximum-level players omit the level and missing-XP line")
+    player.level, player.xpState, player.xp, player.xpMax = 30, "unknown", nil, nil
+    compactWorld.rankingPlayers = {}
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#? - Alice", "Lv 30 - Awaiting XP", "Elwynn Forest - 2m ago" },
+        "missing progress uses the same compact awaiting-XP fallback as the ranking overlay")
+
+    player.sharing = false
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#? - Alice", "Lv 30 - Awaiting XP", "Not sharing - 2m ago" },
+        "a peer who stopped sharing does not expose a cached location")
+    player.sharing, compact.db.position.sharing = true, false
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#? - Alice", "Lv 30 - Awaiting XP", "Position sharing is off - 2m ago" },
+        "disabling local sharing suppresses cached location details in an already-open tooltip")
+    compact.db.position.sharing, player.online = true, true
+    compactWorld.mapAPI.GetMapInfo = nil
+    compactWorld:advance(0.11)
+    CheckTooltip(tooltip, { "#? - Alice", "Lv 30 - Awaiting XP", "Map 101" },
+        "missing native map names fall back safely without showing online contact ages")
+
+    compactWorld.overviewPlayers = {}
+    peer.online = false
+    compact:RefreshPositionPins()
+    compactWorld:advance(0.01)
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Map 101 - 3m ago" },
+        "retained position-only players have a safe compact fallback when roster data is unavailable")
+end
+CheckCompactPlayerDetails()
+
 local function CheckTooltipLifecycle()
     local lifecycle, lifecycleWorld = LoadMap()
+    local anchorOwners = {}
+    lifecycleWorld.environment.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        assert(tooltip == lifecycleWorld.tooltip, "global positioning receives the native map tooltip")
+        anchorOwners[#anchorOwners + 1] = owner
+        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    end
     lifecycleWorld:loadNativeMap(true)
     local peer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true, class = "MAGE" }
     lifecycle.positions.alice = peer
@@ -475,19 +569,28 @@ local function CheckTooltipLifecycle()
     local tooltip = lifecycleWorld.tooltip
     local hovered = FindPin(lifecycleWorld, peer.name)
     lifecycleWorld:hover(hovered)
+    assert(anchorOwners[1] == hovered and tooltip:IsOwned(hovered) and tooltip.anchor == "ANCHOR_CURSOR",
+        "map player hover follows global tooltip positioning")
+    lifecycleWorld:advance(0.11)
+    assert(tooltip:IsOwned(hovered) and tooltip:IsShown() and tooltip.anchor == "ANCHOR_CURSOR",
+        "live overlap refresh preserves the globally positioned tooltip")
     peer.online = false
     lifecycle:RefreshPositionPins()
     assert(not tooltip:IsShown(), "rebuilding releases the previous owned tooltip before native layout")
     lifecycleWorld:advance(0.01)
     hovered = FindPin(lifecycleWorld, peer.name)
-    assert(tooltip:IsShown() and tooltip:IsOwned(hovered) and tooltip.title == "Alice"
-        and #tooltip.lines == 0, "hover survives an offline refresh with only the character name after layout")
+    assert(tooltip:IsShown() and tooltip:IsOwned(hovered), "hover survives an offline refresh after layout")
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest - age unknown" },
+        "restored offline hover keeps the same compact format")
+    assert(#anchorOwners == 2 and anchorOwners[2] == hovered and tooltip.anchor == "ANCHOR_CURSOR",
+        "deferred hover restoration reapplies global tooltip positioning to its current owner")
     peer.online = true
     lifecycle:RefreshPositionPins()
     lifecycleWorld:advance(0.01)
     hovered = FindPin(lifecycleWorld, peer.name)
-    assert(tooltip:IsOwned(hovered) and tooltip.title == "Alice" and #tooltip.lines == 0,
-        "a fresh sample preserves the restored name-only tooltip")
+    assert(tooltip:IsOwned(hovered), "a fresh sample preserves restored tooltip ownership")
+    CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest" },
+        "a fresh sample preserves the compact tooltip and omits contact age for online players")
     CheckDot(hovered, { 0.25, 0.78, 0.92 }, true)
 
     lifecycle:RefreshPositionPins()
@@ -496,9 +599,11 @@ local function CheckTooltipLifecycle()
     tooltip:SetText("Unrelated tooltip")
     tooltip:Show()
     local beforeHide = tooltip.hideCount
+    local beforeAnchor = #anchorOwners
     lifecycleWorld:advance(0.01)
     assert(tooltip:IsOwned(foreignOwner) and tooltip.title == "Unrelated tooltip" and tooltip.hideCount == beforeHide,
         "a deferred hover restoration preserves tooltips opened during native layout")
+    assert(#anchorOwners == beforeAnchor, "cancelled restoration cannot reposition another control's tooltip")
     hovered = FindPin(lifecycleWorld, peer.name)
     assert(hovered:GetScript("OnUpdate") == nil, "a cancelled deferred restoration leaves no idle update")
     tooltip:Hide()
@@ -509,7 +614,7 @@ local function CheckTooltipLifecycle()
         "hiding the map dismisses its owned tooltip and stops stationary hover updates")
     lifecycleWorld.map:show()
     hovered = FindPin(lifecycleWorld, peer.name)
-    assert(not tooltip:IsShown(), "opening the map waits for native hover before showing a player name")
+    assert(not tooltip:IsShown(), "opening the map waits for native hover before showing player details")
     lifecycleWorld:hover(hovered)
     lifecycle.db.position.showPlayerIcons = false
     lifecycle:Notify("POSITION_VISIBILITY_CHANGED")
@@ -756,4 +861,4 @@ Near(projectedMoving.y, 0.56)
 assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
     "projected movement ends at native map coordinates without changing the shared source data")
 
-print("PASS: map attachment/filter, player markers, tooltip ownership, projection, movement and pooled lifecycle")
+print("PASS: map attachment/filter, compact player details, tooltip ownership, projection, movement and pooled lifecycle")

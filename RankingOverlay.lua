@@ -17,7 +17,7 @@ local function Tooltip(panel, widget, title, description)
     if widget.SetMotionScriptsWhileDisabled then widget:SetMotionScriptsWhileDisabled(true) end
     local function Show()
         if not GameTooltip then return end
-        GameTooltip:SetOwner(widget, "ANCHOR_RIGHT")
+        GameTooltip_SetDefaultAnchor(GameTooltip, widget)
         GameTooltip:SetText(type(title) == "function" and title() or title)
         GameTooltip:AddLine(type(description) == "function" and description() or description, 1, 1, 1, true)
         GameTooltip:Show()
@@ -28,52 +28,16 @@ local function Tooltip(panel, widget, title, description)
     return Show
 end
 
-local function Age(stamp)
-    if type(stamp) ~= "number" then return "age unknown" end
-    local seconds = math.max(0, math.floor(GetServerTime() - stamp))
-    if seconds < 60 then return seconds .. "s ago" end
-    if seconds < 3600 then return math.floor(seconds / 60) .. "m ago" end
-    if seconds < 86400 then return math.floor(seconds / 3600) .. "h ago" end
-    return math.floor(seconds / 86400) .. "d ago"
-end
-
-local function Percentage(xp, maximum, roundUp)
-    local tenths = xp * 1000 / maximum
-    tenths = roundUp and math.ceil(tenths) or math.floor(tenths)
+local function Percentage(xp, maximum)
+    local tenths = math.floor(xp * 1000 / maximum)
     return string.format("%.1f", tenths / 10):gsub("%.0$", "") .. "%"
-end
-
-local function LocationName(player)
-    -- Cached coordinates stay private when either side has stopped sharing.
-    if not addon.db.position or not addon.db.position.sharing then return "Position sharing is off" end
-    if player.sharing == false then return "Not sharing" end
-    if not player.map then return "Unknown location" end
-    if C_Map and type(C_Map.GetMapInfo) == "function" then
-        local ok, info = pcall(C_Map.GetMapInfo, player.map)
-        if ok and type(info) == "table" and type(info.name) == "string" then return info.name end
-    end
-    return "Map " .. tostring(player.map)
 end
 
 local function PlayerTooltip(row)
     local player = row.player
-    if not player or not GameTooltip then return end
-    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-    GameTooltip:SetText("#" .. (player.rank or "?") .. " - " .. addon:GetPlayerDisplayName(player.name))
-    if player.xpState ~= "max" then
-        local progress = "Awaiting XP"
-        if player.level and player.xpState == "known" and type(player.xp) == "number"
-            and type(player.xpMax) == "number" and player.xpMax > 0 then
-            local missing = math.max(0, player.xpMax - player.xp)
-            -- Round missing progress up so a pending level never reads as 0% needed.
-            progress = Percentage(missing, player.xpMax, true) .. " (" .. missing .. " XP)"
-        end
-        GameTooltip:AddLine("Lv " .. (player.level or "?") .. " - " .. progress)
-    end
-    local location = LocationName(player)
-    if not player.online and not player.isSelf then location = location .. " - " .. Age(player.seenAt) end
-    GameTooltip:AddLine(location)
-    GameTooltip:Show()
+    if not player then return end
+    -- Use native anchoring on hover and live refresh so global tooltip hooks apply.
+    addon:ShowCompactPlayerTooltip(row, { { player = player } })
 end
 
 local function ClearRowInteractions(row)
@@ -138,12 +102,12 @@ local function CreateRow(panel)
     row.highlight = row:CreateTexture(nil, "BACKGROUND")
     row.highlight:SetAllPoints(row)
     row.rank = Label(row, "", 5, 6, 24, 12, "muted")
-    row.name = Label(row, "", 30, 5, 218, 12)
+    row.name = Label(row, "", 30, 5, 164, 12)
     row.level = Label(row, "", 260, 6, 36, 13)
     row.level:SetJustifyH("RIGHT")
-    row.progress = Label(row, "", 210, 21, 50, 10, "muted")
+    row.progress = Label(row, "", 202, 6, 50, 13, "muted")
     row.progress:SetJustifyH("RIGHT")
-    row.progress:SetHeight(12)
+    row.progress:SetHeight(16)
     row.progressTrack = row:CreateTexture(nil, "BACKGROUND")
     row.progressTrack:SetPoint("TOPLEFT", 30, -26)
     row.progressTrack:SetSize(174, 3)
@@ -200,10 +164,13 @@ local function PaintRow(row, player)
     local maximum = player.level and player.xpState == "max"
     if known or maximum then
         local fraction = maximum and 1 or math.max(0, math.min(1, player.xp / player.xpMax))
-        row.progress:SetPoint("TOPLEFT", 210, -21)
+        -- Match the level's text height and font so both values share a baseline.
+        row.progress:SetPoint("RIGHT", row.level, "LEFT", -8, 0)
+        row.progress:SetFont(row.level:GetFont())
+        row.progress:SetHeight(16)
         row.progress:SetWidth(50)
         row.progress:SetJustifyH("RIGHT")
-        row.progress:SetText((stale and "~" or "") .. (maximum and "MAX" or Percentage(player.xp, player.xpMax)))
+        row.progress:SetText(maximum and "MAX" or Percentage(player.xp, player.xpMax))
         if not player.isSelf then
             if maximum then red, green, blue = 0.68, 0.61, 0.45
             else red, green, blue = 0.40, 0.51, 0.61 end
@@ -216,6 +183,9 @@ local function PaintRow(row, player)
             row.progressFill:Show()
         end
     else
+        local font, _, flags = row.level:GetFont()
+        row.progress:SetFont(font, 10, flags)
+        row.progress:SetHeight(12)
         row.progress:SetPoint("TOPLEFT", 30, -21)
         row.progress:SetWidth(230)
         row.progress:SetJustifyH("LEFT")
@@ -281,10 +251,18 @@ local function CreateOverlay()
         return "Hide this overlay. Reopen it from Settings > Ranking or /lit ranking."
     end)
 
-    panel.header = CreateFrame("Frame", nil, panel)
+    panel.header = CreateFrame("Button", nil, panel)
     panel.header:SetPoint("TOPLEFT", 1, -1)
     panel.header:SetSize(WIDTH - 38, ROW_TOP - 1)
     MakeDraggable(panel, panel.header)
+    panel.header:RegisterForClicks("LeftButtonUp")
+    panel.header:SetScript("OnDoubleClick", function(_, button)
+        -- Keep double-click navigation separate from Shift-drag movement.
+        if button ~= "LeftButton" or IsShiftKeyDown() or panel.moving then return end
+        HideTooltips(panel)
+        if panel.actionMenu then panel.actionMenu:Hide() end
+        addon:OpenOverview()
+    end)
     panel.rows = {}
     for index = 1, VISIBLE_ROWS do
         local row = CreateRow(panel)

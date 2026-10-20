@@ -155,6 +155,10 @@ local function loadAddon(savedVariables, loggedIn)
         GetTime = function() return world.now end,
         Minimap = minimap,
         GameTooltip = tooltip,
+        GameTooltip_SetDefaultAnchor = function(tooltip, parent)
+            tooltip:SetOwner(parent, "ANCHOR_NONE")
+            tooltip.default = 1
+        end,
         GetCursorPosition = function()
             world.cursorReads = world.cursorReads + 1
             return world.cursorX, world.cursorY

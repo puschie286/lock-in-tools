@@ -75,6 +75,50 @@ do
         "ranking visibility never logs group keys")
 end
 
+-- Header double-click navigation stays separate from ordinary clicks and Shift movement.
+do
+    local saved = settings(SECRET, false)
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    local shiftDown = false
+    api.IsShiftKeyDown = function() return shiftDown end
+    world:initialize()
+    loadOverlay(ranking, api)
+    assert(ranking:SetRankingEnabled(true))
+    local panel = ranking.rankingOverlay
+    local header = panel.header
+    assert(header.frameType == "Button" and #header.clicks == 1 and header.clicks[1] == "LeftButtonUp",
+        "the title uses a native button to receive left double clicks")
+    header:Click()
+    header.scripts.OnDoubleClick(header, "RightButton")
+    assert(not ranking.mainPanel, "single clicks and right double clicks leave the main window closed")
+    shiftDown = true
+    header.scripts.OnDoubleClick(header, "LeftButton")
+    assert(not ranking.mainPanel, "Shift double clicks do not open Overview")
+    header.scripts.OnDragStart(header, "LeftButton")
+    shiftDown = false
+    header.scripts.OnDoubleClick(header, "LeftButton")
+    assert(panel.moving and not ranking.mainPanel,
+        "releasing Shift during an active drag does not turn it into Overview navigation")
+    header.scripts.OnDragStop(header)
+    local position = saved.ranking.position
+    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
+    header.scripts.OnDoubleClick(header, "LeftButton")
+    local main, content = ranking.mainPanel, ranking.contentPanel
+    assert(main:IsVisible() and content:IsVisible() and content.selectedTab == "overview"
+        and panel:IsVisible() and saved.ranking.enabled and saved.ranking.position == position
+        and not api.GameTooltip:IsShown(),
+        "double clicking the title opens Overview and clears overlay help while preserving the overlay")
+    main.CloseButton:Click()
+    header.scripts.OnDoubleClick(header, "LeftButton")
+    assert(ranking.mainPanel == main and ranking.contentPanel == content and content:IsVisible(),
+        "a later double click reopens the existing Overview window")
+    ranking:OpenOptions("ranking")
+    header.scripts.OnDoubleClick(header, "LeftButton")
+    header.scripts.OnDoubleClick(header, "LeftButton")
+    assert(content:IsVisible() and not ranking.optionsPanel:IsVisible() and panel:IsVisible(),
+        "double clicks return from Settings to Overview and keep an already open Overview visible")
+end
+
 -- Settings controls apply overlay preferences immediately without changing the active view.
 do
     local saved = settings(SECRET, false)
@@ -126,16 +170,26 @@ do
         "the top five retain tie ranks and a lower local player uses a plain name in its highlighted separate row")
     panel.ownRow:Click("RightButton")
     assert(not panel.actionMenu, "the separate local row cannot allocate or open player actions")
-    assert(panel.rows[1].progress:GetText() == "~MAX" and panel.rows[1].progressTrack:IsShown()
+    assert(panel.rows[1].progress:GetText() == "MAX" and panel.rows[1].progressTrack:IsShown()
         and panel.rows[1].progressFill:IsShown()
         and panel.rows[1].progressFill:GetWidth() == panel.rows[1].progressTrack:GetWidth()
         and panel.rows[2].progress:GetText() == "50%"
         and panel.rows[2].progressTrack:IsShown() and panel.rows[2].progressFill:IsShown()
-        and panel.rows[4].progress:GetText() == "~99.9%",
-        "maximum level is distinct and displayed percentages do not round near-level XP to 100 percent")
+        and panel.rows[4].progress:GetText() == "99.9%"
+        and panel.rows[1].alpha == 0.65 and panel.rows[4].alpha == 0.65,
+        "maximum level and percentages omit stale prefixes while saved rows stay dim and near-level XP stays below 100 percent")
     assert(panel.rows[1]:GetHeight() == 34 and panel.rows[2].point[3] - panel.rows[1].point[3] == -34
-        and panel.rows[1].progressTrack.point[3] == -26 and panel.rows[1].progress.point[3] == -21,
-        "compact rows place the XP bar directly beneath the player name without reserving an empty status line")
+        and panel.rows[1].progressTrack.point[3] == -26
+        and placed(panel.rows[1].progress, panel.rows[1].level, "RIGHT", "LEFT", -8, 0)
+        and placed(panel.rows[2].progress, panel.rows[2].level, "RIGHT", "LEFT", -8, 0)
+        and placed(panel.ownRow.progress, panel.ownRow.level, "RIGHT", "LEFT", -8, 0)
+        and panel.rows[1].progress:GetHeight() == panel.rows[1].level:GetHeight()
+        and panel.rows[2].progress:GetHeight() == panel.rows[2].level:GetHeight()
+        and select(2, panel.rows[1].progress:GetFont()) == select(2, panel.rows[1].level:GetFont())
+        and select(2, panel.rows[2].progress:GetFont()) == select(2, panel.rows[2].level:GetFont())
+        and panel.rows[2].name:GetWidth() == 164
+        and panel.rows[1].progress.justifyH == "RIGHT" and panel.rows[2].progress.justifyH == "RIGHT",
+        "MAX and percentages share the level's text line and font size with space reserved beside player names")
     players[1], own.rank = own, 1
     state.players = { own }
     state.stale, state.awaiting = 0, 0
@@ -143,6 +197,7 @@ do
     assert(panel.rows[1].player == own and panel.rows[1].highlight:IsShown()
         and panel.rows[1].name:GetText() == "Self"
         and panel.rows[1].progress:GetText() == "25%"
+        and placed(panel.rows[1].progress, panel.rows[1].level, "RIGHT", "LEFT", -8, 0)
         and not panel.ownRow:IsShown() and not panel.separator:IsShown()
         and not panel.ownRow.player and panel.ownRow.rank:GetText() == ""
         and not panel.ownRow.highlight:IsShown(),
@@ -163,6 +218,8 @@ do
     assert(panel.ownRow:IsShown() and panel.ownRow.player == own
         and panel.ownRow.progress:GetText() == "Waiting for XP"
         and panel.ownRow.progress.point[3] == -21
+        and panel.ownRow.progress:GetHeight() == 12
+        and panel.ownRow.progress.justifyH == "LEFT"
         and not panel.empty:IsShown() and not panel.separator:IsShown()
         and not panel.ownRow.rank:GetText():find("%d") and not panel.ownRow.progressTrack:IsShown(),
         "missing local XP uses the first row without duplicate empty messages or an invented rank")
@@ -199,14 +256,15 @@ do
     world.now = world.now + 90
     panel.scripts.OnUpdate(panel, 1)
     assert(panel.rows[1].player.id == "alpha-testrealm" and panel.rows[1].rank:GetText() == "1"
-        and panel.rows[1].progress:GetText() == "~40%" and panel.rows[2].player.isSelf
+        and panel.rows[1].progress:GetText() == "40%" and panel.rows[1].alpha == 0.65
+        and panel.rows[2].player.isSelf
         and requests == 0,
         "contact expiry retains saved peer progress without requesting a snapshot")
     assert(ranking:ReceivePlayerStatus("Alpha-TestRealm", {
         level = 24, xp = 400, xpMax = 1000, xpState = "known",
     }, api.GetServerTime(), 2))
-    assert(panel.rows[1].progress:GetText() == "40%",
-        "a fresh valid report clears the stale marker without changing equal progress")
+    assert(panel.rows[1].progress:GetText() == "40%" and panel.rows[1].alpha == 1,
+        "a fresh valid report restores the row brightness without changing its percentage")
     api.UIParent:Hide()
     assert(panel:IsShown() and not panel:IsVisible() and not panel.scripts.OnUpdate,
         "hiding the native interface stops overlay refresh work without changing its preference")
@@ -224,6 +282,12 @@ do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world:initialize()
     loadOverlay(ranking, api)
+    local anchorOwners = {}
+    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        assert(tooltip == api.GameTooltip, "global tooltip positioning receives the native tooltip")
+        anchorOwners[#anchorOwners + 1] = owner
+        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    end
     ranking.db.position.sharing = true
     local own = row("Self", 6, 24, 250, 1000, true)
     local players = {
@@ -257,11 +321,15 @@ do
         and #tooltip.lines == 2 and tooltip.lines[1] == "Lv 30 - 58% (580 XP)"
         and tooltip.lines[2] == "Elwynn Forest" and #lookups == 1,
         "online hover uses the requested rank/name, missing XP and location without a contact age")
+    assert(#anchorOwners == 1 and anchorOwners[1] == first and tooltip.anchor == "ANCHOR_CURSOR",
+        "ranking player tooltips follow the global tooltip positioning hook")
     players[1].xp = 500
     ranking:RefreshRankingOverlay()
     assert(tooltip:IsShown() and tooltip:IsOwned(first) and #tooltip.lines == 2
         and tooltip.lines[1] == "Lv 30 - 50% (500 XP)",
         "hover refreshes missing XP for the same player identity")
+    assert(#anchorOwners == 2 and anchorOwners[2] == first and tooltip.anchor == "ANCHOR_CURSOR",
+        "live refresh preserves global tooltip positioning for the same player")
     players[1].xp, players[1].xpMax = 9999, 10000
     ranking:RefreshRankingOverlay()
     assert(tooltip.lines[1] == "Lv 30 - 0.1% (1 XP)",
@@ -317,10 +385,19 @@ do
         and tooltip.lines[1] == "Lv 24 - Awaiting XP" and tooltip.lines[2] == "Unknown location"
         and #lookups == beforeOwn,
         "unranked local progress is explained with a location but no contact age")
+    assert(anchorOwners[#anchorOwners] == panel.ownRow and tooltip:IsOwned(panel.ownRow)
+        and tooltip.anchor == "ANCHOR_CURSOR", "the separate local row uses global tooltip positioning")
     own.level = nil
     ranking:RefreshRankingOverlay()
     assert(tooltip.lines[1] == "Lv ? - Awaiting XP" and #tooltip.lines == 2,
         "a missing level is shown without inventing an XP value")
+    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
+    panel.ownRow.scripts.OnLeave(panel.ownRow)
+    assert(tooltip:IsShown() and tooltip:IsOwned(panel.CloseButton)
+        and anchorOwners[#anchorOwners] == panel.CloseButton and tooltip.anchor == "ANCHOR_CURSOR",
+        "close-button help follows global positioning and survives another owner's leave callback")
+    panel.CloseButton.scripts.OnLeave(panel.CloseButton)
+    assert(not tooltip:IsShown(), "globally positioned help still dismisses when its owner is left")
     first.scripts.OnEnter(first)
     state.players[1], state.players[2] = state.players[2], state.players[1]
     ranking:RefreshRankingOverlay()

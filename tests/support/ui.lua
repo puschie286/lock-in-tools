@@ -17,9 +17,10 @@ local function loadOptions(uiAddon, uiEnvironment)
             for _, callback in ipairs(widget.hooks[script] or {}) do callback(...) end
         end
     end
-    for _, name in ipairs({ "SetJustifyH", "SetAutoFocus", "SetTextInsets", "SetMotionScriptsWhileDisabled", "Raise" }) do
+    for _, name in ipairs({ "SetAutoFocus", "SetTextInsets", "SetMotionScriptsWhileDisabled", "Raise" }) do
         methods[name] = function() end
     end
+    function methods:SetJustifyH(alignment) self.justifyH = alignment end
     function methods:SetFrameStrata(strata) self.strata = strata end
     function methods:SetClampedToScreen(clamped) self.clamped = clamped end
     function methods:SetMovable(movable) self.movable = movable end
@@ -358,6 +359,7 @@ local function prepareMinimap(environment, world)
         return group
     end
     function methods:SetOwner(owner, anchor) self.owner, self.anchor = owner, anchor end
+    function methods:GetOwner() return self.owner end
     function methods:IsOwned(owner) return self.owner == owner end
     function methods:SetText(text) self.text, self.lines = text, {} end
     function methods:AddLine(text) self.lines[#self.lines + 1] = text end

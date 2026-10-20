@@ -36,6 +36,50 @@ local function ClassColor(class)
     return 0.27, 0.65, 1
 end
 
+local function PlayerID(name)
+    if IsSecret(name) or type(name) ~= "string" or name == "" then return nil end
+    local character, realm = name:match("^([^%-]+)%-(.+)$")
+    if not character then
+        character = name
+        realm = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or nil
+    end
+    if IsSecret(realm) or type(realm) ~= "string" or realm == "" then return nil end
+    return (character .. "-" .. realm:gsub("%s", "")):lower()
+end
+
+local function TooltipPlayers(self)
+    local players = {}
+    local function Add(player)
+        local id = PlayerID(player.id) or PlayerID(player.name)
+        if id then players[id] = player end
+    end
+    -- Use fresh roster data, including characters without usable XP, and the
+    -- complete group ranking rather than the overlay's five visible players.
+    for _, player in ipairs(self:GetOverviewPlayers()) do Add(player) end
+    local ranking = self:GetPlayerRanking()
+    for _, player in ipairs(ranking.players) do Add(player) end
+    if ranking.own then Add(ranking.own) end
+    return players
+end
+
+local function TooltipPlayer(pin, players)
+    local source = players[PlayerID(pin.playerID) or PlayerID(pin.playerName)]
+    local player = {}
+    for key, value in pairs(source or {}) do player[key] = value end
+    local position = pin.positionPeer
+    if not source then
+        player.name, player.online = pin.playerName, pin.online
+        player.seenAt = position and position.stamp
+    end
+    if position then
+        -- Coordinates belong to this pin's source map, not its projected map.
+        -- Keep roster contact/sharing metadata authoritative for stale pins.
+        player.map, player.x, player.y = position.map, position.x, position.y
+        player.positionStamp, player.positionAvailable = position.positionStamp, position.positionAvailable
+    end
+    return player
+end
+
 local function ScreenCircle(pin)
     local x, y = pin:GetCenter()
     local scale = pin:GetEffectiveScale()
@@ -144,8 +188,9 @@ function Pin:OnLoad()
     self:UseFrameLevelType("PIN_FRAME_LEVEL_GROUP_MEMBER")
 end
 
-function Pin:OnAcquired(name, x, y, online, class, motion, provider)
+function Pin:OnAcquired(name, x, y, online, class, motion, provider, playerID, position)
     self.playerName = name
+    self.playerID, self.positionPeer = playerID, position
     self.online = online
     self.provider = provider
     if online == true then
@@ -187,40 +232,36 @@ function Pin:OnUpdate()
             or not GameTooltip:IsShown() then
             self:OnMouseLeave()
         elseif not self.tooltipUpdated or now - self.tooltipUpdated >= TOOLTIP_INTERVAL then
-            self:RefreshTooltip()
+            self:RefreshTooltip(true)
         end
     end
     if not moving and not self.hovered then self:SetScript("OnUpdate", nil) end
 end
 
-function Pin:RefreshTooltip()
-    local players = {}
+function Pin:RefreshTooltip(preserveAnchor)
+    local pins = {}
     for _, pin in ipairs(self.provider.pins) do
-        if pin.playerName and Overlaps(self, pin) then players[#players + 1] = pin end
+        if pin.playerName and Overlaps(self, pin) then pins[#pins + 1] = pin end
     end
     -- Acquisition order follows the peer table; keep tooltip rows stable.
-    table.sort(players, function(first, second)
+    table.sort(pins, function(first, second)
         local a, b = string.lower(first.playerName), string.lower(second.playerName)
         return a == b and first.playerName < second.playerName or a < b
     end)
-    -- Marker shape and color convey freshness; tooltip text contains names only.
-    -- GameTooltip is shared with native unit/map tooltips, so clear their old lines.
-    GameTooltip:ClearLines()
-    local first = players[1] or self
-    GameTooltip:SetText(first:GetDisplayName(), first.red, first.green, first.blue)
-    for index = 2, #players do
-        local pin = players[index]
-        GameTooltip:AddLine(pin:GetDisplayName(), pin.red, pin.green, pin.blue)
+    if #pins == 0 then pins[1] = self end
+    local players = TooltipPlayers(self.provider.addon)
+    local entries = {}
+    for _, pin in ipairs(pins) do
+        entries[#entries + 1] = { player = TooltipPlayer(pin, players),
+            red = pin.red, green = pin.green, blue = pin.blue }
     end
-    GameTooltip:Show()
-    self.tooltipUpdated = GetTime()
+    if addon:ShowCompactPlayerTooltip(self, entries, preserveAnchor) then self.tooltipUpdated = GetTime() end
 end
 
 function Pin:OnMouseEnter()
     -- Native acquisition shows the frame before assigning the peer metadata.
     if not self.playerName or not self.provider or not GameTooltip or not self:GetMap():IsShown() then return end
     self.hovered = true
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     self:RefreshTooltip()
     self:SetScript("OnUpdate", self.OnUpdate)
 end
@@ -241,6 +282,7 @@ function Pin:OnReleased()
     self:SetScript("OnUpdate", nil)
     self.motion = nil
     self.playerName = nil
+    self.playerID, self.positionPeer = nil, nil
     self.online = nil
     self.provider = nil
     self.red, self.green, self.blue = nil, nil, nil
@@ -282,7 +324,7 @@ function Provider:RefreshAllData(fromOnShow)
             if x then
                 local motion = NewMotion(peer, mapID, x, y, previous and previous[sender], now)
                 self.positions[sender] = motion
-                local pin = map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, peer.class, motion, self)
+                local pin = map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, peer.class, motion, self, sender, peer)
                 self.pins[#self.pins + 1] = pin
             end
         end

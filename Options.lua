@@ -58,7 +58,7 @@ local function OptionTooltip(page, widget, title, description)
     if widget.SetMotionScriptsWhileDisabled then widget:SetMotionScriptsWhileDisabled(true) end
     widget:HookScript("OnEnter", function()
         if not GameTooltip then return end
-        GameTooltip:SetOwner(widget, "ANCHOR_RIGHT")
+        GameTooltip_SetDefaultAnchor(GameTooltip, widget)
         GameTooltip:SetText(title)
         local text = type(description) == "function" and description() or description
         GameTooltip:AddLine(text, 1, 1, 1, true)

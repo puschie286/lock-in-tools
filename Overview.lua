@@ -23,8 +23,7 @@ end
 
 local function Location(player)
     if not player.region then return player.sharing == false and "Not sharing" or "No position" end
-    local prefix = player.positionAvailable and player.online and "" or "Last: "
-    return prefix .. player.region
+    return player.region
 end
 
 local function HideTooltip(button)
@@ -39,7 +38,7 @@ end
 local function ProgressTooltip(cell)
     local player = cell.player
     if not player or not GameTooltip then return end
-    GameTooltip:SetOwner(cell, "ANCHOR_RIGHT")
+    GameTooltip_SetDefaultAnchor(GameTooltip, cell)
     GameTooltip:SetText(addon:GetPlayerDisplayName(player.name)
         .. (player.level and " — level " .. player.level or " — level unknown"))
     if KnownXP(player) then
@@ -65,21 +64,21 @@ local function RefreshProgress(row, player)
         local stale = player.xpStale or player.online == false
         if KnownXP(player) then
             local fraction = math.max(0, math.min(1, player.xp / player.xpMax))
-            row.progress:SetText("· " .. (stale and "~" or "") .. math.floor(fraction * 100) .. "%")
+            row.progress:SetText(math.floor(fraction * 100) .. "%")
             row.progress:SetAlpha(stale and 0.55 or 1)
             local red, green, blue = UI:GetAccentColor()
             row.progressTrack:SetColorTexture(red * 0.25, green * 0.25, blue * 0.25, 0.8)
             row.progressFill:SetColorTexture(red, green, blue, stale and 0.35 or 1)
             row.progressTrack:Show()
             if fraction > 0 then
-                row.progressFill:SetWidth(76 * fraction)
+                row.progressFill:SetWidth(row.progressTrack:GetWidth() * fraction)
                 row.progressFill:Show()
             end
         elseif player.xpState == "max" then
-            row.progress:SetText("· " .. (stale and "~" or "") .. "MAX")
+            row.progress:SetText("MAX")
             row.progress:SetAlpha(stale and 0.55 or 1)
         else
-            row.progress:SetText("· —")
+            row.progress:SetText("—")
         end
     end
     if GameTooltip and GameTooltip:IsOwned(cell) and GameTooltip:IsShown() then ProgressTooltip(cell) end
@@ -92,7 +91,7 @@ local function ActionButton(menu, onResult, label, action, y)
     if button.SetMotionScriptsWhileDisabled then button:SetMotionScriptsWhileDisabled(true) end
     button:HookScript("OnEnter", function()
         if not GameTooltip then return end
-        GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+        GameTooltip_SetDefaultAnchor(GameTooltip, button)
         GameTooltip:SetText(button.reason or label)
         GameTooltip:Show()
     end)
@@ -198,8 +197,8 @@ function addon:CreateOverviewPage(panel)
     page.empty = UI:Label(page, "", 13, "muted")
     page.empty:SetPoint("TOPLEFT", 16, -56)
     page.empty:SetSize(626, 50)
-    for _, column in ipairs({ { "Name", "name", 16, 164 }, { "Level", "level", 188, 80 },
-        { "Region", "region", 276, 156 }, { "Last seen", "seen", 440, 88 } }) do
+    for _, column in ipairs({ { "Name", "name", 16, 124 }, { "Level", "level", 148, 80 },
+        { "Region", "region", 236, 196 }, { "Last seen", "seen", 440, 88 } }) do
         local title, key = column[1], column[2]
         local header = UI:Button(page, title)
         header:SetPoint("TOPLEFT", column[3], -12)
@@ -229,9 +228,9 @@ function addon:CreateOverviewPage(panel)
         row:SetSize(626, ROW_HEIGHT)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
-        row.name:SetSize(164, 30)
+        row.name:SetSize(124, 30)
         row.levelCell = CreateFrame("Frame", nil, row)
-        row.levelCell:SetPoint("TOPLEFT", 172, -2)
+        row.levelCell:SetPoint("TOPLEFT", 132, -2)
         row.levelCell:SetSize(80, 36)
         row.levelCell:EnableMouse(true)
         row.levelCell:SetScript("OnEnter", ProgressTooltip)
@@ -242,17 +241,18 @@ function addon:CreateOverviewPage(panel)
         row.level:SetPoint("TOPLEFT", 0, -5)
         row.level:SetWidth(24)
         row.progress = UI:Label(row.levelCell, "", 11)
-        row.progress:SetPoint("TOPLEFT", 24, -5)
-        row.progress:SetWidth(56)
         row.progressTrack = row.levelCell:CreateTexture(nil, "BACKGROUND")
         row.progressTrack:SetPoint("TOPLEFT", 0, -24)
-        row.progressTrack:SetSize(76, 3)
+        row.progressTrack:SetSize(36, 3)
+        row.progress:SetPoint("LEFT", row.level, "RIGHT", 6, 0)
+        row.progress:SetSize(38, 12)
+        row.progress:SetJustifyH("RIGHT")
         row.progressFill = row.levelCell:CreateTexture(nil, "ARTWORK")
         row.progressFill:SetPoint("TOPLEFT", row.progressTrack, "TOPLEFT")
         row.progressFill:SetHeight(3)
         row.position = UI:Label(row, "", 11, "muted")
-        row.position:SetPoint("TOPLEFT", 260, -3)
-        row.position:SetSize(156, 36)
+        row.position:SetPoint("TOPLEFT", 220, -3)
+        row.position:SetSize(196, 36)
         row.seen = UI:Label(row, "", 11, "muted")
         row.seen:SetPoint("TOPLEFT", 424, -3)
         row.seen:SetSize(88, 36)

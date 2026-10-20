@@ -140,4 +140,42 @@ do
         and saved.group.secret == SECRET and not saved.chat.autoJoin)
 end
 
+-- Every settings help path uses the global anchor and retains owner-based cleanup.
+do
+    local addon, api, _, _, world = loadAddon(settings("", false), false)
+    world:initialize()
+    loadOptions(addon, api)
+    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    end
+    addon:OpenOptions("group")
+    local panel, tooltip = addon.optionsPanel, api.GameTooltip
+    panel.groupInfo.scripts.OnEnter(panel.groupInfo)
+    assert(tooltip:IsShown() and tooltip:IsOwned(panel.groupInfo) and tooltip.anchor == "ANCHOR_CURSOR",
+        "Settings help follows the global tooltip position")
+    panel.tabs.chat:Click()
+    assert(not tooltip:IsShown(), "switching settings pages dismisses globally positioned help")
+    assert(not panel.join:IsEnabled(), "a groupless profile has a disabled Join control")
+    for _, widget in ipairs({ panel.autoJoin, panel.autoJoin.labelButton, panel.join }) do
+        widget.scripts.OnEnter(widget)
+        assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
+            "checkboxes, labels and disabled control help share global tooltip positioning")
+        widget.scripts.OnLeave(widget)
+        assert(not tooltip:IsShown(), "leaving each control dismisses its own help")
+    end
+    panel.tabs.restedxp:Click()
+    panel.restedxpBattleTag.scripts.OnEnter(panel.restedxpBattleTag)
+    assert(tooltip:IsOwned(panel.restedxpBattleTag) and tooltip.anchor == "ANCHOR_CURSOR",
+        "RestedXP input help also follows global positioning")
+    addon.mainPanel:Hide()
+    assert(not tooltip:IsShown(), "closing Settings dismisses its globally positioned tooltip")
+    addon:OpenOptions("group")
+    local foreignOwner = {}
+    tooltip:SetOwner(foreignOwner, "ANCHOR_CURSOR")
+    tooltip:Show()
+    addon.mainPanel:Hide()
+    assert(tooltip:IsShown() and tooltip:IsOwned(foreignOwner),
+        "closing Settings preserves a tooltip owned by another control")
+end
+
 print("PASS: Settings group lifecycle, preference callbacks, read-only settings and key privacy")

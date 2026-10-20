@@ -68,6 +68,59 @@ do
     assert(not contains(messages, SECRET), "launcher and display interactions never print the group key")
 end
 
+-- Only the library-rendered tooltip follows global positioning; displays keep ownership.
+do
+    local entry, api, _, _, world = loadAddon(settings(nil, false), false)
+    world:initialize()
+    local button, icons = entry.minimapButton, library(api, "LibDBIcon-1.0")
+    local broker = library(api, "LibDataBroker-1.1"):GetDataObjectByName("LockInTools")
+    local anchorCalls = 0
+    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        anchorCalls = anchorCalls + 1
+        assert(tooltip == icons.tooltip and owner == button and tooltip.point == nil,
+            "the minimap tooltip removes the library anchor and passes its native owner to global positioning")
+        tooltip:SetOwner(owner, "ANCHOR_NONE")
+        tooltip:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 24, -32)
+    end
+    button.scripts.OnEnter(button)
+    assert(anchorCalls == 1 and icons.tooltip:IsShown() and icons.tooltip:IsOwned(button)
+        and icons.tooltip.point[1] == "TOPLEFT" and icons.tooltip.point[2] == api.UIParent
+        and icons.tooltip.point[4] == 24 and icons.tooltip.point[5] == -32,
+        "global tooltip hooks override DBIcon's built-in placement")
+    button.scripts.OnLeave(button)
+    assert(not icons.tooltip:IsShown(), "leaving the minimap button dismisses its anchored tooltip")
+
+    local display = {}
+    api.GameTooltip:SetOwner(display, "ANCHOR_RIGHT")
+    broker.OnTooltipShow(api.GameTooltip)
+    assert(anchorCalls == 1 and api.GameTooltip:IsOwned(display) and api.GameTooltip.anchor == "ANCHOR_RIGHT"
+        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 2,
+        "external broker displays receive content without losing their placement or owner")
+
+    button.scripts.OnEnter(button)
+    button:Hide()
+    assert(not icons.tooltip:IsShown(), "hiding the button dismisses its owned tooltip")
+    button:Show()
+    icons.tooltip:SetOwner(display, "ANCHOR_RIGHT")
+    icons.tooltip:Show()
+    button:Hide()
+    assert(icons.tooltip:IsShown() and icons.tooltip:IsOwned(display),
+        "hiding the button leaves another display's shared tooltip untouched")
+    icons.tooltip:Hide()
+
+    button:Show()
+    button.scripts.OnEnter(button)
+    local beforeDrag = anchorCalls
+    drag(button, world, 1100, 600)
+    button.scripts.OnEnter(button)
+    assert(not icons.tooltip:IsShown() and anchorCalls == beforeDrag,
+        "native drag suppression prevents tooltip positioning and display while dragging")
+    button.scripts.OnDragStop(button)
+    button.scripts.OnEnter(button)
+    assert(icons.tooltip:IsShown() and anchorCalls == beforeDrag + 1,
+        "global positioning resumes after native dragging stops")
+end
+
 -- Native scaled dragging, resize placement, persistence and hidden-button cleanup.
 do
     local entry, api, _, _, world = loadAddon(settings(nil, false), false)
