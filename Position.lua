@@ -1,5 +1,5 @@
 local _, addon = ...
-local INTERVAL, HEARTBEAT_INTERVAL, PEER_TIMEOUT = 2, 15, 60
+local INTERVAL, PEER_TIMEOUT = 2, 60
 local CLASS_REQUEST_LIMIT = 3
 local CLASSES = {
     WARRIOR = true, PALADIN = true, HUNTER = true, ROGUE = true, PRIEST = true,
@@ -19,12 +19,25 @@ local function ClassToken(value)
     if not IsSecret(value) and type(value) == "string" and CLASSES[value] then return value end
 end
 
-local function SenderName(name)
+local function SenderName(name, fallbackRealm)
     if IsSecret(name) or type(name) ~= "string" or name == "" then return nil end
     local character, realm = name:match("^([^%-]+)%-(.+)$")
-    if not character then character, realm = name, GetNormalizedRealmName() end
-    if not realm or realm == "" then return nil end
-    return (character .. "-" .. realm:gsub("%s", "")):lower()
+    if not character then
+        if name:find("-", 1, true) then return nil end
+        character, realm = name, fallbackRealm or GetNormalizedRealmName()
+    end
+    if IsSecret(realm) or type(realm) ~= "string" then return nil end
+    realm = realm:gsub("%s", "")
+    if realm == "" then return nil end
+    return (character .. "-" .. realm):lower()
+end
+
+local function SavedName(name, id)
+    if IsSecret(id) or type(id) ~= "string" then return nil end
+    -- The saved ID owns the realm; login APIs may be unavailable or belong to another realm.
+    local realm = id:match("^[^%-]+%-(.+)$")
+    if not realm or SenderName(id, realm) ~= id or SenderName(name, realm) ~= id then return nil end
+    return name:find("-", 1, true) and name or (name .. "-" .. realm)
 end
 
 local function NativeSelfName()
@@ -72,7 +85,8 @@ local function SavePeer(self, sender)
     local peer = self.positionState.peers[sender]
     if self.db.position.keepLastKnown and peer then
         self.db.position.peers[sender] = {
-            name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp, class = peer.class,
+            name = SavedName(peer.name, sender), map = peer.map, x = peer.x, y = peer.y,
+            stamp = peer.stamp, class = peer.class,
             positionStamp = peer.positionStamp,
         }
     else
@@ -99,7 +113,7 @@ end
 
 local function ResetSendState(self)
     local state = self.positionState
-    state.lastSentSample, state.lastSentAt, state.lastSendSucceeded = nil, nil, nil
+    state.lastSentSample, state.lastSendSucceeded, state.sample = nil, nil, nil
     state.classRequestPending, state.classRequestAttempts = true, 0
 end
 
@@ -116,11 +130,12 @@ function addon:InitializePositions()
     settings.groupFingerprint = fingerprint
     self.positionState = { peers = {}, latest = {}, classes = {}, generation = 0 }
     for sender, peer in pairs(settings.peers) do
-        if type(peer) == "table" and SenderName(peer.name) == sender
+        local name = type(peer) == "table" and SavedName(peer.name, sender)
+        if name
             and Number(peer.map, 1, 1000000, true) and Number(peer.x, 0, 1) and Number(peer.y, 0, 1)
             and Number(peer.stamp, 0, 9999999999, true) then
             self.positionState.peers[sender] = {
-                name = peer.name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp,
+                name = name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp,
                 online = false, class = ClassToken(peer.class),
                 -- Old activity stamps may follow an unavailable-position update.
                 positionStamp = Number(peer.positionStamp, 0, peer.stamp, true) and peer.positionStamp or nil,
@@ -130,6 +145,7 @@ function addon:InitializePositions()
             if ClassToken(peer.class) then
                 self.positionState.classes[sender] = { class = peer.class, stamp = peer.stamp }
             end
+            if not self.savedDataReadOnly then peer.name = name end
         else
             settings.peers[sender] = nil
         end
@@ -262,25 +278,54 @@ local function Sample()
     return map, x, y
 end
 
+local function CurrentSample(self)
+    local state, stamp = self.positionState, GetServerTime()
+    if not state.sample or state.sample.stamp ~= stamp then
+        local map, x, y = Sample()
+        state.sample = {
+            stamp = stamp,
+            value = map and string.format("P|%d|%.5f|%.5f", map, x, y) or "U",
+            snapshot = map and string.format("P,%d,%d,%.5f,%.5f", stamp, map, x, y)
+                or string.format("U,%d", stamp),
+        }
+    end
+    return state.sample
+end
+
+function addon:GetPositionSnapshot()
+    if not Active(self) then return nil end
+    return CurrentSample(self).snapshot
+end
+
+function addon:PositionSnapshotSent(snapshot)
+    if not Active(self) then return end
+    local kind, fields = snapshot:match("^([PU]),%d+(.*)$")
+    local state = self.positionState
+    local changed = state.lastSendSucceeded ~= true
+    state.lastSentSample, state.lastSendSucceeded = kind .. fields:gsub(",", "|"), true
+    if changed then Refresh(self) end
+end
+
+function addon:ReceivePositionSnapshot(sender, snapshot)
+    if IsSecret(snapshot) or type(snapshot) ~= "string" or snapshot:find("|", 1, true)
+        or (snapshot:sub(1, 2) ~= "P," and snapshot:sub(1, 2) ~= "U,") then return false end
+    return self:ReceivePosition(sender, "1|" .. snapshot:gsub(",", "|"))
+end
+
 function addon:PositionTick()
     if not Active(self) then return end
     local changed = ExpirePeers(self)
     local state = self.positionState
     if self:IsDataConnected() then
-        local map, x, y = Sample()
-        local sample = map and string.format("P|%d|%.5f|%.5f", map, x, y) or "U"
-        local now = GetTime()
+        local sample = CurrentSample(self)
         -- Compare serialized coordinates without the ever-changing timestamp.
-        if state.lastSendSucceeded == false or sample ~= state.lastSentSample or not state.lastSentAt
-            or now - state.lastSentAt >= HEARTBEAT_INTERVAL then
-            local stamp = GetServerTime()
-            local payload = map and string.format("1|P|%d|%d|%.5f|%.5f", stamp, map, x, y)
-                or string.format("1|U|%d", stamp)
+        if state.lastSendSucceeded == false or sample.value ~= state.lastSentSample then
+            local payload = "1|" .. sample.snapshot:gsub(",", "|")
             -- Keep only this sample: failed sends retry current data, never a backlog.
             local succeeded = self:SendData("position", payload)
             if state.lastSendSucceeded ~= succeeded then changed = true end
             state.lastSendSucceeded = succeeded
-            if succeeded then state.lastSentSample, state.lastSentAt = sample, now end
+            if succeeded then state.lastSentSample = sample.value end
         end
         RequestClasses(self)
     end
@@ -351,5 +396,5 @@ function addon:GetPositionStatusText(concise)
     if not self:HasGroup() then return "Join a LockInTools group first." end
     if not self:IsDataConnected() then return "On. Waiting for a group connection." end
     if self.positionState.lastSendSucceeded == false then return "On. Group connection unavailable." end
-    return concise and "On." or "On. Movement checks every 2 seconds; idle heartbeat about every 16 seconds."
+    return concise and "On." or "On. Movement checks every 2 seconds; idle refresh with player status."
 end

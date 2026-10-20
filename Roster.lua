@@ -10,13 +10,27 @@ local function Number(value, maximum)
         and value <= maximum and value == math.floor(value)
 end
 
-local function Identity(name)
+local function Identity(name, fallbackRealm)
     if IsSecret(name) or type(name) ~= "string" or name == "" or #name > 128
         or name:find("[|%c]") then return nil end
     local character, realm = name:match("^([^%-]+)%-(.+)$")
-    if not character then character, realm = name, GetNormalizedRealmName() end
+    if not character then
+        if name:find("-", 1, true) then return nil end
+        character, realm = name, fallbackRealm or GetNormalizedRealmName()
+    end
     if IsSecret(realm) or type(realm) ~= "string" or realm == "" then return nil end
-    return (character .. "-" .. realm:gsub("%s", "")):lower()
+    realm = realm:gsub("%s", "")
+    if realm == "" then return nil end
+    return (character .. "-" .. realm):lower()
+end
+
+local function SavedName(name, id)
+    if IsSecret(id) or type(id) ~= "string" then return nil end
+    -- The saved ID owns the realm; login APIs may not be ready or may now refer
+    -- to another character's realm in this account-wide profile.
+    local realm = id:match("^[^%-]+%-(.+)$")
+    if not realm or Identity(id, realm) ~= id or Identity(name, realm) ~= id then return nil end
+    return name:find("-", 1, true) and name or (name .. "-" .. realm)
 end
 
 local function SelfName()
@@ -83,7 +97,7 @@ end
 
 local function SavePeer(self, id, peer)
     if self.savedDataReadOnly then return end
-    self.db.roster.peers[id] = { name = peer.name, level = peer.level, seenAt = peer.seenAt }
+    self.db.roster.peers[id] = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt }
 end
 
 function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
@@ -157,9 +171,11 @@ function addon:InitializeRoster()
     settings.groupFingerprint = fingerprint
     self.rosterState = { peers = {}, progress = {} }
     for id, saved in pairs(settings.peers) do
-        if type(saved) == "table" and Identity(saved.name) == id and Number(saved.seenAt, 9999999999)
+        local name = type(saved) == "table" and SavedName(saved.name, id)
+        if name and Number(saved.seenAt, 9999999999)
             and (saved.level == nil or Number(saved.level, 1000)) then
-            self.rosterState.peers[id] = { name = saved.name, level = saved.level, seenAt = saved.seenAt }
+            self.rosterState.peers[id] = { name = name, level = saved.level, seenAt = saved.seenAt }
+            saved.name = name
         else
             settings.peers[id] = nil
         end

@@ -6,6 +6,96 @@ local contains = fixtures.contains
 local SECRET = fixtures.SECRET
 local OTHER_SECRET = fixtures.OTHER_SECRET
 
+-- Saved peer identities remain usable before the realm APIs return login data.
+do
+    local seed, _, _, seedEvent = loadAddon(settings(nil, false), false)
+    seedEvent("ADDON_LOADED", "LockInTools")
+    local fingerprint = seed:GetGroupFingerprint()
+    local stamp = 1999999800
+    local expected = { "rosteronly-testrealm", "shared-testrealm", "qualified-remoterealm",
+        "positiononly-testrealm", "self-pastrealm" }
+    for _, scenario in ipairs({
+        { realm = false, loginRealm = "TestRealm", label = "unavailable realm" },
+        { realm = "", loginRealm = "TestRealm", label = "empty realm" },
+        { realm = "OtherRealm", loginRealm = "OtherRealm", label = "another current realm" },
+    }) do
+        local profile = settings(nil, false)
+        profile.roster = { groupFingerprint = fingerprint, peers = {
+            ["rosteronly-testrealm"] = { name = "RosterOnly", level = 21, seenAt = stamp },
+            ["shared-testrealm"] = { name = "Shared", level = 32, seenAt = stamp },
+            ["qualified-remoterealm"] = { name = "Qualified-Remote Realm", level = 43, seenAt = stamp },
+            ["self-pastrealm"] = { name = "Self", level = 54, seenAt = stamp },
+        } }
+        profile.position = { sharing = true, keepLastKnown = true, groupFingerprint = fingerprint, peers = {
+            ["shared-testrealm"] = { name = "Shared", map = 37, x = 0.2, y = 0.3,
+                stamp = stamp, positionStamp = stamp - 10, class = "HUNTER" },
+            ["positiononly-testrealm"] = { name = "PositionOnly", map = 37, x = 0.4, y = 0.5,
+                stamp = stamp, positionStamp = stamp - 20, class = "MAGE" },
+            ["qualified-remoterealm"] = { name = "Qualified-Remote Realm", map = 37, x = 0.8, y = 0.9,
+                stamp = stamp, positionStamp = stamp - 30, class = "PRIEST" },
+            ["self-pastrealm"] = { name = "Self", map = 37, x = 0.6, y = 0.7, stamp = stamp },
+        } }
+        for reload = 1, 2 do
+            local restored, environment, _, event, world = loadAddon(profile, false)
+            local realm = scenario.realm or nil
+            environment.GetNormalizedRealmName = function() return realm end
+            environment.UnitFullName = function(unit)
+                assert(unit == "player")
+                return "Self", realm
+            end
+            event("ADDON_LOADED", "LockInTools")
+            assert(restored.rosterState.peers["rosteronly-testrealm"]
+                and restored.rosterState.peers["shared-testrealm"]
+                and restored.rosterState.peers["qualified-remoterealm"]
+                and restored.rosterState.peers["self-pastrealm"],
+                scenario.label .. ": ADDON_LOADED retains roster history on reload " .. reload)
+            assert(restored.positionState.peers["shared-testrealm"]
+                and restored.positionState.peers["positiononly-testrealm"]
+                and restored.positionState.peers["qualified-remoterealm"]
+                and restored.positionState.peers["self-pastrealm"],
+                scenario.label .. ": ADDON_LOADED retains saved positions on reload " .. reload)
+            realm = scenario.loginRealm
+            event("PLAYER_LOGIN")
+            local function CheckOverview()
+                local rows, byID = restored:GetOverviewPlayers(), {}
+                for _, row in ipairs(rows) do byID[row.id] = row end
+                assert(#rows == #expected + 1 and byID[("Self-" .. realm):lower()].isSelf,
+                    scenario.label .. ": login restores every historical peer alongside the current character")
+                for _, id in ipairs(expected) do
+                    local row = assert(byID[id], scenario.label .. ": missing retained peer " .. id)
+                    assert(not row.online and not row.isSelf and row.xpState == "unavailable",
+                        "restored history stays offline without inventing live progress")
+                    assert(row.name:lower():gsub("%s", "") == id,
+                        "restored peer names retain their saved realm for self filtering")
+                end
+                assert(byID["rosteronly-testrealm"].level == 21 and not byID["rosteronly-testrealm"].map
+                    and byID["qualified-remoterealm"].level == 43 and byID["qualified-remoterealm"].x == 0.8,
+                    "bare and qualified roster-only history preserve levels")
+                assert(byID["shared-testrealm"].level == 32 and byID["shared-testrealm"].x == 0.2
+                    and byID["shared-testrealm"].positionStamp == stamp - 10
+                    and byID["positiononly-testrealm"].x == 0.4
+                    and byID["positiononly-testrealm"].positionStamp == stamp - 20
+                    and not byID["positiononly-testrealm"].positionAvailable,
+                    "merged and position-only history preserve coordinates and their actual age")
+                assert(restored:GetSharedPositions()["shared-testrealm"].class == "HUNTER"
+                    and restored:GetSharedPositions()["positiononly-testrealm"].class == "MAGE",
+                    "restored positions retain saved classes")
+            end
+            CheckOverview()
+            world:completeJoin(restored:GetGroupDataChannelName(), 7)
+            CheckOverview()
+            environment.SlashCmdList.LOCKINTOOLS("data leave")
+            world:advance(1)
+            world:completeJoin(restored:GetGroupDataChannelName(), 14)
+            world:advance(90)
+            CheckOverview()
+            assert(#world.rosterSends == 0, "history restoration needs no roster discovery packets")
+            event("PLAYER_LOGOUT")
+            profile = restored.db
+        end
+    end
+end
+
 -- Production startup connects shared data independently of human chat and position preferences.
 do
     local connected, connectedEnvironment, connectedMessages, connectedEvent, connectedWorld =

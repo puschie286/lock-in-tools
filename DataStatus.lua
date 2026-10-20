@@ -3,6 +3,7 @@ local _, addon = ...
 -- Complete player-status snapshots on change and periodic presence refreshes.
 local STATUS_INTERVAL, STATUS_REFRESH_INTERVAL = 5, 30
 local MAX_STATUS_REVISION, MAX_STATUS_STAMP = 999999999, 9999999999
+local POSITION_FIELD_ID, MAX_STATUS_PAYLOAD = 9, 255 - #"1|status|"
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
@@ -30,7 +31,7 @@ local function StatusField(name)
 end
 
 -- Permanent wire registry. Add fields with new IDs; never renumber or reuse an
--- ID. Keep retired entries with false in place of their former Lua field name.
+-- ID. False reserves an attachment ID or a retired provider field.
 local STATUS_FIELD_REGISTRY = {
     { 1, "level" },
     { 2, "xp" },
@@ -40,6 +41,7 @@ local STATUS_FIELD_REGISTRY = {
     { 6, "canInvite" },
     { 7, "partyFull" },
     { 8, "sharing" },
+    { POSITION_FIELD_ID, false }, -- Position is independent of status revisions.
 }
 local STATUS_FIELD_NAMES, STATUS_FIELD_IDS, STATUS_FIELD_ORDER = {}, {}, {}
 for _, field in ipairs(STATUS_FIELD_REGISTRY) do
@@ -111,6 +113,8 @@ local function DecodeStatus(payload)
             message.fields[id] = value
         end
     end
+    message.position = message.fields[POSITION_FIELD_ID]
+    message.fields[POSITION_FIELD_ID] = nil
     return message
 end
 
@@ -173,7 +177,7 @@ local function CurrentStatus(self)
     return status.current, status.revision
 end
 
-local function EncodeStatus(self, fields, revision)
+local function EncodeStatus(self, fields, revision, budget)
     local status = self.dataState.status
     local stamp = GetServerTime()
     if IsSecret(stamp) or type(stamp) ~= "number" or stamp ~= stamp or stamp < 0
@@ -186,7 +190,20 @@ local function EncodeStatus(self, fields, revision)
         local value = name and fields[name]
         if value ~= nil and name then encoded[#encoded + 1] = id .. "=" .. EscapeStatus(value) end
     end
-    return "3|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
+    local payload = "3|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
+    -- Sample only when a status packet is already due. Movement must not make
+    -- player status dirty or change the contents associated with its revision.
+    local position = self.GetPositionSnapshot and self:GetPositionSnapshot()
+    if position then
+        local attachment = (#encoded > 0 and "|" or "") .. POSITION_FIELD_ID .. "=" .. EscapeStatus(position)
+        if #payload + #attachment <= (budget or MAX_STATUS_PAYLOAD) then
+            payload = payload .. attachment
+        else
+            -- A long targeted reply can still supply its complete player status.
+            position = nil
+        end
+    end
+    return payload, position
 end
 
 local function ProcessStatus(self, sender, message, requested)
@@ -221,6 +238,9 @@ local function ProcessStatus(self, sender, message, requested)
     for _, name in ipairs(status.providerNames) do
         local provider = status.providers[name]
         pcall(provider.receive, sender, NamedStatus(message.fields), message.stamp, message.revision, CopyStatus(metadata))
+    end
+    if message.position and self.ReceivePositionSnapshot then
+        self:ReceivePositionSnapshot(sender, message.position)
     end
     return true
 end
@@ -282,7 +302,7 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
             ProcessStatus(self, sender, message, true)
             local fields, revision = CurrentStatus(self)
             if fields == nil then return nil end
-            local response = EncodeStatus(self, fields, revision)
+            local response = EncodeStatus(self, fields, revision, budget)
             if response and #response <= budget then return response end
             -- Replies do not replace the public snapshot or postpone its refresh.
         end, function(sender, payload)
@@ -311,13 +331,14 @@ function addon:DataStatusTick()
     local sent = false
     if fields ~= nil and self:IsDataConnected() and (status.requestNeeded or revision ~= status.lastSentRevision
         or (status.lastBroadcastAt and now - status.lastBroadcastAt >= STATUS_REFRESH_INTERVAL)) then
-        local payload = EncodeStatus(self, fields, revision)
+        local payload, position = EncodeStatus(self, fields, revision)
         if payload then
             status.lastAttemptAt = now
             if status.requestNeeded then sent = self:RequestData("status", payload)
             else sent = self:SendData("status", payload) end
             if sent then
                 status.requestNeeded, status.lastSentRevision, status.lastBroadcastAt = false, revision, now
+                if position then self:PositionSnapshotSent(position) end
             end
         end
     end

@@ -10,7 +10,7 @@ Clients share level, XP, party availability and the position-sharing preference 
 
 Discovery uses the [group connection](group.md#shared-data-pipeline), independently of shared chat and [position sharing](position-sharing.md). Position sharing starts off; Overview does not enable it. When sharing settings allow positions, Overview shows the region without coordinates or a location age. A retained region is marked **Last:** when the current position is unavailable.
 
-Discovered characters remain saved account-wide for the current group. Reloaded entries start inactive; changing or leaving the group clears them. **Last seen** shows **Active** during recent addon contact, or an elapsed time such as **3m ago** when contact expires. This does not confirm a logout, and unknown information stays visibly unknown.
+Discovered characters remain saved account-wide for the current group. After reload or re-login, entries start inactive; changing or leaving the group clears them. **Last seen** shows **Active** during recent addon contact, or an elapsed time such as **3m ago** when contact expires. This does not confirm a logout, and unknown information stays visibly unknown.
 
 ## Party actions and limits
 
@@ -23,5 +23,5 @@ The roster is a list of locally discovered characters, not every key holder. Dis
 - Open Overview directly, switch to Settings and back to Content in the same window, and check that Settings retains its selected page and the window stays in place.
 - With two clients sharing a key, check discovery, XP gains and party actions while chat and position sharing are off. Check level-up resets, exact-XP tooltips, zero/unknown/MAX states and both interface themes. Then enable positions and check region names without coordinates or ages.
 - Stay at unchanged XP, then reconnect or reload; check that periodic refreshes keep players **Active**, loss of contact shows an elapsed time and retained progress, and reconnecting refreshes the snapshot. Delivery, level-cap detection and rendering require in-game validation.
-- With more than eight players, check wheel and scrollbar navigation, fixed headers and both sort directions. Check retained inactive players after reload and roster clearing after a group change.
+- With more than eight players, check wheel and scrollbar navigation, fixed headers and both sort directions. Check retained inactive players after reload, re-login and character changes, and roster clearing after a group change.
 - Check the Actions dropdown, disabled reasons and native confirmations with eligible and unavailable players. Check dismissal on scrolling, sorting, outside clicks, Escape and window close. Actual delivery, native eligibility and rendering remain unvalidated.

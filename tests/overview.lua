@@ -28,7 +28,7 @@ local function equal(left, right)
     return true
 end
 
-local function newAddon(saved, readOnly, name)
+local function newAddon(saved, readOnly, name, configure)
     local world = {
         now = 0, epoch = 2000000000, name = name or "Self", level = 24, xp = 420, xpMax = 1000, maxLevel = 60,
         fingerprint = "first-group", connected = false, timers = {}, frames = {},
@@ -138,6 +138,7 @@ local function newAddon(saved, readOnly, name)
         world.requests[#world.requests + 1] = { at = world.now, payload = payload }
         return world.connected
     end
+    if configure then configure(environment) end
     loadModule("Roster.lua", addon, environment)
     addon:InitializeRoster()
     function world:connect()
@@ -310,6 +311,56 @@ do
     mismatched.roster.groupFingerprint = "other-group"
     local _, mismatchClock = newAddon(mismatched)
     assert(mismatchClock:find("friend-testrealm") == nil, "Saved metadata is scoped to its group")
+end
+
+-- Legacy bare names restore from their saved realm even before login APIs are ready.
+do
+    local source, clock = newAddon()
+    clock:login(); clock:connect()
+    assert(clock:peer("Friend", 31, true, true, false, false))
+    assert(source.db.roster.peers["friend-testrealm"].name == "Friend-testrealm",
+        "New roster history must save a realm-qualified name")
+    local legacy = copy(source.db)
+    legacy.roster.peers["friend-testrealm"].name = "Friend"
+    legacy.roster.peers["qualified-testrealm"] = { name = "Qualified-Test Realm", level = 19, seenAt = clock.epoch }
+    for _, realm in ipairs({ false, "", "OtherRealm" }) do
+        local profile = copy(legacy)
+        local restored, world = newAddon(profile, false, nil, function(environment)
+            environment.GetNormalizedRealmName = function() return realm or nil end
+        end)
+        assert(restored.rosterState.peers["friend-testrealm"], "Startup must not discard bare saved names")
+        world.environment.GetNormalizedRealmName = function() return "TestRealm" end
+        world:login(); world:connect(); world:advance(120)
+        local friend = assert(world:find("friend-testrealm"))
+        assert(not friend.online and friend.level == 31 and friend.seenAt == clock.epoch
+            and friend.name == "Friend-testrealm" and friend.xpState == "unavailable",
+            "Restored offline players retain their identity and metadata without fresh reports")
+        assert(world:find("qualified-testrealm").name == "Qualified-Test Realm",
+            "Already qualified names retain their spelling")
+        assert(profile.roster.peers["friend-testrealm"].name == "Friend-testrealm",
+            "Writable legacy history is upgraded to a realm-qualified name")
+        local _, again = newAddon(copy(profile))
+        again:login()
+        assert(again:find("friend-testrealm") and not again:find("friend-testrealm").online,
+            "Upgraded history survives another reload")
+    end
+end
+
+-- A saved realm cannot legitimize a mismatched or malformed player identity.
+do
+    local profile = { group = { secret = "otter-4827" }, roster = { groupFingerprint = "first-group", peers = {
+        ["friend-testrealm"] = { name = "Other", seenAt = 2000000000 },
+        ["qualified-testrealm"] = { name = "Qualified-OtherRealm", seenAt = 2000000000 },
+        ["bad|name-testrealm"] = { name = "Bad|Name", seenAt = 2000000000 },
+        ["missingrealm"] = { name = "Missingrealm", seenAt = 2000000000 },
+        [1] = { name = "Numeric", seenAt = 2000000000 },
+        ["invalid-testrealm"] = { name = "Invalid", seenAt = "yesterday" },
+    } } }
+    local restored = newAddon(profile, false, nil, function(environment)
+        environment.GetNormalizedRealmName = function() error("Restore must use the saved realm") end
+    end)
+    assert(next(restored.rosterState.peers) == nil and next(profile.roster.peers) == nil,
+        "Invalid identities and metadata must still be rejected without consulting the current realm")
 end
 
 -- Party actions are explicit native requests and recheck eligibility at click time.

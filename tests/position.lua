@@ -28,7 +28,7 @@ local function equal(left, right)
     return true
 end
 
-local function newAddon(saved, readOnly)
+local function newAddon(saved, readOnly, prepare)
     local world = {
         now = 0, epoch = 2000000000, timers = {}, messages = {}, name = "Self",
         map = 37, x = 0.25, y = 0.75, samples = 0, refreshes = 0, sent = {},
@@ -127,6 +127,7 @@ local function newAddon(saved, readOnly)
     for _, file in ipairs({ "Crypto.lua", "Group.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua" }) do
         loadModule(file, addon, environment)
     end
+    if prepare then prepare(world, addon, environment) end
     addon:InitializeGroup()
     addon:InitializeData()
     addon:InitializePositions()
@@ -406,6 +407,89 @@ assert(reloaded.db.position.peers["friend-testrealm"] and not reloaded.db.positi
 reloaded:SetPositionSharing(true)
 assert(reloaded:GetSharedPositions()["friend-testrealm"].x == retainedX)
 
+-- Saved identities restore independently of login realm information and remain qualified on future reloads.
+do
+    local retained, clock = newAddon()
+    clock:login()
+    retained:SetPositionSharing(true)
+    assert(retained:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
+    assert(retained:ReceivePosition("Friend", "1|C|2000000000|MAGE"))
+    assert(retained:GetSharedPositions()["friend-testrealm"].name == "Friend"
+        and retained.db.position.peers["friend-testrealm"].name == "Friend-testrealm",
+        "New retained saves qualify bare senders without changing live display names")
+    local legacy = copy(retained.db)
+    legacy.position.peers["friend-testrealm"].name = "Friend"
+    legacy.position.peers["self-otherrealm"] = {
+        name = "Self", map = 38, x = 0.1, y = 0.2, stamp = clock.epoch + 10,
+        class = "DRUID", positionStamp = clock.epoch + 5,
+    }
+    legacy.position.peers["qualified-otherrealm"] = {
+        name = "Qualified-Other Realm", map = 39, x = 0.4, y = 0.6,
+        stamp = clock.epoch + 20, positionStamp = clock.epoch + 15,
+    }
+    for _, startupRealm in ipairs({ false, "", "DifferentRealm" }) do
+        local restored, restoredClock = newAddon(copy(legacy), false, function(_, _, environment)
+            environment.GetNormalizedRealmName = function() return startupRealm or nil end
+        end)
+        local restoredPeer = assert(restored.positionState.peers["friend-testrealm"])
+        assert(restoredPeer.name == "Friend-testrealm" and restoredPeer.map == 37
+            and restoredPeer.x == 0.3 and restoredPeer.y == 0.7 and restoredPeer.stamp == clock.epoch
+            and restoredPeer.positionStamp == clock.epoch and restoredPeer.class == "MAGE"
+            and restoredPeer.online == false and restoredPeer.positionAvailable == false,
+            "Legacy positions restore with their saved identity, coordinates, ages and class before login")
+        assert(restored.positionState.latest["friend-testrealm"] == clock.epoch
+            and restored.positionState.classes["friend-testrealm"].class == "MAGE"
+            and restored.positionState.peers["self-otherrealm"].name == "Self-otherrealm"
+            and restored.positionState.peers["qualified-otherrealm"].name == "Qualified-Other Realm",
+            "Saved realms disambiguate names across realms while preserving qualified display spelling")
+        assert(restored.db.position.peers["friend-testrealm"].name == "Friend-testrealm"
+            and restored.db.position.peers["self-otherrealm"].name == "Self-otherrealm",
+            "Writable legacy saves gain qualified names without changing their canonical keys")
+        restoredClock.environment.GetNormalizedRealmName = function() return "TestRealm" end
+        restoredClock:login()
+        restoredClock:advance(120)
+        assert(restored:GetSharedPositions()["friend-testrealm"] == restoredPeer
+            and restored:GetSharedPositions()["self-otherrealm"].online == false,
+            "Restored offline players remain available after login and expiry checks")
+        local again, againClock = newAddon(copy(restored.db), false, function(_, _, environment)
+            environment.GetNormalizedRealmName = function() return nil end
+        end)
+        againClock.environment.GetNormalizedRealmName = function() return "AnotherRealm" end
+        againClock:login()
+        assert(again:GetSharedPositions()["friend-testrealm"].name == "Friend-testrealm"
+            and again:GetSharedPositions()["self-otherrealm"].name == "Self-otherrealm"
+            and again:GetSharedPositions()["qualified-otherrealm"].x == 0.4,
+            "A second reload keeps all qualified retained identities even on another realm")
+    end
+
+    for _, invalid in ipairs({
+        { "friend-testrealm", "Other" }, { "friend-testrealm", "Friend-OtherRealm" },
+        { "Friend-testrealm", "Friend" }, { "friend-TestRealm", "Friend" },
+        { "friend-test realm", "Friend" }, { "friend", "Friend" },
+        { "friend-", "Friend" }, { "friend-testrealm", "Friend-" },
+        { "friend-testrealm", false }, { "friend-testrealm", 12 },
+        { 12, "Friend" },
+    }) do
+        local profile = copy(legacy)
+        local peer = copy(profile.position.peers["friend-testrealm"])
+        peer.name = invalid[2]
+        profile.position.peers = { [invalid[1]] = peer }
+        local rejected = newAddon(profile)
+        assert(next(rejected.positionState.peers) == nil and next(profile.position.peers) == nil,
+            "Malformed or mismatching saved names and canonical IDs cannot invent a retained identity")
+    end
+
+    local readOnlyProfile = copy(legacy)
+    local before = copy(readOnlyProfile)
+    local readOnly, readOnlyClock = newAddon(readOnlyProfile, true, function(_, _, environment)
+        environment.GetNormalizedRealmName = function() return nil end
+    end)
+    readOnlyClock.environment.GetNormalizedRealmName = function() return "TestRealm" end
+    readOnlyClock:login()
+    assert(equal(readOnlyProfile, before) and next(readOnly:GetSharedPositions()) == nil,
+        "Legacy restoration never rewrites newer-schema read-only data or bypasses its sharing gate")
+end
+
 -- Disabling retention clears persisted locations and removes runtime positions after 60 seconds.
 addon, world = newAddon()
 world:login()
@@ -480,7 +564,7 @@ world:login()
 world:advance(20)
 assert(invalid.group.secret == "invalid group!" and #world.sent == 0 and next(addon:GetSharedPositions()) == nil)
 
--- Unchanged serialized coordinates are suppressed; heartbeats carry fresh timestamps.
+-- Unchanged serialized coordinates stay suppressed; only movement sends separate packets.
 do
     local stationary, clock = newAddon()
     clock:login()
@@ -491,37 +575,33 @@ do
     clock:advance(15)
     assert(#clock.sent == 1, "Stationary players do not send every sample")
     clock:advance(1)
-    assert(#clock.sent == 2 and clock.sent[2].at - clock.sent[1].at == 16)
-    assert(tonumber(fields(clock.sent[2].payload)[3]) - tonumber(fields(clock.sent[1].payload)[3]) == 16,
-        "The 15-second heartbeat is due on the next two-second tick and has a fresh timestamp")
+    assert(#clock.sent == 1, "Position has no separate idle heartbeat")
     clock.x = 0.2500001
     clock:advance(2)
-    assert(#clock.sent == 2, "Changes smaller than the transmitted precision remain suppressed")
+    assert(#clock.sent == 1, "Changes smaller than the transmitted precision remain suppressed")
     clock.x = 0.25002
     clock:advance(2)
-    assert(#clock.sent == 3 and tonumber(fields(clock.sent[3].payload)[5]) == 0.25002)
+    assert(#clock.sent == 2 and tonumber(fields(clock.sent[2].payload)[5]) == 0.25002)
     clock.map = 38
     clock:advance(2)
-    assert(#clock.sent == 4 and tonumber(fields(clock.sent[4].payload)[4]) == 38,
+    assert(#clock.sent == 3 and tonumber(fields(clock.sent[3].payload)[4]) == 38,
         "Changing map must send even when coordinates match")
-    clock:advance(14)
-    assert(#clock.sent == 4, "Movement resets the heartbeat deadline")
-    clock:advance(2)
-    assert(#clock.sent == 5)
+    clock:advance(60)
+    assert(#clock.sent == 3, "Stationary samples remain suppressed beyond the peer timeout")
     clock.y = 0.6
     clock:advance(2)
-    assert(#clock.sent == 6 and tonumber(fields(clock.sent[6].payload)[6]) == 0.6)
+    assert(#clock.sent == 4 and tonumber(fields(clock.sent[4].payload)[6]) == 0.6)
 
     stationary:SetPositionSharing(false)
     stationary:SetPositionSharing(true)
     clock:advance(2)
-    assert(#clock.sent == 7, "Re-enabling sharing announces the current location without waiting for a heartbeat")
+    assert(#clock.sent == 5, "Re-enabling sharing announces the current location on the next sample")
     clock:connect()
     clock:advance(2)
-    assert(#clock.sent == 8, "A replacement connection must not inherit suppression from the old one")
+    assert(#clock.sent == 6, "A replacement connection must not inherit suppression from the old one")
 end
 
--- Unavailable data is also deduplicated and heartbeated; recovery sends at the next sample.
+-- Unavailable data is also deduplicated; recovery sends at the next sample.
 do
     local unavailable, clock = newAddon()
     clock:login()
@@ -531,14 +611,11 @@ do
     clock.map = nil
     clock:advance(2)
     assert(#clock.sent == 2 and fields(clock.sent[2].payload)[2] == "U")
-    clock:advance(14)
-    assert(#clock.sent == 2, "Repeated unavailable samples are suppressed before the heartbeat")
-    clock:advance(2)
-    assert(#clock.sent == 3 and fields(clock.sent[3].payload)[2] == "U"
-        and clock.sent[3].at - clock.sent[2].at == 16)
+    clock:advance(60)
+    assert(#clock.sent == 2, "Repeated unavailable samples have no separate heartbeat")
     clock.map = 37
     clock:advance(2)
-    assert(#clock.sent == 4 and fields(clock.sent[4].payload)[2] == "P",
+    assert(#clock.sent == 3 and fields(clock.sent[3].payload)[2] == "P",
         "Valid coordinates resume immediately even when they match the last known position")
 end
 
@@ -564,11 +641,8 @@ do
     clock:advance(2)
     assert(#attempts == 5 and tonumber(fields(attempts[5].payload)[5]) == 0.9)
     assert(not retrying:GetPositionStatusText():find("unavailable", 1, true))
-    clock:advance(14)
-    assert(#attempts == 5)
-    clock:advance(2)
-    assert(#attempts == 6 and attempts[6].at - attempts[5].at == 16,
-        "Only the successful retry starts a new heartbeat interval")
+    clock:advance(60)
+    assert(#attempts == 5, "A successful retry suppresses further unchanged samples")
 end
 
 -- Each player times out independently; retained coordinates survive offline classification.
@@ -615,22 +689,22 @@ do
         "Offline retained coordinates survive beyond the timeout")
 end
 
--- Stationary heartbeats keep live-only pins alive beyond 60 seconds in total.
+-- Status-position refreshes keep stationary live-only pins alive beyond 60 seconds in total.
 do
     local live, clock = newAddon()
     clock:login()
     live:SetPositionSharing(true)
     live:SetPositionRetention(false)
     assert(live:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
-    for _ = 1, 5 do
-        clock:advance(16)
-        assert(live:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
+    for _ = 1, 3 do
+        clock:advance(30)
+        assert(live:ReceivePositionSnapshot("Friend", "P," .. tostring(clock.epoch + clock.now) .. ",37,0.30000,0.70000"))
         assert(live:GetSharedPositions()["friend-testrealm"].online == true)
     end
     clock:advance(59)
     assert(live:GetSharedPositions()["friend-testrealm"])
     clock:advance(1)
-    assert(next(live:GetSharedPositions()) == nil, "Live-only pins disappear after 60 seconds without a heartbeat")
+    assert(next(live:GetSharedPositions()) == nil, "Live-only pins disappear after 60 seconds without movement or a status refresh")
 end
 
 -- Native regional full names supplement legacy self detection without changing peer keys.
@@ -699,7 +773,7 @@ do
     assert(display:ReceivePosition("Friend", classPacket(clock, "DRUID")))
     assert(display:ReceivePosition("Friend", clock:position(37, 0.3, 0.7)))
     local state, timer = display.positionState, display.positionState.timer
-    local sentSample, sentAt = state.lastSentSample, state.lastSentAt
+    local sentSample, sample = state.lastSentSample, state.sample
     local generation, optionsRefreshes = state.generation, 0
     function display:RefreshOptions() optionsRefreshes = optionsRefreshes + 1 end
     local refreshes = clock.refreshes
@@ -707,7 +781,7 @@ do
     assert(display:GetShowPlayerIcons() == false and clock.refreshes == refreshes + 1 and optionsRefreshes == 0)
     assert(display.db.position.sharing == true and display.db.position.keepLastKnown == true
         and display:IsDataConnected() and state.timer == timer and state.generation == generation
-        and state.lastSentSample == sentSample and state.lastSentAt == sentAt and state.lastSendSucceeded == true
+        and state.lastSentSample == sentSample and state.sample == sample and state.lastSendSucceeded == true
         and state.classRequestPending == false and state.classRequestAttempts == 1,
         "Hiding icons must only refresh map pins, preserving transport, timers and send/discovery state")
     clock:advance(2)
@@ -732,10 +806,10 @@ do
     assert(requests == 1)
     local sent, samples = #clock.sent, clock.samples
     timer, generation = state.timer, state.generation
-    sentSample, sentAt = state.lastSentSample, state.lastSentAt
+    sentSample, sample = state.lastSentSample, state.sample
     assert(display:SetShowPlayerIcons(true))
     assert(state.timer == timer and state.generation == generation and state.lastSentSample == sentSample
-        and state.lastSentAt == sentAt and state.classRequestPending == false and state.classRequestAttempts == 1
+        and state.sample == sample and state.classRequestPending == false and state.classRequestAttempts == 1
         and display:GetSharedPositions()["friend-testrealm"] == peer,
         "Showing icons preserves the latest peer and sampling/discovery state")
     clock:advance(2)
@@ -766,8 +840,7 @@ do
     clock:advance(15)
     assert(#clock.sent == 2)
     clock:advance(1)
-    assert(#clock.sent == 3 and clock.sent[3].at - clock.sent[2].at == 16
-        and fields(clock.sent[3].payload)[2] == "P", "Only position data has an idle heartbeat")
+    assert(#clock.sent == 2, "Position and class packets both suppress idle repeats")
     for _ = 1, 8 do
         clock.x = clock.x + 0.01
         clock:advance(2)
@@ -824,7 +897,7 @@ do
     clock:advance(14)
     assert(#attempts == 3, "An accepted request stops retrying")
     clock:advance(2)
-    assert(#attempts == 4 and attempts[4].wire:match("^1|position|1|P|"))
+    assert(#attempts == 3, "Accepted stationary position data has no separate heartbeat")
 
     clock.acceptClass = false
     classes:SetPositionSharing(false)
@@ -973,7 +1046,7 @@ do
     end
     bus:advance(16)
     assert(bus:metadataCount() == metadata,
-        "Actual multi-client movement and idle heartbeats never repeat accepted class discovery")
+        "Actual multi-client movement and idle time never repeat accepted class discovery")
 end
 
 -- Metadata accepts either packet order without changing position freshness or presence.
@@ -1142,6 +1215,93 @@ do
     assert(locations:ReceivePosition("Friend", clock:unavailable()))
     assert(next(locations:GetSharedPositions()) == nil,
         "Unavailable live-only locations are still removed immediately")
+end
+
+-- Status attachments and movement share one fresh sample per timestamp.
+do
+    local shared, clock = newAddon()
+    clock:login()
+    clock:connect()
+    assert(shared:GetPositionSnapshot() == nil and clock.samples == 0,
+        "Status never samples coordinates before sharing is enabled")
+    shared:SetPositionSharing(true)
+    local snapshot = shared:GetPositionSnapshot()
+    assert(snapshot == "P,2000000000,37,0.25000,0.75000" and clock.samples == 1)
+    clock.x = 0.6
+    assert(shared:GetPositionSnapshot() == snapshot and clock.samples == 1,
+        "Two packets with the same timestamp must contain the same coordinate sample")
+    shared:PositionTick()
+    assert(#clock.sent == 1 and clock.samples == 1
+        and clock.sent[1].payload == "1|" .. snapshot:gsub(",", "|"),
+        "The movement path reuses a status sample from the same server second")
+    clock:advance(1)
+    local fresh = shared:GetPositionSnapshot()
+    assert(fresh == "P,2000000001,37,0.60000,0.75000" and clock.samples == 2,
+        "The next server second samples current coordinates instead of repeating an old stamp")
+    shared:PositionSnapshotSent(fresh)
+    clock:advance(1)
+    assert(#clock.sent == 1, "An accepted public status snapshot suppresses a redundant movement packet")
+    clock:advance(28)
+    local idle = shared:GetPositionSnapshot()
+    assert(idle == "P,2000000030,37,0.60000,0.75000" and #clock.sent == 1,
+        "An idle status refresh has fresh coordinates and time without a separate position heartbeat")
+    clock.map = nil
+    clock:advance(1)
+    local unavailable = shared:GetPositionSnapshot()
+    assert(unavailable == "U,2000000031")
+    shared:PositionSnapshotSent(unavailable)
+    clock:advance(1)
+    assert(#clock.sent == 1, "A public unavailable attachment also suppresses duplicate movement data")
+    shared:SetPositionSharing(false)
+    assert(shared:GetPositionSnapshot() == nil)
+    shared:SetPositionSharing(true)
+    clock.map = 38
+    assert(shared:GetPositionSnapshot() == "P,2000000032,38,0.60000,0.75000",
+        "Sharing lifecycle resets discard the cached sample even within the same server second")
+
+    local replyOnly, replyClock = newAddon()
+    replyClock:login()
+    replyClock:connect()
+    replyOnly:SetPositionSharing(true)
+    assert(replyOnly:GetPositionSnapshot())
+    replyClock:advance(2)
+    assert(#replyClock.sent == 1,
+        "Collecting a targeted or failed snapshot does not mark its position as publicly sent")
+end
+
+-- Compact status positions use the existing movement ordering, availability and opt-in rules.
+do
+    local shared, clock = newAddon()
+    clock:login()
+    shared:SetPositionSharing(true)
+    assert(shared:ReceivePositionSnapshot("Friend", "P,2000000000,37,0.30000,0.70000"))
+    assert(shared:ReceivePosition("Friend", clock:position(37, 0.4, 0.6, clock.epoch + 2)))
+    local peer = assert(shared:GetSharedPositions()["friend-testrealm"])
+    assert(not shared:ReceivePositionSnapshot("Friend", "P,2000000001,37,0.10000,0.90000")
+        and not shared:ReceivePositionSnapshot("Friend", "P,2000000002,37,0.10000,0.90000")
+        and peer.x == 0.4, "A delayed or duplicate status attachment cannot overwrite newer movement")
+    assert(shared:ReceivePositionSnapshot("Friend", "U,2000000003"))
+    assert(peer.x == 0.4 and peer.positionStamp == clock.epoch + 2 and not peer.positionAvailable,
+        "An unavailable attachment preserves the last known coordinates and their acquisition time")
+    assert(not shared:ReceivePosition("Friend", clock:position(37, 0.8, 0.2, clock.epoch + 2)),
+        "A status attachment also advances the ordering used by separate movement packets")
+    for _, malformed in ipairs({
+        "C,2000000004,MAGE", "P,2000000004,37,0.3", "P,2000000004,37,1.1,0.7",
+        "P,2000000004|37|0.3|0.7", "P,2000000004,37,0.3,0.7,extra", "U,2000000004,extra", "U,bad",
+    }) do
+        assert(not shared:ReceivePositionSnapshot("Friend", malformed))
+    end
+    assert(not shared:ReceivePositionSnapshot("Friend", nil))
+    assert(not shared:ReceivePositionSnapshot("Self", "P,2000000004,37,0.3,0.7"))
+    shared:SetPositionSharing(false)
+    assert(not shared:ReceivePositionSnapshot("Friend", "P,2000000004,37,0.3,0.7")
+        and shared.positionState.peers["friend-testrealm"] == peer,
+        "Status attachments cannot bypass opt-in reception")
+    shared:SetPositionSharing(true)
+    shared.savedDataReadOnly = true
+    assert(shared:GetPositionSnapshot() == nil
+        and not shared:ReceivePositionSnapshot("Friend", "P,2000000004,37,0.3,0.7"),
+        "Status attachments preserve newer-schema read-only behavior")
 end
 
 print("Position tests passed.")
