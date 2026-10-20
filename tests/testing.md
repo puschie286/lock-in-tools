@@ -80,6 +80,8 @@ Window-position checks in `tests/interface.lua` cover account-wide saving, uncha
 
 Any failed check stops verification with a nonzero exit code. Fix the cause and rerun. Add regression coverage to the relevant suite when behavior changes can be meaningfully exercised by the mocks. Put new suites directly under `tests/` and reusable helpers under `tests/support/`; verification discovers them automatically. Keep test files out of `LockInTools.toc`.
 
+Verification also runs `tests/link-wow.ps1` on Windows. It uses temporary client folders to check junction creation and removal, dry runs, reruns, repository preservation and refusal to change conflicting folders, files or broken links. It does not change an installed WoW client; addon discovery still needs an in-game check after linking.
+
 ## In-game verification
 
 Mocks verify callbacks and state transitions. Rendering, actual clipboard/focus behavior, client event ordering and server channels require in-game checks. Record addon version and client build with `/lit status`, plus realm and faction. Use an isolated test profile or preserved SavedVariables fixture for fresh-install and schema scenarios.

@@ -43,6 +43,9 @@ try {
     }
     Write-Host "PASS: XML syntax ($($xmlFiles.Count) files)"
 
+    Write-Host 'Running tests/link-wow.ps1...'
+    & (Join-Path $repositoryRoot 'tests\link-wow.ps1')
+
     $suites = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File | Sort-Object Name
     foreach ($suite in $suites) {
         Write-Host "Running tests/$($suite.Name)..."

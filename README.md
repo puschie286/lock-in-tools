@@ -23,6 +23,15 @@ Automatic detection checks common local WoW locations and Battle.net's WoW regis
 
 The script works from any current directory when invoked by full path, creates missing `Interface/AddOns` folders and safely reuses a matching link. It refuses to replace existing folders or conflicting links. Keep the checkout at its linked location; edits appear in the client without copying. Junctions require local drives and write access to the client's AddOns folder.
 
+To remove the link while keeping the repository and its files intact:
+
+```powershell
+.\tools\link-wow.ps1 -Unlink -WhatIf
+.\tools\link-wow.ps1 -Unlink
+```
+
+Run unlinking from the original checkout path. `-Unlink` also accepts `-WowPath`. It removes only a directory link pointing to this checkout, refuses ordinary folders or links to another checkout, and does nothing when no link exists.
+
 Use `/reload` after editing existing Lua files. Restart the client after adding files to the manifest.
 
 The manifest targets interface **16001**; the inspected local Forever beta build was **1.60.1.70374**. This is a local baseline, not proof of in-game validation. Check `/lit status` after client updates.
