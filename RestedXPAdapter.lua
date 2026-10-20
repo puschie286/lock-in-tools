@@ -816,7 +816,9 @@ local function ObserveGuideImports(rxp, crypto)
     if guideObservations[public] then return true end
     local success = pcall(hooksecurefunc, public, "ImportGuide", function(raw)
         local job = installation
-        if not job or not job.importedContent or job.rxp ~= rxp or not Owns(job) or type(raw) ~= "string" then return end
+        if not job or job.rxp ~= rxp or not Owns(job) or type(raw) ~= "string" then return end
+        job.nativeGuideCalls = (job.nativeGuideCalls or 0) + 1
+        if not job.importedContent then return end
         local cache = rxp.db and rxp.db.profile and rxp.db.profile.guides
         if type(cache) ~= "table" then return end
         local wroteGuide = false
@@ -853,8 +855,12 @@ function addon:CancelRestedXPInstallation()
 end
 
 local function Finish(job, success, problem)
+    local now = GetTime()
+    local info = { unchanged = job.unchanged == true,
+        conversionWall = math.max(0, (job.conversionFinished or now) - job.conversionStarted),
+        nativeWall = job.nativeStartedAt and math.max(0, now - job.nativeStartedAt) or 0 }
     Stop(job, not success)
-    if job.callback then pcall(job.callback, success, problem) end
+    if job.callback then pcall(job.callback, success, problem, info) end
 end
 
 local function NormalizeName(name)
@@ -885,6 +891,27 @@ local function AppliesToGame(guide, game)
     return guide[game] ~= nil and guide[game] ~= false
         or game == "forever" and guide.classic ~= nil and guide.classic ~= false
         or game == "retail" and guide.df ~= nil and guide.df ~= false
+end
+
+local function MatchesCanonicalMetadata(rxp, pack)
+    if not rxp or type(pack.guides) ~= "table" then return false end
+    local installed, byKey, checked = InstalledGuides(rxp), {}, 0
+    for _, guide in ipairs(installed) do byKey[guide.key] = guide end
+    for _, expected in ipairs(pack.guides) do
+        if type(expected) ~= "table" then return false end
+        if AppliesToGame(expected, rxp.game) then
+            checked = checked + 1
+            local key = GuideKey(expected)
+            local found = key and byKey[key] and Matches(byKey[key], expected, key)
+            if not found then
+                for _, guide in ipairs(installed) do
+                    if Matches(guide, expected, guide.key) then found = true; break end
+                end
+            end
+            if not found then return false end
+        end
+    end
+    return checked > 0
 end
 
 function addon:MatchesRestedXPInstalledPack(pack)
@@ -918,11 +945,18 @@ local function Verify(job)
         if type(value) == "table" and job.before[key] ~= value then fresh[#fresh + 1] = { key = key, value = value } end
     end
     if job.pack.cacheFormat then
-        if #fresh == 0 or GetRestedXP() ~= job.rxp then
+        if GetRestedXP() ~= job.rxp then
             return false, "RestedXP did not confirm a fresh guide installation. Check its import window."
         end
         if not addon:MatchesRestedXPCachedPack(job.pack) then
             return false, "RestedXP did not confirm the expected guide IDs and versions. Check its import window."
+        end
+        if #fresh == 0 then
+            if job.testImport and job.installedBefore and (job.nativeGuideCalls or 0) > 0 then
+                job.unchanged = true
+                return true
+            end
+            return false, "RestedXP did not confirm a fresh guide installation. Check its import window."
         end
         local groupIDs, expected = {}, job.pack.expectedGuides and ExpectedGuideVersions(job.pack)
         for _, item in ipairs(fresh) do
@@ -931,6 +965,11 @@ local function Verify(job)
                 and (not expected or expected[record.guideID] == record.version) then return true end
         end
         return false, "RestedXP did not confirm a fresh guide installation for this group."
+    end
+    if #fresh == 0 and job.testImport and job.installedBefore and (job.nativeGuideCalls or 0) > 0
+        and GetRestedXP() == job.rxp and MatchesCanonicalMetadata(job.rxp, job.pack) then
+        job.unchanged = true
+        return true
     end
     local checked, expectedCounts = 0, {}
     for _, guide in ipairs(job.pack.guides) do
@@ -954,7 +993,7 @@ local function Verify(job)
     return true
 end
 
-function addon:InstallRestedXPPack(pack, callback)
+function addon:InstallRestedXPPack(pack, callback, options)
     local status = self:GetRestedXPInstallation()
     if not status.compatible then return false, status.problem, "unavailable" end
     if installation then return false, "A LIT guide installation is already running.", "busy" end
@@ -984,17 +1023,24 @@ function addon:InstallRestedXPPack(pack, callback)
     local observation = Observe(rxp.guideImporter)
     if not observation then return false, "RestedXP import completion cannot be monitored safely." end
     local hasContentHashes = false
+    local testImport = type(options) == "table" and options.test == true
+    local function MatchesTestMetadata()
+        if pack.cacheFormat then return self:MatchesRestedXPCachedPack(pack) end
+        return MatchesCanonicalMetadata(rxp, pack)
+    end
     if not pack.cacheFormat then
         for _, guide in ipairs(pack.guides) do
             if guide.contentHash then hasContentHashes = true; break end
         end
     end
-    if hasContentHashes and not ObserveGuideImports(rxp, self.Crypto) then
+    if (hasContentHashes or testImport) and not ObserveGuideImports(rxp, self.Crypto) then
         return false, "This RestedXP guide importer cannot be monitored safely.", "unavailable"
     end
     local job = {
         rxp = rxp, importer = rxp.guideImporter, pack = pack, callback = callback,
         observation = observation, started = GetTime(), importedContent = hasContentHashes and {},
+        conversionStarted = GetTime(), testImport = testImport,
+        installedBefore = testImport and MatchesTestMetadata() or false,
         preparation = coroutine.create(function() return encode(pack, tag) end),
     }
     installation = job
@@ -1015,6 +1061,7 @@ function addon:InstallRestedXPPack(pack, callback)
                 Finish(job, false, failure or "The guide package could not be personalized.")
                 return
             end
+            job.conversionFinished = GetTime()
             job.preparation, job.export = nil, export
         end
         if not job.nativeStarted then
@@ -1029,6 +1076,8 @@ function addon:InstallRestedXPPack(pack, callback)
             for key, value in pairs(rxp.db.profile.guides) do
                 job.before[key], job.observedCache[key] = value, value
             end
+            if job.testImport then job.installedBefore = job.installedBefore and MatchesTestMetadata() end
+            job.nativeGuideCalls, job.nativeStartedAt = 0, GetTime()
             local started, accepted = pcall(job.importer.ImportString, job.importer, job.export)
             job.serial, job.coroutine = observation.serial, job.importer.importCoroutine
             job.nativeStarted, job.export, job.started = true, nil, GetTime()

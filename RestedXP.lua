@@ -9,6 +9,7 @@ local PREPARATION_TIMEOUT, PREPARATION_RETRY = 120, 8
 local MAX_BYTES, MAX_CACHE, MAX_PACKS, MAX_PEERS = 2097152, 8388608, 8, 32
 local OFFER_AGE = 180
 local TryInstall, Reconcile, Schedule, Announce, Receive, RefreshInstalled, CheckCompleteMessage, ServeWindow
+local PeerTestFinish, PeerTestSelect
 
 local function Secret(value) return issecretvalue and issecretvalue(value) end
 local function Hash(value)
@@ -54,8 +55,11 @@ local function Prune(state)
         for source, at in pairs(entries) do if now - at > 60 then entries[source] = nil end end
     end
 end
-local function Changed(self, message)
-    if message then self.restedxpState.status = message end
+local function Changed(self, message, attention)
+    if message then
+        self.restedxpState.status = message
+        self.restedxpState.attention = attention == true
+    end
     self:Notify("RESTEDXP_CHANGED")
 end
 local function BackgroundJob(state)
@@ -78,13 +82,45 @@ local function NewPerformance()
     return { startedAt = WallTime(), tx = NewTraffic(), rx = NewTraffic(), jobs = {},
         rejectedSends = 0, retryWindows = 0, duplicateChunks = 0 }
 end
+local function AddTraffic(traffic, kind, bytes)
+    traffic[kind], traffic.messages, traffic.bytes = traffic[kind] + 1, traffic.messages + 1, traffic.bytes + bytes
+end
+local function PeerTestPhase(state, name)
+    local run = state.peerTest
+    if not run then return end
+    local report, now = run.report, WallTime()
+    local previous = report.phases[report.phase]
+    if previous and previous.startedAt then previous.wall = math.max(0, now - previous.startedAt) end
+    report.phase = name
+    report.phases[name].startedAt = now
+end
+local function PeerTestIncoming(state, incoming)
+    local run = state.peerTest
+    if not run or not incoming or not incoming.test then return end
+    run.report.bytes, run.report.expectedBytes = incoming.bytes, incoming.size
+    run.report.retries = incoming.retryCount
+end
 local function RecordWire(state, direction, body, bytes)
     local performance = state.performance
     if not performance then return end
     local kind = body:match("^1|([QOVWDX])|")
     if not kind then return end
     local traffic = performance[direction]
-    traffic[kind], traffic.messages, traffic.bytes = traffic[kind] + 1, traffic.messages + 1, traffic.bytes + bytes
+    AddTraffic(traffic, kind, bytes)
+    if direction == "tx" and kind == "Q" then state.lastQuerySentAt = GetTime() end
+    local run = state.peerTest
+    if run then
+        local report = run.report
+        AddTraffic(report[direction], kind, bytes)
+        AddTraffic(report.phases[report.phase][direction], kind, bytes)
+        if direction == "tx" and kind == "Q" and not run.querySentAt then
+            run.querySentAt = GetTime()
+            report.queryWaitWall = math.max(0, WallTime() - report.startedAt)
+            state.updateAt = GetTime() + 10
+            if run.timer then run.timer:Cancel() end
+            run.timer = C_Timer.NewTimer(10, run.discoveryTimeout)
+        end
+    end
     if kind == "O" or kind == "V" then
         local field = direction == "tx" and "firstPublishedAt" or "firstOfferAt"
         performance[field] = performance[field] or WallTime()
@@ -186,6 +222,46 @@ local function Queue(self, body, key, notBefore)
     if key then state.queued[key] = entry end
     Schedule(self)
     return true
+end
+
+PeerTestFinish = function(self, status, message)
+    local state, now = self.restedxpState, WallTime()
+    local run = state.peerTest
+    if not run then return end
+    PeerTestIncoming(state, state.incoming)
+    local report = run.report
+    local phase = report.phases[report.phase]
+    if phase.startedAt then phase.wall = math.max(0, now - phase.startedAt) end
+    report.wall, report.status, report.message = math.max(0, now - report.startedAt), status, message
+    if run.timer then run.timer:Cancel() end
+    if state.incoming and state.incoming.test then state.incoming = nil end
+    if run.checking and state.job then
+        if state.jobTimer then state.jobTimer:Cancel() end
+        state.job, state.jobTimer = nil, nil
+    end
+    if run.id then
+        state.pending[run.id] = nil
+        state.installRetry = nil
+        if state.installing == run.id then
+            if self.CancelRestedXPInstallation then self:CancelRestedXPInstallation() end
+            state.installing = nil
+        end
+        local group = CurrentGroup(self)
+        if not group or group.sources[run.id] ~= run.source then
+            state.failed[run.id] = run.previousFailed
+        elseif status ~= "complete" then state.failed[run.id] = run.revision end
+    end
+    for index = #state.queue, 1, -1 do
+        local entry = state.queue[index]
+        if entry.test == run then
+            if entry.key then state.queued[entry.key] = nil end
+            table.remove(state.queue, index)
+        end
+    end
+    state.peerTest, state.updateAt = nil, nil
+    state.performance.peerTest = report
+    Changed(self, message, status == "failed")
+    if self.PrintRestedXPPeerTest then self:PrintRestedXPPeerTest(report) end
 end
 local function SavedPack(self, id)
     local group = CurrentGroup(self)
@@ -459,6 +535,7 @@ local function RequestWindow(self)
         incoming.nextRequest = notBefore + PREPARATION_RETRY
         Queue(self, "1|W|" .. Address(self, incoming.source) .. "|" .. incoming.id .. "|" .. incoming.hash
             .. "|1|" .. WINDOW, "want", notBefore)
+        if incoming.test and state.queued.want then state.queued.want.test = state.peerTest end
         Schedule(self)
         return
     end
@@ -473,7 +550,73 @@ local function RequestWindow(self)
     incoming.nextRequest = notBefore + 4
     Queue(self, "1|W|" .. Address(self, incoming.source) .. "|" .. incoming.id .. "|" .. incoming.hash
         .. "|" .. first .. "|" .. (last - first + 1), "want", notBefore)
+    if incoming.test and state.queued.want then state.queued.want.test = state.peerTest end
     Schedule(self)
+end
+
+PeerTestSelect = function(self, early)
+    local state, group = self.restedxpState, CurrentGroup(self)
+    local run = state.peerTest
+    if not run or run.report.phase ~= "discovery" or state.updateAt and not early then return end
+    if state.job or state.incoming or state.installing or state.refreshingInstalled then return end
+    -- Gather the normal discovery replies before drawing, so the earliest
+    -- response cannot decide the random publisher or hide its later packs.
+    if run.random and early then return end
+    local candidates = {}
+    for id, sources in pairs(state.offers) do
+        for source, offer in pairs(sources) do
+            if (not run.requestedSource or source == run.requestedSource)
+                and (not run.requestedID or id == run.requestedID)
+                and run.querySentAt and offer.seen >= run.querySentAt and GetTime() - offer.seen <= OFFER_AGE then
+                candidates[#candidates + 1] = { id = id, source = source, offer = offer,
+                    followed = group.sources[id] == source }
+            end
+        end
+    end
+    table.sort(candidates, function(a, b)
+        if a.followed ~= b.followed then return a.followed end
+        if a.source ~= b.source then return a.source < b.source end
+        return a.id < b.id
+    end)
+    local chosen = candidates[1]
+    if run.random and chosen then
+        local publishers, packs = {}, {}
+        for _, candidate in ipairs(candidates) do
+            if not packs[candidate.source] then
+                publishers[#publishers + 1], packs[candidate.source] = candidate.source, {}
+            end
+            local available = packs[candidate.source]
+            available[#available + 1] = candidate
+        end
+        table.sort(publishers)
+        local available = packs[publishers[math.random(#publishers)]]
+        table.sort(available, function(a, b) return a.id < b.id end)
+        -- Equal chance per player first; sharing more packs must not make a
+        -- player more likely to be selected.
+        chosen = available[math.random(#available)]
+    end
+    if early and (not chosen or not run.requestedSource and not run.requestedID
+        and next(group.sources) and not chosen.followed) then return end
+    if not chosen then
+        PeerTestFinish(self, "failed", run.querySentAt and "No matching online publisher answered guide discovery."
+            or "The guide discovery request could not be sent.")
+        return
+    end
+    local offer = chosen.offer
+    state.updateAt = nil
+    run.previousFailed = state.failed[chosen.id]
+    run.id, run.source, run.revision = chosen.id, chosen.source, offer.hash
+    run.report.id, run.report.source = chosen.id, chosen.source
+    PeerTestPhase(state, "transfer")
+    if run.timer then run.timer:Cancel(); run.timer = nil end
+    -- This one-time selection leaves followed publishers and installed markers
+    -- intact. Tests deliberately fetch the pack even when it is already cached.
+    state.incoming = { id = chosen.id, source = chosen.source, hash = offer.hash, size = offer.size, label = offer.label,
+        startedAt = WallTime(), retryCount = 0, versioned = offer.versioned,
+        count = offer.size and math.ceil(offer.size / CHUNK), chunks = {}, bytes = 0,
+        progressAt = GetTime(), retries = 0, test = true }
+    Changed(self, "Testing guide transfer from " .. chosen.source .. ": " .. chosen.id .. ".")
+    RequestWindow(self)
 end
 
 TryInstall = function(self)
@@ -489,26 +632,27 @@ TryInstall = function(self)
     end
     if InCombatLockdown and InCombatLockdown() then Changed(self, "Guide update is ready; waiting until combat ends."); return end
     local saved = SavedPack(self, id)
-    if not saved then state.pending[id] = nil; Changed(self, "This guide pack is unavailable."); return end
+    if not saved then state.pending[id] = nil; Changed(self, "This guide pack is unavailable.", true); return end
     local pack, problem = state.decoded[id]
     if not pack or pack.hash ~= saved.hash or not ReadyPack(pack) then
         StartJob(self, "Checking cached " .. id .. "...", function() return DecodeSaved(self, id) end,
             function(decoded, failure)
-                if not decoded then state.pending[id] = nil; state.failed[id] = Revision(saved); Changed(self, failure)
+                if not decoded then state.pending[id] = nil; state.failed[id] = Revision(saved); Changed(self, failure, true)
                 else TryInstall(self) end
             end)
         return
     end
     local generation = state.generation
     local revision = Revision(saved)
-    if pack.cacheFormat and type(self.MatchesRestedXPCachedPack) == "function" and self:MatchesRestedXPCachedPack(pack) then
+    local test = state.peerTest and state.peerTest.id == id and state.peerTest.report.phase == "import"
+    if not test and pack.cacheFormat and type(self.MatchesRestedXPCachedPack) == "function" and self:MatchesRestedXPCachedPack(pack) then
         Installed(self)[id] = revision
         state.pending[id], state.failed[id] = nil, nil
         Changed(self, id .. " is already up to date. No import needed.")
         Reconcile(self)
         return
     end
-    if not saved.revision and type(self.MatchesRestedXPInstalledPack) == "function" and state.checkedInstalled[id] ~= pack.hash then
+    if not test and not saved.revision and type(self.MatchesRestedXPInstalledPack) == "function" and state.checkedInstalled[id] ~= pack.hash then
         StartJob(self, "Comparing installed " .. id .. "...", function()
             return self:MatchesRestedXPInstalledPack(pack)
         end, function(matches)
@@ -526,7 +670,7 @@ TryInstall = function(self)
     local installStarted = WallTime()
     Changed(self, "Installing " .. id .. "...")
     local accepted, code
-    accepted, problem, code = self:InstallRestedXPPack(pack, function(success, failure)
+    accepted, problem, code = self:InstallRestedXPPack(pack, function(success, failure, info)
         if state.generation ~= generation or state.installing ~= id then return end
         state.installing, state.pending[id] = nil, nil
         state.performance.lastInstall = { wall = math.max(0, WallTime() - installStarted), success = success == true }
@@ -536,22 +680,37 @@ TryInstall = function(self)
             Changed(self, "Installed " .. id .. ".")
         else
             state.failed[id] = revision
-            Changed(self, failure or "RestedXP could not install the guide pack.")
+            Changed(self, failure or "RestedXP could not install the guide pack.", true)
+        end
+        if test and state.peerTest then
+            local report = state.peerTest.report
+            info = type(info) == "table" and info or {}
+            report.importUnchanged, report.conversionWall, report.nativeWall = info.unchanged == true, info.conversionWall, info.nativeWall
+            PeerTestFinish(self, success and "complete" or "failed", success and "Two-player guide test completed."
+                or failure or "RestedXP could not install the guide pack.")
         end
         Reconcile(self)
-    end)
+    end, test and { test = true } or nil)
     if not accepted and state.installing == id then
         state.installing = nil
         -- Busy native imports can finish without a public event; retry at a modest cadence.
         if code == "busy" then state.installRetry = GetTime() + 2; Schedule(self)
-        else state.pending[id] = nil; state.failed[id] = revision end
-        Changed(self, problem or "The guide pack could not be installed.")
+        else
+            state.pending[id] = nil; state.failed[id] = revision
+            if test then PeerTestFinish(self, "failed", problem or "The guide pack could not be installed.") end
+        end
+        Changed(self, problem or "The guide pack could not be installed.", code ~= "busy")
     end
 end
 
 Reconcile = function(self)
     local state, group = self.restedxpState, CurrentGroup(self)
     if not group or state.incoming or state.installing or state.job or state.refreshingInstalled then return end
+    if state.peerTest then
+        if state.peerTest.report.phase == "discovery" then PeerTestSelect(self, state.updateAt ~= nil)
+        elseif state.peerTest.report.phase == "import" then TryInstall(self) end
+        return
+    end
     Prune(state)
     local ids = {}
     for id in pairs(group.sources) do if PackID(id) then ids[#ids + 1] = id end end
@@ -586,19 +745,35 @@ local function FinishDownload(self)
     local data = table.concat(incoming.chunks)
     local receivedAt = WallTime()
     state.incoming = nil
+    local test = incoming.test and state.peerTest
+    if test then
+        test.report.bytes, test.report.retries = incoming.size, incoming.retryCount
+        PeerTestPhase(state, "import")
+        test.checking = true
+        test.timer = C_Timer.NewTimer(300, function()
+            if state.peerTest == test then PeerTestFinish(self, "failed", "The test timed out waiting for guide import.") end
+        end)
+    end
     StartJob(self, "Checking transfer " .. incoming.id .. "...", function()
         return DecodeTransfer(self, data, incoming.id, incoming.versioned and incoming.hash or nil)
     end, function(pack, problem)
+    if test then test.checking = false end
     if not pack or not incoming.versioned and pack.hash ~= incoming.hash then
         state.failed[incoming.id] = incoming.hash
-        Changed(self, problem or "The downloaded pack failed verification.")
+        Changed(self, problem or "The downloaded pack failed verification.", true)
+        if test then PeerTestFinish(self, "failed", problem or "The downloaded pack failed transfer checks.") end
         Reconcile(self)
         return
     end
     local stored
     stored, problem = StorePack(self, incoming.id, pack, incoming.source,
         { label = incoming.label, revision = incoming.versioned and incoming.hash or nil })
-    if not stored then state.failed[incoming.id] = incoming.hash; Changed(self, problem); Reconcile(self); return end
+    if not stored then
+        state.failed[incoming.id] = incoming.hash; Changed(self, problem, true)
+        if test then PeerTestFinish(self, "failed", problem) end
+        Reconcile(self)
+        return
+    end
     state.pending[incoming.id] = true
     state.performance.lastTransfer = { wall = math.max(0, receivedAt - incoming.startedAt), bytes = incoming.size,
         verified = math.max(0, WallTime() - receivedAt), retries = incoming.retryCount }
@@ -668,7 +843,10 @@ local function Tick(self)
             if entry.failures >= 20 then
                 table.remove(state.queue, entryIndex)
                 if entry.key then state.queued[entry.key] = nil end
-                Changed(self, "Guide traffic is throttled. Use Update guides to retry.")
+                Changed(self, "Guide traffic is throttled. Use Update guides to retry.", true)
+                if state.peerTest and entry.test == state.peerTest then
+                    PeerTestFinish(self, "failed", "The test could not send guide traffic through the data channel.")
+                end
             end
             state.backoff = now + 1
         end
@@ -680,9 +858,11 @@ local function Tick(self)
         local timedOut = incoming.size and (now - incoming.progressAt >= 30 or incoming.retries >= 8)
             or not incoming.size and now - incoming.progressAt >= PREPARATION_TIMEOUT
         if timedOut then
+            PeerTestIncoming(state, incoming)
             state.incoming = nil
             state.failed[incoming.id] = incoming.hash
-            Changed(self, "Guide transfer timed out. Use Update guides to retry.")
+            Changed(self, "Guide transfer timed out. Use Update guides to retry.", true)
+            if incoming.test then PeerTestFinish(self, "failed", "The guide transfer timed out during the test.") end
             Reconcile(self)
         else
             incoming.retries = incoming.retries + 1
@@ -692,15 +872,18 @@ local function Tick(self)
         end
     end
     if state.updateAt and now >= state.updateAt then
+        local test = state.peerTest
         state.updateAt = nil
         Reconcile(self)
-        if not state.incoming and not state.installing and not ForegroundJob(state) and not next(state.pending) then
+        if test then
+            if state.peerTest then Changed(self) end
+        elseif not state.incoming and not state.installing and not ForegroundJob(state) and not next(state.pending) then
             Changed(self, state.refreshingInstalled and "Guide discovery complete. Imported guides are still being prepared."
                 or CheckCompleteMessage(self))
         else Changed(self) end
         state.performance.discoveryAt = WallTime()
     end
-    if not state.performance.firstReadyAt and not state.updateAt and not state.incoming
+    if not state.performance.firstReadyAt and not state.peerTest and not state.updateAt and not state.incoming
         and not state.installing and not ForegroundJob(state) then state.performance.firstReadyAt = WallTime() end
     if state.installRetry and now >= state.installRetry then state.installRetry = nil; TryInstall(self) end
     if #state.queue > 0 or state.incoming or state.updateAt or state.installRetry or state.refreshAt then Schedule(self) end
@@ -741,12 +924,12 @@ ServeWindow = function(self, source, id, hash, first, count)
             state.inventory[id], state.sentOffers[id] = nil, nil
             state.sharingStatus = problem or "The requested guide source could not be prepared."
             Queue(self, "1|X|" .. id, "withdraw:" .. id)
-            Changed(self, state.sharingStatus)
+            Changed(self, state.sharingStatus, true)
             return
         end
         local stored, failure = StorePack(self, id, pack, LocalIdentity(self),
             { label = inventory.label, localInstalled = true, revision = hash })
-        if not stored then Changed(self, failure); return end
+        if not stored then Changed(self, failure, true); return end
         Send(SavedPack(self, id))
         Changed(self, "Requested guide pack is ready to share.")
     end, "export")
@@ -804,6 +987,7 @@ Receive = function(self, sender, wire)
                 incoming.progressAt, incoming.retries, incoming.nextRequest = now, 0, now + 4
             end
         end
+        if state.peerTest and state.peerTest.report.phase == "discovery" then PeerTestSelect(self, true) end
         local noPacks = state.status:find("No LIT-shared packs found.", 1, true) == 1
         Changed(self, noPacks and not state.refreshingInstalled and CheckCompleteMessage(self) or nil)
         if group.sources[id] == source and not state.updateAt then Reconcile(self) end
@@ -815,8 +999,11 @@ Receive = function(self, sender, wire)
             if not next(sources) then state.offers[rest] = nil end
         end
         if state.incoming and state.incoming.id == rest and state.incoming.source == source then
+            local test = state.incoming.test
+            PeerTestIncoming(state, state.incoming)
             state.incoming = nil
-            Changed(self, "The publisher no longer has this installed guide pack.")
+            Changed(self, "The publisher no longer has this installed guide pack.", true)
+            if test then PeerTestFinish(self, "failed", "The publisher withdrew the guide pack during the test.") end
             Reconcile(self)
         else Changed(self) end
     elseif kind == "W" then
@@ -861,6 +1048,7 @@ end
 
 local function Reset(self, stopped)
     local state = self.restedxpState
+    if state.peerTest then PeerTestFinish(self, "cancelled", "The two-player guide test stopped when the connection or group changed.") end
     if state.timer then state.timer:Cancel() end
     if state.replyTimer then state.replyTimer:Cancel() end
     if state.jobTimer then state.jobTimer:Cancel() end
@@ -871,6 +1059,7 @@ local function Reset(self, stopped)
     state.updateAt, state.installRetry, state.backoff, state.pruneAt = nil, nil, nil, nil
     state.refreshAt, state.refreshingInstalled, state.watching, state.autoReady = nil, false, false, false
     state.sentOffers, state.wantSentAt = {}, nil
+    state.lastQuerySentAt = nil
     state.inventory = {}
     if state.benchmarkRunning then
         state.benchmarkRunning = nil
@@ -879,7 +1068,7 @@ local function Reset(self, stopped)
     state.checkedInstalled, state.sharedInstalledGuides, state.unshareableGuides = {}, 0, 0
     state.sharingStatus = "Imported guides are shared automatically with your LIT group."
     state.queue, state.queued, state.offers, state.replies, state.requests, state.pending, state.failed = {}, {}, {}, {}, {}, {}, {}
-    state.generation, state.stopped = state.generation + 1, stopped
+    state.generation, state.stopped, state.attention = state.generation + 1, stopped, false
 end
 
 function addon:InitializeRestedXP()
@@ -894,7 +1083,9 @@ function addon:InitializeRestedXP()
     self:RegisterDataFeature(FEATURE, function(sender, wire) return Receive(self, sender, wire) end, function(connected)
         Reset(self, false)
         if connected and Available(self) then
+            local previousTest = self.restedxpState.performance.peerTest
             self.restedxpState.performance = NewPerformance()
+            self.restedxpState.performance.peerTest = previousTest
             CurrentGroup(self)
             self.restedxpState.updateAt = GetTime() + 2
             WatchInstalled(self)
@@ -938,7 +1129,7 @@ end
 function addon:ImportRestedXPPack(id, raw, sourceBattleTag)
     if not self.restedxpState or self.savedDataReadOnly then return false, "Saved preferences are read-only." end
     if not self:HasGroup() or self:IsGroupSwitching() then return false, "Join a LIT group before sharing guides." end
-    if self.restedxpState.incoming or self.restedxpState.installing or ForegroundJob(self.restedxpState) then return false, "A guide update is already in progress." end
+    if self.restedxpState.peerTest or self.restedxpState.incoming or self.restedxpState.installing or ForegroundJob(self.restedxpState) then return false, "A guide update is already in progress." end
     if type(id) == "string" and not Secret(id) then id = id:lower():gsub("%s+", "-") end
     if not PackID(id) then return false, "Use a pack ID of up to 40 letters, numbers, hyphens or underscores." end
     if type(raw) ~= "string" or #raw == 0 or #raw > MAX_BYTES then return false, "Paste an export no larger than 2 MiB." end
@@ -957,10 +1148,10 @@ function addon:ImportRestedXPPack(id, raw, sourceBattleTag)
     return StartJob(self, "Validating " .. id .. "...", function()
         return self.RestedXPCodec.Decode(raw, sourceBattleTag)
     end, function(pack, problem)
-    if not pack then Changed(self, problem or "The export could not be validated."); return end
+    if not pack then Changed(self, problem or "The export could not be validated.", true); return end
     local stored
     stored, problem = StorePack(self, id, pack, source)
-    if not stored then Changed(self, problem); return end
+    if not stored then Changed(self, problem, true); return end
     Announce(self)
     Changed(self, "Shared " .. id .. " (" .. pack.guideCount .. " guides).")
     end)
@@ -968,7 +1159,7 @@ end
 
 function addon:SelectRestedXPPack(id, source)
     if not self.restedxpState or self.savedDataReadOnly then return false, "Saved preferences are read-only." end
-    if self.restedxpState.incoming or self.restedxpState.installing or ForegroundJob(self.restedxpState) then return false, "Wait for the current guide update before changing its publisher." end
+    if self.restedxpState.peerTest or self.restedxpState.incoming or self.restedxpState.installing or ForegroundJob(self.restedxpState) then return false, "Wait for the current guide update before changing its publisher." end
     local group = CurrentGroup(self)
     if not group or not PackID(id) or Secret(source) or type(source) ~= "string" then return false, "Invalid guide source." end
     local normalized = self:GetDataSenderIdentity(source)
@@ -981,10 +1172,42 @@ function addon:SelectRestedXPPack(id, source)
 end
 addon.SetRestedXPPublisher = addon.SelectRestedXPPack
 
+function addon:SelectRestedXPPublisher(source)
+    local state = self.restedxpState
+    if not state or self.savedDataReadOnly then return false, "Saved preferences are read-only." end
+    if state.peerTest or state.incoming or state.installing or ForegroundJob(state) then
+        return false, "Wait for the current guide update before changing its publisher."
+    end
+    if not self:HasGroup() or self:IsGroupSwitching() or state.fingerprint ~= self:GetGroupFingerprint() then
+        return false, "Join a LIT group before following a publisher."
+    end
+    if Secret(source) or type(source) ~= "string" or #source == 0 or #source > 128 or source:find("[|%c]") then
+        return false, "Invalid guide source."
+    end
+    local normalized, isSelf = self:GetDataSenderIdentity(source)
+    if not normalized or isSelf or normalized == LocalIdentity(self) then return false, "Choose another group member as your publisher." end
+    local group, ids, additional = CurrentGroup(self), {}, 0
+    if not group then return false, "Invalid guide source." end
+    for id, sources in pairs(state.offers) do
+        local offer = sources[normalized]
+        if PackID(id) and offer and GetTime() - offer.seen <= OFFER_AGE then
+            ids[#ids + 1] = id
+            if not group.sources[id] then additional = additional + 1 end
+        end
+    end
+    if #ids == 0 then return false, "Refresh guides to find this source again." end
+    -- Following a player is a single choice over their current offers. Keep the
+    -- existing per-pack subscriptions, and never save a partially accepted set.
+    if Count(group.sources) + additional > MAX_PACKS then return false, "The guide subscription limit has been reached." end
+    for _, id in ipairs(ids) do group.sources[id] = normalized end
+    Changed(self, "Following current guides from " .. normalized .. ". Use Update guides to install them.")
+    return true
+end
+
 function addon:UpdateRestedXPGuides()
     if not Available(self) then return false, "Connect to your LIT group to check for updates." end
     local state = self.restedxpState
-    if state.incoming or state.installing or ForegroundJob(state) then return false, "A guide update is already in progress." end
+    if state.peerTest or state.incoming or state.installing or ForegroundJob(state) then return false, "A guide update is already in progress." end
     state.updateAt = GetTime() + 2
     WatchInstalled(self)
     RequestInstalledRefresh(self, 0, true)
@@ -1006,19 +1229,128 @@ function addon:UpdateRestedXPGuides()
     return true
 end
 
+local function PublisherIdentity(self, source)
+    if Secret(source) or type(source) ~= "string" or source == "" then return nil end
+    return self:GetDataSenderIdentity(source)
+end
+
+local function PublisherSummaries(self, result, group, installed)
+    local state, identity, catalog = self.restedxpState, LocalIdentity(self), {}
+    local function Get(source)
+        source = PublisherIdentity(self, source)
+        if not source then return nil end
+        if not catalog[source] then
+            catalog[source] = { row = { source = source, localPack = source == identity }, packs = {}, live = {}, followed = {} }
+        end
+        return catalog[source]
+    end
+    for _, pack in ipairs(result.packs) do
+        local publisher = Get(pack.source)
+        if publisher then
+            publisher.packs[pack.id] = true
+            if pack.canFollow and not publisher.row.localPack then publisher.live[pack.id] = pack end
+        end
+    end
+    -- A followed publisher remains visible when their offer expires, even if
+    -- none of their guide data has ever been downloaded on this character.
+    for id, source in pairs(group.sources) do
+        local publisher = PackID(id) and Get(source)
+        if publisher then publisher.packs[id], publisher.followed[id] = true, true end
+    end
+    for source, publisher in pairs(catalog) do
+        local row = publisher.row
+        row.packCount, row.livePackCount, row.followedPackCount = Count(publisher.packs), Count(publisher.live), Count(publisher.followed)
+        row.selectedPackCount, row.updateCount, row.failedCount, row.offlinePackCount = 0, 0, 0, 0
+        for id in pairs(publisher.followed) do
+            local pack, saved = publisher.live[id], SavedPack(self, id)
+            if pack then
+                row.selectedPackCount = row.selectedPackCount + 1
+                if not pack.installed then
+                    row.updateCount = row.updateCount + 1
+                    if state.failed[id] == pack.hash then row.failedCount = row.failedCount + 1 end
+                end
+            else
+                row.offlinePackCount = row.offlinePackCount + 1
+                if state.failed[id] and installed[id] ~= state.failed[id]
+                    and (not saved or PublisherIdentity(self, saved.source) == source and state.failed[id] == Revision(saved)) then
+                    row.failedCount = row.failedCount + 1
+                end
+            end
+        end
+        local updating = state.incoming and PublisherIdentity(self, state.incoming.source) == source
+        for id in pairs(publisher.packs) do
+            local saved = SavedPack(self, id)
+            if state.installing == id and saved and PublisherIdentity(self, saved.source) == source then updating = true end
+            if row.localPack and saved and PublisherIdentity(self, saved.source) == source
+                and installed[id] ~= Revision(saved) and state.failed[id] == Revision(saved) then
+                row.failedCount = row.failedCount + 1
+            end
+        end
+        row.selected = row.livePackCount > 0 and row.selectedPackCount == row.livePackCount
+            or row.livePackCount == 0 and row.followedPackCount > 0
+        row.canFollow = not row.localPack and row.livePackCount > 0
+        row.status = updating and "Updating" or row.failedCount > 0 and "Update failed"
+            or row.offlinePackCount > 0 and "Publisher offline" or row.updateCount > 0 and "Updates available"
+            or row.followedPackCount > 0 and (row.selected and "Up to date" or "Partly followed")
+            or row.localPack and "Shared" or row.livePackCount > 0 and "Available" or "Cached"
+        result.publishers[#result.publishers + 1] = row
+    end
+    table.sort(result.publishers, function(a, b) return a.source < b.source end)
+end
+
+local function GuideStatus(self, result)
+    if not result.installed then return "Not installed" end
+    if not result.loaded then return "Not loaded" end
+    if not result.compatible then return "Unavailable" end
+    if result.readOnly then return "Read-only" end
+    local state = self.restedxpState
+    if not state then return "Loading" end
+    if self:IsGroupSwitching() or state.fingerprint ~= self:GetGroupFingerprint() then return "Changing group" end
+    if not Available(self) then return "Disconnected" end
+    if state.incoming then
+        if not state.incoming.size then return "Preparing update" end
+        return "Updating (" .. math.floor(100 * state.incoming.bytes / state.incoming.size) .. "%)"
+    end
+    if state.installing then return "Installing" end
+    if ForegroundJob(state) then return "Processing" end
+    if state.peerTest then return "Testing" end
+    if state.updateAt then return "Checking" end
+    if next(state.pending) then
+        return InCombatLockdown and InCombatLockdown() and "Waiting for combat" or "Ready to install"
+    end
+    local followed, failed, offline, updates, available = 0, 0, 0, 0, false
+    for _, publisher in ipairs(result.publishers) do
+        followed = followed + publisher.followedPackCount
+        failed, offline, updates = failed + publisher.failedCount, offline + publisher.offlinePackCount, updates + publisher.updateCount
+        available = available or publisher.canFollow
+    end
+    if failed > 0 then return "Update failed" end
+    if state.attention then return "Needs attention" end
+    if offline > 0 then return "Publisher offline" end
+    if updates > 0 then return "Updates available" end
+    if state.refreshingInstalled then return "Checking" end
+    -- Local publications alone prove availability, not comparison with an
+    -- online followed publisher. Reserve this result for verified revisions.
+    if followed > 0 then return "Up to date" end
+    if available then return "Choose a publisher" end
+    if #(result.guides or {}) > 0 or #result.packs > 0 then return "Ready" end
+    return "No guides"
+end
+
 function addon:GetRestedXPState()
     local result = self:GetRestedXPInstallation()
     local state = self.restedxpState
     result.installationProblem = result.problem
-    result.packs, result.readOnly = {}, self.savedDataReadOnly == true
+    result.packs, result.publishers, result.readOnly = {}, {}, self.savedDataReadOnly == true
     result.status = state and state.status or "Guides are loading."
     result.sharingStatus = state and state.sharingStatus
     result.sharedInstalledGuides = state and state.sharedInstalledGuides or 0
     result.unshareableGuides = state and state.unshareableGuides or 0
     result.refreshingInstalled = state and state.refreshingInstalled or false
-    result.busy = state and (state.incoming ~= nil or state.installing ~= nil or ForegroundJob(state) ~= nil
+    result.busy = state and (state.peerTest ~= nil or state.incoming ~= nil or state.installing ~= nil or ForegroundJob(state) ~= nil
         or state.updateAt ~= nil) or false
     result.canUpdate = Available(self) and not result.busy or false
+    result.guideStatus = GuideStatus(self, result)
     if not state then return result end
     if state.fingerprint ~= self:GetGroupFingerprint() then
         result.busy, result.canUpdate, result.status = false, false, "Guide sources are changing with your group."
@@ -1058,6 +1390,8 @@ function addon:GetRestedXPState()
         end
     end
     table.sort(result.packs, function(a, b) return a.id == b.id and (a.source or "") < (b.source or "") or a.id < b.id end)
+    PublisherSummaries(self, result, group, installed)
+    result.guideStatus = GuideStatus(self, result)
     return result
 end
 
@@ -1073,6 +1407,15 @@ function addon:GetRestedXPPerformance()
     if not state then return nil end
     local result = CopyPerformance(state.performance)
     result.elapsed = math.max(0, WallTime() - result.startedAt)
+    if state.peerTest then
+        local report = result.peerTest
+        report.wall = math.max(0, WallTime() - report.startedAt)
+        local phase = report.phases[report.phase]
+        if phase.startedAt then phase.wall = math.max(0, WallTime() - phase.startedAt) end
+        if state.incoming and state.incoming.test then
+            report.bytes, report.expectedBytes, report.retries = state.incoming.bytes, state.incoming.size, state.incoming.retryCount
+        end
+    end
     result.queue = #state.queue
     if state.job then
         result.activeJob = CopyPerformance(state.job.metrics)
@@ -1112,9 +1455,9 @@ end
 function addon:StartRestedXPBenchmark()
     local state = self.restedxpState
     if not self.ready or not state then return false, "RestedXP is still loading." end
-    if state.job or state.incoming or state.installing or state.updateAt or state.refreshAt
+    if state.peerTest or state.job or state.incoming or state.installing or state.updateAt or state.refreshAt
         or state.refreshingInstalled or state.benchmarkRunning or next(state.pending) then
-        return false, "Wait for the current guide preparation or update to finish, then run /lit rxp test."
+        return false, "Wait for the current guide preparation or update to finish, then run /lit rxp test local."
     end
     local metadataOnly = type(self.CollectRestedXPInstalledInventory) == "function"
     if metadataOnly and type(self.ResetRestedXPInventoryMemo) ~= "function"
@@ -1171,9 +1514,112 @@ function addon:StartRestedXPBenchmark()
     return true
 end
 
+function addon:StartRestedXPPeerTest(source, id, options)
+    local state = self.restedxpState
+    if not self.ready or not state then return false, "RestedXP is still loading." end
+    if not Available(self) then return false, "Connect to your LIT group before running a two-player guide test." end
+    if state.peerTest or state.job or state.incoming or state.installing or state.updateAt or state.refreshAt
+        or state.refreshingInstalled or state.benchmarkRunning or next(state.pending) then
+        return false, "Wait for the current guide work to finish before running the two-player test."
+    end
+    local installation = self:GetRestedXPInstallation()
+    if not installation.compatible then return false, installation.problem or "Enable a supported RestedXP version first." end
+    local random = type(options) == "table" and options.random == true
+    if random and (source ~= nil or id ~= nil) then return false, "A random test chooses both the player and guide pack." end
+    if source ~= nil then
+        if Secret(source) or type(source) ~= "string" or #source == 0 or #source > 128 or source:find("[|%c]") then
+            return false, "Use an online player's character name, optionally followed by its realm."
+        end
+        local identity, isSelf = self:GetDataSenderIdentity(source)
+        if not identity or isSelf then return false, "Choose another LIT player as the test publisher." end
+        source = identity
+    end
+    if id ~= nil and not PackID(id) then return false, "Choose a valid shared guide pack ID." end
+    local report = { status = "running", phase = "discovery", startedAt = WallTime(), wall = 0,
+        source = source, id = id, random = random, phases = {}, tx = NewTraffic(), rx = NewTraffic(), retries = 0 }
+    for _, name in ipairs({ "discovery", "transfer", "import" }) do
+        report.phases[name] = { wall = 0, tx = NewTraffic(), rx = NewTraffic() }
+    end
+    report.phases.discovery.startedAt = report.startedAt
+    local run = { report = report, requestedSource = source, requestedID = id, random = random }
+    state.peerTest, state.performance.peerTest = run, report
+    -- Reuse the regular discovery request. Waiting out its existing cooldown
+    -- avoids extra probes or a special handshake, even just after login.
+    local queryAt = math.max(GetTime(), (state.lastQuerySentAt or -6) + 5.1)
+    state.updateAt = queryAt + 12
+    if not Queue(self, "1|Q|" .. self.dataState.requestSession, "query", queryAt) then
+        state.peerTest, state.updateAt, state.performance.peerTest = nil, nil, nil
+        return false, "The guide data queue is full. Try the test again after current traffic finishes."
+    end
+    state.queued.query.test = run
+    run.discoveryTimeout = function()
+        if state.peerTest ~= run or report.phase ~= "discovery" then return end
+        state.updateAt = nil
+        Reconcile(self)
+        if state.peerTest == run and report.phase == "discovery" then
+            PeerTestFinish(self, "failed", run.querySentAt and "Guide discovery timed out during the test."
+                or "The guide discovery request could not be sent.")
+        end
+    end
+    run.timer = C_Timer.NewTimer(math.max(0, queryAt - GetTime()) + 12, run.discoveryTimeout)
+    RequestInstalledRefresh(self, 0, true)
+    self:Print(random and "RestedXP random test: collecting discovery replies, then choosing a random player and one of their packs to download and re-import. No diagnostic messages are sent."
+        or "RestedXP two-player test: discovering one guide pack, then downloading and re-importing it even if versions match. No diagnostic messages are sent.")
+    Changed(self, random and "Discovering online publishers for a random guide test..." or "Discovering an online guide publisher for the test...")
+    Schedule(self)
+    return true
+end
+
+function addon:CancelRestedXPPeerTest()
+    if not self.restedxpState or not self.restedxpState.peerTest then return false, "No two-player guide test is running." end
+    PeerTestFinish(self, "cancelled", "Two-player guide test cancelled.")
+    return true
+end
+
+function addon:PrintRestedXPPeerTest(report)
+    if type(report) ~= "table" then return end
+    local function Text(value) return tostring(value):gsub("|", "||") end
+    local function Seconds(value) return math.max(0, tonumber(value) or 0) end
+    local function Traffic(traffic)
+        traffic = traffic or {}
+        return string.format("%d messages / %.1f KiB", traffic.messages or 0, (traffic.bytes or 0) / 1024)
+    end
+    local target = report.source and Text(report.source) or "publisher pending"
+    if report.id then target = target .. " / " .. Text(report.id) end
+    local status = Text(report.status or "running")
+    if report.status == "running" and report.phase then status = status .. " (" .. Text(report.phase) .. ")" end
+    self:Print(string.format("RestedXP peer test: %s; %s; %.2fs total.", status, target, Seconds(report.wall)))
+    if report.queryWaitWall and report.queryWaitWall > 0.5 then
+        self:Print(string.format("Discovery includes %.2fs waiting for the normal request cooldown or send queue; no extra probes were sent.",
+            Seconds(report.queryWaitWall)))
+    end
+    local phases = report.phases or {}
+    for _, entry in ipairs({ { "discovery", "Discovery" }, { "transfer", "Transfer" }, { "import", "Native import" } }) do
+        local phase = phases[entry[1]]
+        if phase and phase.startedAt ~= nil then
+            local elapsed = phase.wall or phase.startedAt and WallTime() - phase.startedAt or 0
+            self:Print(string.format("%s: %.2fs; sent %s; observed %s.", entry[2], Seconds(elapsed), Traffic(phase.tx), Traffic(phase.rx)))
+        end
+    end
+    self:Print("Total: sent " .. Traffic(report.tx) .. "; observed " .. Traffic(report.rx) .. ".")
+    if report.bytes and report.bytes > 0 then
+        local elapsed = phases.transfer and Seconds(phases.transfer.wall) or 0
+        local rate = elapsed > 0 and string.format("; %.2f KiB/s", report.bytes / 1024 / elapsed) or ""
+        self:Print(string.format("Payload: %.1f KiB%s; %d retry windows.", report.bytes / 1024, rate, report.retries or 0))
+    end
+    local timing = {}
+    if report.conversionWall then timing[#timing + 1] = string.format("Recipient conversion %.2fs", Seconds(report.conversionWall)) end
+    if report.nativeWall then timing[#timing + 1] = string.format("native confirmation %.2fs", Seconds(report.nativeWall)) end
+    if #timing > 0 then self:Print(table.concat(timing, "; ") .. ".") end
+    if report.importUnchanged then self:Print("RestedXP processed the import and retained the matching installed guides.") end
+    if report.message then self:Print("Result: " .. Text(report.message)) end
+    self:Print("Counts cover local sends and observed group guide payload, including framing; other features and server overhead are excluded.")
+end
+
 function addon:ShowRestedXPPerformance()
     local report = self:GetRestedXPPerformance()
     if not report then return false, "RestedXP is still loading." end
+    if report.peerTest then self:PrintRestedXPPeerTest(report.peerTest) end
     if report.benchmark then PrintBenchmark(self, report.benchmark) end
     local function Since(value)
         return value and string.format("%.2fs", math.max(0, value - report.startedAt)) or "pending"

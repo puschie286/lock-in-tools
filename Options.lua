@@ -253,37 +253,21 @@ local function CreateRestedXPPage(panel)
     publish:Hide()
     page.publish = publish
 
-    panel.restedxpStatus = UI:Label(main, "", 12, "muted")
-    panel.restedxpStatus:SetPoint("TOPLEFT", 16, -48)
-    panel.restedxpStatus:SetSize(648, 36)
-    local installed = UI:Label(main, "Installed guides", 13)
-    installed:SetPoint("TOPLEFT", 16, -90)
-    panel.restedxpGuides = RestedXPList(main, 112, 4, 23, function(row)
-        row:EnableMouse(true)
-        row.name = UI:Label(row, "", 12)
-        row.name:SetPoint("TOPLEFT", 0, -3)
-        row.name:SetSize(536, 20)
-        row.version = UI:Label(row, "", 12, "muted")
-        row.version:SetPoint("TOPRIGHT", 0, -3)
-        row.version:SetSize(76, 20)
-        OptionTooltip(page, row, "Installed guide", function()
-            local guide = row.guide
-            if not guide then return "" end
-            return GuideText(guide.name or guide.key) .. "\n" .. GuideText(guide.group)
-                .. (guide.subgroup and guide.subgroup ~= "" and (" / " .. GuideText(guide.subgroup)) or "")
-                .. "\n" .. (tonumber(guide.version or 0) == 0 and "Unversioned" or ("Version " .. GuideText(guide.version)))
-        end)
-    end, function(row, guide)
-        row.guide = guide
-        local group = guide.group and guide.group ~= "" and (GuideText(guide.group) .. " / ") or ""
-        row.name:SetText(group .. GuideText(guide.name or guide.key))
-        row.version:SetText(tonumber(guide.version or 0) == 0 and "Unversioned" or ("v" .. GuideText(guide.version)))
-    end)
-    panel.restedxpGuides.empty:SetText("No installed guides found.")
+    local summary = CreateFrame("Frame", nil, main)
+    summary:SetPoint("TOPLEFT", 16, -48)
+    summary:SetSize(648, 64)
+    summary:EnableMouse(true)
+    panel.restedxpSummary = summary
+    local heading = UI:Label(summary, "Guide status", 12, "muted")
+    heading:SetPoint("TOPLEFT", 0, 0)
+    panel.restedxpStatus = UI:Label(summary, "", 20)
+    panel.restedxpStatus:SetPoint("TOPLEFT", 0, -20)
+    panel.restedxpStatus:SetSize(648, 30)
+    OptionTooltip(page, summary, "Guide status", function() return page.guideDetails or "" end)
 
-    local available = UI:Label(main, "LIT-shared packs and publishers", 13)
-    available:SetPoint("TOPLEFT", 16, -216)
-    panel.restedxpPacks = RestedXPList(main, 238, 2, 40, function(row)
+    local available = UI:Label(main, "Publishers", 13)
+    available:SetPoint("TOPLEFT", 16, -128)
+    panel.restedxpPublishers = RestedXPList(main, 152, 4, 40, function(row)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, 0)
         row.name:SetSize(514, 19)
@@ -294,29 +278,23 @@ local function CreateRestedXPPage(panel)
         row.follow:SetPoint("TOPRIGHT", 0, -2)
         row.follow:SetSize(96, 30)
         row.follow:SetScript("OnClick", function()
-            if not row.pack then return end
-            local success, message = addon:SelectRestedXPPack(row.pack.id, row.pack.source)
+            if not row.publisher then return end
+            local success, message = addon:SelectRestedXPPublisher(row.publisher.source)
             SetFeedback(panel, success and "Publisher selected. Click Update guides to download." or message, not success)
             addon:RefreshOptions()
         end)
         OptionTooltip(page, row.follow, "Follow publisher",
-            "Choose this group member as the source for this pack. Future updates follow their published content. "
+            "Follow all guides currently shared by this player. Future updates follow their published content. "
                 .. "Only follow a publisher whose guides you trust.")
-    end, function(row, pack)
-        row.pack = pack
-        local title = GuideText(pack.label or pack.id)
-        if pack.label and pack.label ~= pack.id then title = title .. " (" .. GuideText(pack.id) .. ")" end
-        row.name:SetText(title)
-        local status = pack.updateAvailable and "Update available" or pack.status
-            or (pack.installed and "Installed" or "Available")
-        row.detail:SetText(GuideText(pack.source or "You") .. " | " .. GuideText(status)
-            .. (pack.hash and (" | " .. GuideText(pack.hash:sub(1, 8))) or ""))
-        local canFollow = pack.source ~= nil and not pack.localPack and pack.canFollow ~= false
-        row.follow:SetText(pack.selected and "Following"
-            or (pack.localPack or not pack.source) and "Shared" or canFollow and "Follow" or "Cached")
-        row.follow:SetEnabled(not page.readOnly and not page.busy and canFollow and not pack.selected)
+    end, function(row, publisher)
+        row.publisher = publisher
+        row.name:SetText(GuideText(publisher.source or "You") .. (publisher.localPack and " (you)" or ""))
+        row.detail:SetText(GuideText(publisher.status))
+        row.follow:SetText(publisher.localPack and "Shared" or publisher.selected and "Following"
+            or publisher.canFollow and "Follow" or "Offline")
+        row.follow:SetEnabled(not page.readOnly and not page.busy and publisher.canFollow and not publisher.selected)
     end)
-    panel.restedxpPacks.empty:SetText("No shared packs available. Imported guides with recoverable source are shared automatically.")
+    panel.restedxpPublishers.empty:SetText("No publishers found. Imported guides are shared automatically with your LIT group.")
     panel.restedxpUpdate = UI:Button(main, "Update guides", "primary")
     panel.restedxpUpdate:SetPoint("TOPLEFT", 16, -338)
     panel.restedxpUpdate:SetSize(160, 32)
@@ -326,12 +304,12 @@ local function CreateRestedXPPage(panel)
         addon:RefreshOptions()
     end)
     OptionTooltip(page, panel.restedxpUpdate, "Update guides",
-        "Discover available group packs and install changed content from publishers you follow. "
+        "Find publishers in your group and install updates from those you follow. "
             .. "Imported guides are shared automatically on login and refreshed after RestedXP imports. "
-            .. "Guide versions are displayed above; pack content identifies changes.")
-    panel.restedxpSharing = UI:Label(main, "", 11, "muted")
-    panel.restedxpSharing:SetPoint("TOPLEFT", 192, -338)
-    panel.restedxpSharing:SetSize(472, 32)
+            .. "Hover over Guide status for installation and sharing details.")
+    local hint = UI:Label(main, "Follow a publisher, then click Update guides.\nHover over Guide status for details.", 11, "muted")
+    hint:SetPoint("TOPLEFT", 192, -338)
+    hint:SetSize(472, 32)
     panel.restedxpShare = UI:Button(main, "Share export")
     panel.restedxpShare:SetPoint("TOPRIGHT", -16, -12)
     panel.restedxpShare:SetSize(128, 28)
@@ -465,11 +443,10 @@ local function RefreshRestedXP(panel)
             .. (state.version and (" (" .. GuideText(state.version) .. ")") or "") .. "."
     if state.installationProblem then status = status .. " " .. GuideText(state.installationProblem) end
     if state.status and state.status ~= "" then status = status .. "\n" .. GuideText(state.status) end
-    panel.restedxpStatus:SetText(status)
-    panel.restedxpGuides:Refresh(state.guides)
-    panel.restedxpPacks:Refresh(state.packs)
-    panel.restedxpSharing:SetText(GuideText(state.sharingStatus
-        or "Imported guides are shared automatically with your LIT group."))
+    page.guideDetails = status .. "\n" .. tostring(#(state.guides or {})) .. " installed guides.\n"
+        .. GuideText(state.sharingStatus or "Imported guides are shared automatically with your LIT group.")
+    panel.restedxpStatus:SetText(GuideText(state.guideStatus or "Loading"))
+    panel.restedxpPublishers:Refresh(state.publishers)
     panel.restedxpUpdate:SetEnabled(not page.readOnly and not page.busy and state.canUpdate == true)
     panel.restedxpShare:SetEnabled(not page.readOnly and not page.busy)
     for _, edit in ipairs({ panel.restedxpPackID, panel.restedxpBattleTag, panel.restedxpExport }) do

@@ -6,7 +6,7 @@ local function loadModule(file, addon, env)
 end
 
 local function client(name, saved, readOnly, automatic, metadata)
-    local world = { now = 0, timers = {}, sent = {}, observed = {}, output = {}, listeners = {}, events = {}, installs = {}, installPayloads = {}, notifications = 0 }
+    local world = { now = 0, timers = {}, sent = {}, observed = {}, output = {}, listeners = {}, events = {}, installs = {}, installPayloads = {}, installOptions = {}, notifications = 0 }
     local addon = { db = saved or {}, savedDataReadOnly = readOnly, ready = true, initialized = true,
         connected = false, fingerprint = "test-group", dataState = { requestSession = name .. "-session" } }
     local env = setmetatable({ bit = false, bit32 = false, GetTime = function() return world.now end,
@@ -65,10 +65,11 @@ local function client(name, saved, readOnly, automatic, metadata)
         return { installed = not world.missing, loaded = not world.missing, compatible = not world.missing,
             version = "test", guides = {}, problem = world.missing and "RestedXP is not installed." or nil }
     end
-    function addon:InstallRestedXPPack(pack, callback)
+    function addon:InstallRestedXPPack(pack, callback, options)
         if world.busy then return false, "Native import running", "busy" end
         world.installs[#world.installs + 1] = pack.hash
         world.installPayloads[#world.installPayloads + 1] = pack
+        world.installOptions[#world.installs] = options or false
         world.installTimer = env.C_Timer.NewTimer(0.5, function()
             if not world.failInstall and world.afterInstall then world.afterInstall(pack) end
             callback(not world.failInstall, world.failInstall and "Synthetic import failure" or nil)
@@ -328,11 +329,181 @@ do
     publish(publisher, packFor(publisher, api, 1), "first")
     publish(publisher, packFor(publisher, api, 2, 4), "second")
     exchange(a, b, 5)
-    assert(recipient:SelectRestedXPPack("first", "alpha-testrealm"))
-    assert(recipient:SelectRestedXPPack("second", "alpha-testrealm"))
+    local state = recipient:GetRestedXPState()
+    assert(#state.packs == 2 and #state.publishers == 1 and state.publishers[1].packCount == 2
+        and state.publishers[1].canFollow and not state.publishers[1].selected,
+        "several guide packs from one player produce one available publisher")
+    assert(recipient:SelectRestedXPPublisher("Alpha-TestRealm"))
+    assert(recipient:GetRestedXPState().publishers[1].selected,
+        "following a publisher selects all of their currently advertised guide packs")
     assert(recipient:UpdateRestedXPGuides())
     exchange(a, b, 100)
-    assert(#b.installs == 2, "one update request installs both followed packs")
+    state = recipient:GetRestedXPState()
+    assert(#b.installs == 2 and state.guideStatus == "Up to date" and state.publishers[1].status == "Up to date",
+        "one publisher choice installs both packs and reports their confirmed current revisions")
+end
+
+-- A player remains one publisher across local inventory, cached content and
+-- live offers. Following a player applies only to the offers visible now.
+do
+    local addon, world = client("Viewer", nil, nil, nil, true)
+    local first, second, third = string.rep("a", 64), string.rep("b", 64), string.rep("c", 64)
+    world.inventory = {
+        { id = "own-one", label = "Own One", revision = first, guideCount = 1 },
+        { id = "own-two", label = "Own Two", revision = second, guideCount = 2 },
+    }
+    world:connect(true); world:advance(4)
+    local group = addon.db.restedxp.groups[addon.fingerprint]
+    local function offer(source, id, hash)
+        local body = "1|V|" .. id .. "|" .. hash .. "|1"
+        assert(world.receive(source, body .. "|" .. addon:SignGroupMessage("restedxp", body)))
+    end
+    offer("Alpha-TestRealm", "remote-one", first)
+    offer("ALPHA-TESTREALM", "remote-two", second)
+    offer("Zeta-TestRealm", "remote-one", third)
+    group.sources["not-downloaded"] = "offline-testrealm"
+    local state = addon:GetRestedXPState()
+    assert(#state.publishers == 4 and state.publishers[1].source == "alpha-testrealm"
+        and state.publishers[2].source == "offline-testrealm" and state.publishers[3].source == "viewer-testrealm"
+        and state.publishers[4].source == "zeta-testrealm", "publisher rows normalize names and sort once per player")
+    assert(state.publishers[3].localPack and state.publishers[3].packCount == 2
+        and not state.publishers[3].canFollow and state.publishers[3].status == "Shared",
+        "all locally shared guide groups appear as one player who cannot follow themselves")
+    assert(state.publishers[2].selected and not state.publishers[2].canFollow
+        and state.publishers[2].status == "Publisher offline", "an offline subscription stays visible without cached guides")
+    assert(addon:SelectRestedXPPack("remote-one", "alpha-testrealm"))
+    group.installed["viewer-testrealm"]["remote-one"] = first
+    state = addon:GetRestedXPState()
+    assert(not state.publishers[1].selected and state.publishers[1].canFollow
+        and state.publishers[1].status == "Partly followed", "partially followed publishers can still follow their remaining packs")
+    assert(addon:SelectRestedXPPublisher("ALPHA-TESTREALM"))
+    assert(group.sources["remote-one"] == "alpha-testrealm" and group.sources["remote-two"] == "alpha-testrealm"
+        and group.sources["not-downloaded"] == "offline-testrealm", "the publisher choice preserves unrelated subscriptions")
+    offer("Alpha-TestRealm", "remote-three", third)
+    state = addon:GetRestedXPState()
+    assert(group.sources["remote-three"] == nil and not state.publishers[1].selected and state.publishers[1].canFollow,
+        "a newly advertised pack requires another explicit publisher choice")
+    assert(state.guideStatus == "Publisher offline", "a missing followed offer cannot be reported as current")
+    group.sources["not-downloaded"] = nil
+    assert(addon:GetRestedXPState().guideStatus == "Updates available")
+    addon.restedxpState.failed["remote-two"] = second
+    assert(addon:GetRestedXPState().guideStatus == "Update failed", "a failed current followed revision takes priority over available updates")
+    addon.restedxpState.failed["remote-two"] = third
+    assert(addon:GetRestedXPState().guideStatus == "Updates available", "an obsolete failure cannot hide a new publisher revision")
+    group.installed["viewer-testrealm"]["remote-two"] = second
+    assert(addon:GetRestedXPState().guideStatus == "Up to date", "only followed current revisions determine the update result")
+    addon.restedxpState.failed["remote-two"] = nil
+    assert(addon:ImportRestedXPPack("invalid", "bad", "Source#1234"))
+    world:advance(0.1)
+    assert(addon:GetRestedXPState().guideStatus == "Needs attention",
+        "a failed manual export remains visible even when followed guides already match")
+    world:advance(4)
+    assert(addon:GetRestedXPState().guideStatus == "Needs attention", "background inventory work does not clear an import error")
+    addon.restedxpState.incoming = { source = "alpha-testrealm", size = 200, bytes = 50 }
+    assert(addon:GetRestedXPState().guideStatus == "Updating (25%)", "the single guide status includes current transfer progress")
+    addon.restedxpState.incoming = nil
+end
+
+-- Cached updates and local inventory can share a group ID without sharing a
+-- publisher. Attribute failures to the source of that particular revision.
+do
+    local addon, world = client("Attribution", nil, nil, nil, true)
+    local older, newer = string.rep("a", 64), string.rep("b", 64)
+    world.inventory = { { id = "same-group", label = "Own Guides", revision = older, guideCount = 1 } }
+    world:connect(true); world:advance(4)
+    local group = addon.db.restedxp.groups[addon.fingerprint]
+    group.packs["same-group"] = { hash = newer, revision = newer, data = "verified cached transfer", source = "alpha-testrealm" }
+    group.sources["same-group"], addon.restedxpState.failed["same-group"] = "alpha-testrealm", newer
+    local body = "1|V|same-group|" .. newer .. "|1"
+    assert(world.receive("Alpha-TestRealm", body .. "|" .. addon:SignGroupMessage("restedxp", body)))
+    local state = addon:GetRestedXPState()
+    assert(#state.publishers == 2 and state.publishers[1].packCount == 1 and state.publishers[1].status == "Update failed"
+        and state.publishers[2].localPack and state.publishers[2].status == "Shared",
+        "a failed remote cached revision cannot label the player's own successfully shared inventory as failed")
+    group.installed["attribution-testrealm"]["same-group"] = newer
+    state = addon:GetRestedXPState()
+    assert(state.guideStatus == "Up to date" and state.publishers[1].status == "Up to date",
+        "a later verified native match supersedes an earlier failure for the same revision")
+end
+
+-- Bulk subscriptions enforce the same cap before changing any existing source,
+-- and stale offers or lifecycle boundaries cannot save a partial selection.
+do
+    local addon, world = client("Limits")
+    world:connect(true); world:advance(4)
+    local group = addon.db.restedxp.groups[addon.fingerprint]
+    for index = 1, 7 do group.sources["existing-" .. index] = "other-testrealm" end
+    local hash = string.rep("a", 64)
+    for _, id in ipairs({ "existing-1", "new-one", "new-two" }) do
+        local body = "1|V|" .. id .. "|" .. hash .. "|1"
+        assert(world.receive("Alpha-TestRealm", body .. "|" .. addon:SignGroupMessage("restedxp", body)))
+    end
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm"))
+    assert(group.sources["existing-1"] == "other-testrealm" and not group.sources["new-one"] and not group.sources["new-two"],
+        "exceeding the subscription limit changes none of a publisher's sources")
+    group.sources["existing-7"] = nil
+    assert(addon:SelectRestedXPPublisher("Alpha-TestRealm") and group.sources["existing-1"] == "alpha-testrealm"
+        and group.sources["new-one"] == "alpha-testrealm" and group.sources["new-two"] == "alpha-testrealm",
+        "replacing existing subscriptions consumes no additional slots")
+    local expected = Copy(group.sources)
+    local function Unchanged()
+        for id, source in pairs(expected) do assert(group.sources[id] == source) end
+        for id, source in pairs(group.sources) do assert(expected[id] == source) end
+    end
+    assert(not addon:SelectRestedXPPublisher("Limits-TestRealm")); Unchanged()
+    addon.savedDataReadOnly = true
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm")); Unchanged()
+    addon.savedDataReadOnly = nil
+    addon.restedxpState.incoming = {}
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm")); Unchanged()
+    addon.restedxpState.incoming = nil
+    addon.restedxpState.peerTest = {}
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm")); Unchanged()
+    addon.restedxpState.peerTest = nil
+    addon.switching = true
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm")); Unchanged()
+    addon.switching, addon.fingerprint = nil, "changed-before-notification"
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm") and not addon.db.restedxp.groups[addon.fingerprint]); Unchanged()
+    addon.fingerprint = "test-group"
+    world:advance(200)
+    assert(not addon:SelectRestedXPPublisher("Alpha-TestRealm")); Unchanged()
+end
+
+-- The main status distinguishes installation and connection problems from a
+-- usable local library; automatic sharing alone does not certify an update.
+do
+    local addon, world = client("Summary", nil, nil, nil, true)
+    world.missing = true
+    assert(addon:GetRestedXPState().guideStatus == "Not installed")
+    world.missing = false
+    local installation = addon.GetRestedXPInstallation
+    function addon:GetRestedXPInstallation()
+        local result = installation(self)
+        result.loaded, result.compatible = false, false
+        return result
+    end
+    assert(addon:GetRestedXPState().guideStatus == "Not loaded")
+    function addon:GetRestedXPInstallation()
+        local result = installation(self)
+        result.compatible = false
+        return result
+    end
+    assert(addon:GetRestedXPState().guideStatus == "Unavailable")
+    addon.GetRestedXPInstallation = installation
+    addon.savedDataReadOnly = true
+    assert(addon:GetRestedXPState().guideStatus == "Read-only")
+    addon.savedDataReadOnly = nil
+    assert(addon:GetRestedXPState().guideStatus == "Disconnected")
+    world:connect(true)
+    assert(addon:GetRestedXPState().guideStatus == "Checking")
+    world:advance(4)
+    assert(addon:GetRestedXPState().guideStatus == "No guides")
+    world.inventory = { { id = "own-guides", label = "Own Guides", revision = string.rep("a", 64), guideCount = 5 } }
+    world.installedChanged(); world:advance(2)
+    assert(addon:GetRestedXPState().guideStatus == "Ready", "shared local guides do not claim an online update comparison")
+    local body = "1|V|remote-guides|" .. string.rep("b", 64) .. "|1"
+    assert(world.receive("Other-TestRealm", body .. "|" .. addon:SignGroupMessage("restedxp", body)))
+    assert(addon:GetRestedXPState().guideStatus == "Choose a publisher")
 end
 
 -- Authentication, bounded packets, disconnects and read-only data protect the
@@ -1095,6 +1266,276 @@ do
     SameTraffic(report.tx, Traffic(world.sent), "successful retry traffic is counted once")
     SameTraffic(report.rx, Traffic({ malformed, query }),
         "authenticated queries and rejected authenticated bodies count their complete observed channel sizes")
+end
+
+local function peerFixture()
+    local publisher, a = client("PeerAlpha", nil, nil, nil, true)
+    local recipient, b = client("PeerBeta", nil, nil, nil, true)
+    local id, revision = "rxpi-" .. string.rep("a", 24), string.rep("9", 64)
+    local bytes = {}
+    for index = 0, 255 do bytes[#bytes + 1] = string.char(index) end
+    local sources = { string.rep(table.concat(bytes), 4), "opaque second native guide cache" }
+    local expected = { { id = "peer-first", version = 7 }, { id = "peer-second", version = 9 } }
+    local pack = assert(publisher.RestedXPCodec.FromCachedSources(sources, expected))
+    pack.id, pack.hash, pack.revision = id, revision, revision
+    a.inventory = { { id = id, label = "Peer Test Guides", revision = revision, guideCount = 2 } }
+    b.inventory = Copy(a.inventory)
+    a.preparedPacks[id] = { revision = revision, pack = pack }
+    b:enableCachedMatching()
+    b.cachedMatches[revision] = true
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    return publisher, a, recipient, b, id, revision, pack
+end
+local function trafficSince(wires, first)
+    local recent = {}
+    for index = first + 1, #wires do recent[#recent + 1] = wires[index] end
+    return Traffic(recent)
+end
+local function finishPeerTest(recipient, a, b, filter, limit)
+    for _ = 1, math.ceil((limit or 80) / 0.15) do
+        exchange(a, b, 0.15, filter)
+        local report = recipient:GetRestedXPPerformance().peerTest
+        if report and report.status ~= "running" then return report end
+    end
+    error("peer test did not reach a bounded terminal state")
+end
+local function checkPeerPhases(report)
+    local totalTx, totalRx = Traffic({}), Traffic({})
+    for _, name in ipairs({ "discovery", "transfer", "import" }) do
+        local phase = assert(report.phases[name], "peer test reports the " .. name .. " phase")
+        assert(type(phase.wall) == "number" and phase.wall >= 0, "peer phase timing is nonnegative")
+        for field in pairs(totalTx) do
+            totalTx[field], totalRx[field] = totalTx[field] + phase.tx[field], totalRx[field] + phase.rx[field]
+        end
+    end
+    SameTraffic(report.tx, totalTx, "peer phase transmit counters account for the entire test")
+    SameTraffic(report.rx, totalRx, "peer phase receive counters account for the entire test")
+end
+
+-- A peer test forces one ordinary discovery, download and native import even
+-- when both the installed metadata and cached package already match exactly.
+do
+    local publisher, a, recipient, b, id, revision, pack = peerFixture()
+    assert(recipient:SelectRestedXPPack(id, "peeralpha-testrealm"))
+    local group = recipient.db.restedxp.groups[recipient.fingerprint]
+    group.packs[id] = { id = id, data = pack.data, hash = revision, revision = revision,
+        cacheFormat = true, guideCount = pack.guideCount, expectedGuides = Copy(pack.expectedGuides),
+        source = "peeralpha-testrealm", label = "Already cached" }
+    recipient.restedxpState.decoded[id] = Copy(pack)
+    assert(group.installed["peerbeta-testrealm"][id] == revision)
+    local sourcesBefore = Copy(group.sources)
+    local sentBefore, receivedBefore = #b.sent, #b.observed
+    assert(recipient:StartRestedXPPeerTest())
+    local running = recipient:GetRestedXPPerformance().peerTest
+    assert(running and running.status == "running", "the complete peer test starts with an observable running report")
+    local duplicate, problem = recipient:StartRestedXPPeerTest()
+    assert(not duplicate and type(problem) == "string", "a second peer test cannot replace the active test")
+    local report = finishPeerTest(recipient, a, b)
+    assert(report.status == "complete" and report.id == id and report.source == "peeralpha-testrealm"
+        and report.wall >= 0 and #a.prepares == 1,
+        "default peer testing selects the followed publisher and completes a real requested transfer")
+    assert(#b.installs == 1 and b.installs[1] == revision and b.installOptions[1].test == true
+        and b.installPayloads[1].cacheFormat and b.installPayloads[1].expectedGuides,
+        "the test bypasses installed/cached matches and requests a forced native import of the same version")
+    assert(report.tx.Q == 1 and report.tx.W >= 1 and report.rx.D == math.ceil(#pack.data / 128),
+        "testing sends one normal discovery query and the complete normal guide download")
+    SameTraffic(report.tx, trafficSince(b.sent, sentBefore), "peer test transmit counts match ordinary native frames")
+    SameTraffic(report.rx, trafficSince(b.observed, receivedBefore), "peer test receive counts match ordinary observed frames")
+    checkPeerPhases(report)
+    assert(group.sources[id] == sourcesBefore[id],
+        "the peer test preserves the followed publisher")
+    for key, source in pairs(group.sources) do assert(sourcesBefore[key] == source, "peer testing adds no subscriptions") end
+    for key, source in pairs(sourcesBefore) do assert(group.sources[key] == source, "peer testing removes no subscriptions") end
+    local sent, observed, imported = #b.sent, #b.observed, #b.installs
+    recipient:ShowRestedXPPerformance()
+    assert(#b.sent == sent and #b.observed == observed and #b.installs == imported,
+        "printing the peer report adds no diagnostic traffic or native imports")
+    report.phases.discovery.tx.Q = 999
+    assert(recipient:GetRestedXPPerformance().peerTest.phases.discovery.tx.Q ~= 999,
+        "peer timing reports are detached snapshots")
+end
+
+-- Explicit targets require no saved subscription. Missing-chunk recovery uses
+-- ordinary windows and repeats only the deliberately lost chunk.
+do
+    local _, a, recipient, b, id, _, pack = peerFixture()
+    local group = recipient.db.restedxp.groups[recipient.fingerprint]
+    assert(next(group.sources) == nil)
+    assert(recipient:StartRestedXPPeerTest("peeralpha-testrealm", id))
+    local sentBefore, dropped, chunks = #a.sent, false, {}
+    local report = finishPeerTest(recipient, a, b, function(wire)
+        local sequence = wire:match("^1|D|[^|]+|(%d+)|")
+        if sequence then
+            chunks[sequence] = (chunks[sequence] or 0) + 1
+            if sequence == "3" and not dropped then dropped = true; return false end
+        end
+        return true
+    end)
+    assert(report.status == "complete" and dropped and #b.installs == 1 and next(group.sources) == nil,
+        "an explicit one-off target recovers the lost chunk without saving a publisher selection")
+    local packets = 0
+    for sequence, count in pairs(chunks) do
+        assert(count == (sequence == "3" and 2 or 1), "peer testing retransmits only a missing data sequence")
+        packets = packets + count
+    end
+    assert(packets == math.ceil(#pack.data / 128) + 1 and #a.sent > sentBefore,
+        "the peer test adds no diagnostic frames or redundant data beyond normal loss recovery")
+end
+
+do
+    local _, a, recipient, b, id = peerFixture()
+    assert(recipient:StartRestedXPPeerTest())
+    local report = finishPeerTest(recipient, a, b)
+    assert(report.status == "complete" and report.id == id and report.source == "peeralpha-testrealm"
+        and next(recipient.db.restedxp.groups[recipient.fingerprint].sources) == nil,
+        "with no followed publisher the default test uses an available peer without persisting a source")
+end
+
+-- Partial transfers expose useful counters before completion and retain those
+-- counters when cancellation or the normal no-progress timeout ends the test.
+do
+    local _, a, recipient, b, id, _, pack = peerFixture()
+    local function LoseAfterTwo(wire)
+        local sequence = tonumber(wire:match("^1|D|[^|]+|(%d+)|"))
+        return not sequence or sequence <= 2
+    end
+    assert(recipient:StartRestedXPPeerTest("peeralpha-testrealm", id))
+    local partial
+    for _ = 1, 100 do
+        exchange(a, b, 0.15, LoseAfterTwo)
+        local snapshot = recipient:GetRestedXPPerformance()
+        if snapshot.peerTest and snapshot.peerTest.phase == "transfer"
+            and snapshot.peerTest.bytes == 256 and snapshot.peerTest.retries > 0 then
+            partial = snapshot.peerTest
+            assert(snapshot.receiving and snapshot.receiving.bytes == partial.bytes)
+            break
+        end
+    end
+    assert(partial and partial.status == "running" and partial.expectedBytes == #pack.data,
+        "active peer snapshots expose received bytes, expected bytes and missing-window retries")
+    assert(recipient:CancelRestedXPPeerTest())
+    local cancelled = recipient:GetRestedXPPerformance().peerTest
+    assert(cancelled.status == "cancelled" and cancelled.bytes == 256 and cancelled.retries == partial.retries
+        and cancelled.expectedBytes == #pack.data and #b.installs == 0,
+        "cancelling a partial transfer preserves its last received-byte and retry counters")
+    checkPeerPhases(cancelled)
+
+    local _, timeoutA, timeoutRecipient, timeoutB, timeoutID, _, timeoutPack = peerFixture()
+    assert(timeoutRecipient:StartRestedXPPeerTest("peeralpha-testrealm", timeoutID))
+    local timedOut = finishPeerTest(timeoutRecipient, timeoutA, timeoutB, LoseAfterTwo)
+    assert(timedOut.status == "failed" and timedOut.bytes == 256 and timedOut.retries > 0
+        and timedOut.expectedBytes == #timeoutPack.data and #timeoutB.installs == 0,
+        "transfer timeout retains partial bytes and retry windows instead of reporting zero completed work")
+end
+
+-- Native throttling can postpone the sole discovery query. Its response window
+-- starts when that query is actually accepted, so a later normal reply remains
+-- eligible without another query or any diagnostic protocol frames.
+do
+    local _, a, recipient, b, id = peerFixture()
+    local before = #b.sent
+    b.rejectSends = true
+    assert(recipient:StartRestedXPPeerTest("peeralpha-testrealm", id))
+    local delayed = {}
+    local function HoldDiscovery(wire)
+        if wire:match("^1|[VO]|") then delayed[#delayed + 1] = wire; return false end
+        return true
+    end
+    exchange(a, b, 8, HoldDiscovery)
+    local waiting = recipient:GetRestedXPPerformance().peerTest
+    assert(waiting.status == "running" and waiting.tx.Q == 0,
+        "rejected native discovery sends do not count as a successful query or prematurely finish the test")
+    b.rejectSends = false
+    for _ = 1, 20 do
+        exchange(a, b, 0.15, HoldDiscovery)
+        waiting = recipient:GetRestedXPPerformance().peerTest
+        if waiting.tx.Q == 1 then break end
+    end
+    assert(waiting.status == "running" and waiting.tx.Q == 1 and waiting.queryWaitWall >= 8,
+        "the accepted normal query records its real send delay")
+    exchange(a, b, 8, HoldDiscovery)
+    assert(recipient:GetRestedXPPerformance().peerTest.status == "running" and #delayed > 0,
+        "discovery keeps its full response window after a delayed successful native send")
+    for _, wire in ipairs(delayed) do
+        b.observed[#b.observed + 1] = wire
+        assert(b.receive("PeerAlpha-TestRealm", wire))
+    end
+    local report = finishPeerTest(recipient, a, b)
+    assert(report.status == "complete" and report.tx.Q == 1 and trafficSince(b.sent, before).Q == 1 and #b.installs == 1,
+        "a delayed ordinary publisher reply completes the test with exactly one successful discovery query")
+    checkPeerPhases(report)
+end
+
+-- Failure and cancellation leave source preferences intact and stop the test
+-- even when no publisher answers or a native import rejects its package.
+do
+    local addon, world = client("PeerOffline", nil, nil, nil, true)
+    local accepted, problem = addon:StartRestedXPPeerTest()
+    assert(not accepted and type(problem) == "string", "peer testing requires a connected group")
+    world:connect(true); world:advance(4)
+    assert(addon:StartRestedXPPeerTest())
+    world:advance(16)
+    local report = addon:GetRestedXPPerformance().peerTest
+    assert(report and report.status == "failed" and #world.installs == 0,
+        "empty discovery terminates with a failed peer report")
+
+    local _, a, recipient, b, id = peerFixture()
+    b.failInstall = true
+    assert(recipient:StartRestedXPPeerTest("peeralpha-testrealm", id))
+    report = finishPeerTest(recipient, a, b)
+    assert(report.status == "failed" and #b.installs == 1
+        and next(recipient.db.restedxp.groups[recipient.fingerprint].sources) == nil,
+        "native import failure terminates the one-off test without a saved subscription")
+
+    local _, lostA, lostRecipient, lostB, lostID = peerFixture()
+    assert(lostRecipient:StartRestedXPPeerTest("peeralpha-testrealm", lostID))
+    local lost = finishPeerTest(lostRecipient, lostA, lostB, function(wire) return not wire:match("^1|D|") end)
+    assert(lost.status == "failed" and #lostB.installs == 0
+        and next(lostRecipient.db.restedxp.groups[lostRecipient.fingerprint].sources) == nil,
+        "a failed normal transfer leaves a terminal peer report and does not start native import")
+
+    local _, c, cancelled, d, cancelledID = peerFixture()
+    assert(cancelled:StartRestedXPPeerTest("peeralpha-testrealm", cancelledID))
+    assert(cancelled:CancelRestedXPPeerTest())
+    local traffic = #d.sent
+    exchange(c, d, 5)
+    assert(cancelled:GetRestedXPPerformance().peerTest.status == "cancelled" and #d.installs == 0 and #d.sent == traffic,
+        "explicit cancellation removes pending discovery and prevents later native imports")
+
+    local selected, selectionProblem = cancelled:StartRestedXPPeerTest("peeralpha-testrealm", "missing-pack")
+    local missingPack = selected and finishPeerTest(cancelled, c, d)
+    assert((missingPack and missingPack.status == "failed" or not selected and type(selectionProblem) == "string") and #d.installs == 0,
+        "an explicit pack filter cannot silently choose a different advertised package")
+    selected, selectionProblem = cancelled:StartRestedXPPeerTest("absent-testrealm", cancelledID)
+    local missingSource = selected and finishPeerTest(cancelled, c, d)
+    assert((missingSource and missingSource.status == "failed" or not selected and type(selectionProblem) == "string") and #d.installs == 0,
+        "an explicit publisher filter cannot silently choose another online source")
+
+    local _, importA, importRecipient, importB, importID = peerFixture()
+    assert(importRecipient:StartRestedXPPeerTest("peeralpha-testrealm", importID))
+    for _ = 1, 1000 do
+        exchange(importA, importB, 0.15)
+        if #importB.installs > 0 then break end
+    end
+    assert(#importB.installs == 1 and importRecipient:GetRestedXPPerformance().peerTest.status == "running")
+    assert(importRecipient:CancelRestedXPPeerTest())
+    exchange(importA, importB, 2)
+    assert(importRecipient:GetRestedXPPerformance().peerTest.status == "cancelled" and importB.installTimer.cancelled,
+        "cancelling the import phase stops the owned native installation and preserves the terminal report")
+
+    assert(cancelled:StartRestedXPPeerTest("peeralpha-testrealm", cancelledID))
+    d:connect(false)
+    d:advance(5)
+    report = cancelled:GetRestedXPPerformance().peerTest
+    assert(report and report.status == "cancelled" and #d.installs == 0,
+        "connection loss finalizes the peer test instead of leaving a running report")
+
+    local readonly, readWorld = client("PeerReadOnly", { marker = true }, true, nil, true)
+    readWorld:connect(true)
+    accepted, problem = readonly:StartRestedXPPeerTest()
+    assert(not accepted and type(problem) == "string" and readWorld.output and #readWorld.sent == 0,
+        "read-only saved data cannot begin peer traffic or native test installation")
 end
 
 -- Production timing exercises only the same ID/version inventory used on login,

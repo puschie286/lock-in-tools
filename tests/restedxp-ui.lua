@@ -12,8 +12,9 @@ local function Fixture(state)
         if calls.updateError then return false, calls.updateError end
         return true
     end
-    function addon:SelectRestedXPPack(id, source)
-        calls.selections[#calls.selections + 1] = { id, source }
+    function addon:SelectRestedXPPublisher(source)
+        calls.selections[#calls.selections + 1] = source
+        if calls.selectionError then return false, calls.selectionError end
         return true
     end
     function addon:ImportRestedXPPack(id, raw, source)
@@ -26,24 +27,30 @@ local function Fixture(state)
     return addon, addon.optionsPanel, calls, environment
 end
 
+local function Details(panel, environment)
+    panel.restedxpSummary.scripts.OnEnter(panel.restedxpSummary)
+    local tooltip = environment.GameTooltip
+    assert(tooltip.shown and tooltip.owner == panel.restedxpSummary, "guide details belong to the summary")
+    return table.concat(tooltip.lines, "\n")
+end
+
 do
-    local state = { installed = false, loaded = false, canUpdate = false, guides = {}, packs = {} }
-    local addon, panel, calls = Fixture(state)
+    local state = { installed = false, loaded = false, canUpdate = false, guides = {}, packs = {},
+        publishers = {}, guideStatus = "Not installed" }
+    local addon, panel, calls, environment = Fixture(state)
     assert(panel.selectedTab == "restedxp" and panel.pages.restedxp:IsVisible()
-        and panel.restedxpStatus:GetText():find("not installed", 1, true),
+        and panel.restedxpStatus:GetText() == "Not installed",
         "RestedXP has an accessible Settings tab with explicit installation status")
-    assert(not panel.restedxpUpdate:IsEnabled() and panel.restedxpGuides.empty:IsShown()
-        and panel.restedxpPacks.empty:IsShown(), "unavailable updates and empty lists remain understandable")
-    assert(panel.restedxpPacks.empty:GetText():find("shared automatically", 1, true)
-        and not panel.restedxpPacks.empty:GetText():find("must use Share export", 1, true),
+    assert(not panel.restedxpUpdate:IsEnabled() and not panel.restedxpGuides
+        and panel.restedxpPublishers.empty:IsShown(), "one summary replaces the individual installed guide list")
+    assert(panel.restedxpPublishers.empty:GetText():find("shared automatically", 1, true),
         "empty availability explains automatic sharing without requiring a manual first export")
     assert(panel.tabs.restedxp.point[2] + panel.tabs.restedxp:GetWidth() <= 700,
         "all Settings tabs fit inside the existing window")
-    state.installed, state.version = true, "4.9.1"
+    state.installed, state.version, state.guideStatus = true, "4.9.1", "Not loaded"
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpStatus:GetText():find("not loaded", 1, true)
-        and panel.restedxpStatus:GetText():find("4.9.1", 1, true),
-        "an installed but unloaded addon is distinguished from an absent addon")
+    assert(panel.restedxpStatus:GetText() == "Not loaded" and Details(panel, environment):find("4.9.1", 1, true),
+        "installation stays concise and the addon version is available on hover")
     state.loaded, state.canUpdate = true, true
     state.sharingStatus = "Automatically sharing 9 imported guides."
     state.sharedInstalledGuides, state.unshareableGuides = 9, 0
@@ -53,80 +60,86 @@ do
     end
     state.packs = {
         { id = "test", label = "Test pack", source = "Alice-Realm", hash = "12345678fullhash", updateAvailable = true },
-        { id = "test", source = "Bob-Realm", hash = "anotherhash", selected = true, installed = true },
-        { id = "mine", source = "Local-Realm", hash = "localhash", localPack = true },
-        { id = "offline", source = "Offline-Realm", hash = "cachedhash", canFollow = false },
+        { id = "second", source = "Alice-Realm", hash = "anotherhash", updateAvailable = true },
     }
+    state.publishers = {
+        { source = "Alice-Realm", status = "Available", canFollow = true, packCount = 2 },
+        { source = "Bob-Realm", status = "Up to date", canFollow = true, selected = true },
+        { source = "Carol-Realm", status = "Available", canFollow = true },
+        { source = "Dana-Realm", status = "Available", canFollow = true },
+        { source = "Local-Realm", status = "Shared", localPack = true, canFollow = false },
+        { source = "Offline-Realm", status = "Publisher offline", canFollow = false },
+    }
+    state.guideStatus = "Updates available"
     addon:Notify("RESTEDXP_CHANGED")
     assert(panel.restedxpUpdate:IsEnabled()
-        and panel.restedxpGuides.rows[1].name:GetText() == "Test group / Guide 1"
-        and panel.restedxpGuides.rows[1].version:GetText() == "v1"
-        and panel.restedxpGuides.scrollbar:IsShown(), "installed guide names and versions render in a bounded list")
-    assert(panel.restedxpSharing:GetText() == state.sharingStatus,
-        "automatic sharing status is visible without a sharing preference or manual export")
-    assert(panel.restedxpPacks.rows[1].name:GetText() == "Test pack (test)",
-        "automatic pack labels remain readable beside their stable identity")
+        and panel.restedxpStatus:GetText() == "Updates available"
+        and panel.restedxpPublishers.scrollbar:IsShown(), "one status covers the installed guides and publishers have a bounded list")
+    local details = Details(panel, environment)
+    assert(details:find("9 installed guides", 1, true) and details:find(state.sharingStatus, 1, true)
+        and not details:find("Guide 1", 1, true), "counts and sharing details stay available without listing individual guides")
+    assert(panel.restedxpPublishers.rows[1].name:GetText() == "Alice-Realm"
+        and panel.restedxpPublishers.rows[1].detail:GetText() == "Available",
+        "publisher rows show a player and a single status instead of pack names and hashes")
     state.refreshingInstalled = true
     state.busy, state.status = false, "Choose Follow beside a publisher, then use Update guides."
     state.sharingStatus = "Refreshing automatically shared guides..."
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpSharing:GetText() == state.sharingStatus
-        and panel.restedxpStatus:GetText():find("Choose Follow", 1, true)
-        and panel.restedxpUpdate:IsEnabled() and panel.restedxpPacks.rows[1].follow:IsEnabled(),
-        "background native-source preparation keeps Update and Follow available with both statuses visible")
-    state.busy, state.status = true, "Checking available group guides..."
+    assert(Details(panel, environment):find(state.sharingStatus, 1, true)
+        and Details(panel, environment):find("Choose Follow", 1, true)
+        and panel.restedxpUpdate:IsEnabled() and panel.restedxpPublishers.rows[1].follow:IsEnabled(),
+        "background source preparation leaves Update and Follow available while details remain accessible")
+    state.busy, state.status, state.guideStatus = true, "Checking available group guides...", "Checking"
     addon:Notify("RESTEDXP_CHANGED")
-    assert(not panel.restedxpUpdate:IsEnabled() and not panel.restedxpPacks.rows[1].follow:IsEnabled()
-        and panel.restedxpSharing:GetText() == state.sharingStatus
-        and panel.restedxpStatus:GetText():find("Checking available", 1, true),
+    assert(not panel.restedxpUpdate:IsEnabled() and not panel.restedxpPublishers.rows[1].follow:IsEnabled()
+        and panel.restedxpStatus:GetText() == "Checking",
         "foreground discovery temporarily disables actions independently of background source preparation")
     state.busy, state.status = false, nil
     state.refreshingInstalled = false
     state.sharedInstalledGuides, state.unshareableGuides = 8, 1
     state.sharingStatus = "Automatically sharing 8 guides. Complete source is unavailable for 1 guide."
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpSharing:GetText() == state.sharingStatus,
-        "guides whose source cannot be recovered have separate actionable sharing status")
-    panel.restedxpGuides.scripts.OnMouseWheel(panel.restedxpGuides, -100)
-    assert(panel.restedxpGuides.offset == 5 and panel.restedxpGuides.rows[4].version:GetText() == "v9",
-        "wheel scrolling reaches every installed guide and clamps to the last row")
-    panel.restedxpGuides.scrollbar:SetValue(0)
-    assert(panel.restedxpGuides.rows[1].version:GetText() == "v1", "the native scrollbar updates visible guide rows")
-    local packRow = panel.restedxpPacks.rows[1]
-    assert(packRow.detail:GetText():find("Alice-Realm", 1, true)
-        and packRow.detail:GetText():find("Update available", 1, true)
-        and packRow.detail:GetText():find("12345678", 1, true),
-        "pack availability identifies its publisher and content independently of guide versions")
-    packRow.follow:Click()
-    assert(#calls.selections == 1 and calls.selections[1][1] == "test"
-        and calls.selections[1][2] == "Alice-Realm", "following explicitly selects the displayed publisher")
-    assert(not panel.restedxpPacks.rows[2].follow:IsEnabled()
-        and panel.restedxpPacks.rows[2].follow:GetText() == "Following", "the existing subscription is visible")
-    panel.restedxpPacks.scrollbar:SetValue(1)
-    assert(panel.restedxpPacks.rows[1].pack.source == "Bob-Realm"
-        and not panel.restedxpPacks.rows[2].follow:IsEnabled()
-        and panel.restedxpPacks.rows[2].follow:GetText() == "Shared",
-        "locally published packs show shared status without an invalid self-follow action")
-    panel.restedxpPacks.scrollbar:SetValue(2)
-    assert(panel.restedxpPacks.rows[2].pack.source == "Offline-Realm"
-        and not panel.restedxpPacks.rows[2].follow:IsEnabled()
-        and panel.restedxpPacks.rows[2].follow:GetText() == "Cached",
-        "cached sources without a live offer cannot be newly followed")
-    state.guides[1].version = 0
+    assert(Details(panel, environment):find(state.sharingStatus, 1, true),
+        "sharing limitations remain accessible in the status details")
+    local publisherRow = panel.restedxpPublishers.rows[1]
+    publisherRow.follow:Click()
+    assert(#calls.selections == 1 and calls.selections[1] == "Alice-Realm",
+        "Follow selects the player once for all their available guides")
+    calls.selectionError = "Refresh guides to find this source again."
+    publisherRow.follow:Click()
+    assert(panel.feedback:GetText() == calls.selectionError, "expired publisher selections explain how to retry")
+    calls.selectionError = nil
+    assert(not panel.restedxpPublishers.rows[2].follow:IsEnabled()
+        and panel.restedxpPublishers.rows[2].follow:GetText() == "Following", "the existing subscription is visible")
+    publisherRow.follow.scripts.OnEnter(publisherRow.follow)
+    panel.restedxpPublishers.scripts.OnMouseWheel(panel.restedxpPublishers, -100)
+    assert(panel.restedxpPublishers.offset == 2 and not environment.GameTooltip.shown,
+        "publisher scrolling clamps at the last player and clears tooltips for recycled rows")
+    assert(panel.restedxpPublishers.rows[3].name:GetText() == "Local-Realm (you)"
+        and not panel.restedxpPublishers.rows[3].follow:IsEnabled()
+        and panel.restedxpPublishers.rows[3].follow:GetText() == "Shared",
+        "locally published guides have one player row without a self-follow action")
+    assert(panel.restedxpPublishers.rows[4].publisher.source == "Offline-Realm"
+        and not panel.restedxpPublishers.rows[4].follow:IsEnabled()
+        and panel.restedxpPublishers.rows[4].follow:GetText() == "Offline",
+        "offline sources cannot be newly followed")
+    panel.restedxpPublishers.scrollbar:SetValue(0)
+    state.publishers[1].status = "Partly followed"
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpGuides.rows[1].version:GetText() == "Unversioned",
-        "the missing-version sentinel is displayed as unversioned")
+    assert(panel.restedxpPublishers.rows[1].follow:IsEnabled()
+        and panel.restedxpPublishers.rows[1].detail:GetText() == "Partly followed",
+        "a partial subscription lets Follow select the rest of a publisher's guides")
     panel.restedxpUpdate:Click()
     assert(calls.update == 1, "Update guides triggers feature discovery and updates exactly once")
     assert(panel.feedback:GetText() == "", "accepted updates use live feature status without a permanent footer message")
-    state.busy, state.status = true, "Downloading test pack (50%)."
+    state.busy, state.status, state.guideStatus = true, "Downloading test pack (50%).", "Updating (50%)"
     addon:Notify("RESTEDXP_CHANGED")
     assert(not panel.restedxpUpdate:IsEnabled() and not panel.restedxpShare:IsEnabled()
-        and panel.restedxpStatus:GetText():find("50%", 1, true), "in-progress work updates status and prevents duplicate actions")
-    state.busy, state.status = false, "All followed guides are up to date."
+        and panel.restedxpStatus:GetText() == "Updating (50%)", "in-progress work updates the single status and prevents duplicate actions")
+    state.busy, state.status, state.guideStatus = false, "All followed guides are up to date.", "Up to date"
     addon:Notify("RESTEDXP_CHANGED")
     assert(panel.feedback:GetText() == "" and panel.restedxpUpdate:IsEnabled()
-        and panel.restedxpStatus:GetText():find("up to date", 1, true),
+        and panel.restedxpStatus:GetText() == "Up to date",
         "completed updates display their result without stale checking feedback")
     calls.updateError = "Connect to your LIT group to check for updates."
     panel.restedxpUpdate:Click()
@@ -136,13 +149,17 @@ do
     assert(panel.feedback:GetText() == "", "an accepted retry clears an earlier update error")
     state.status = "Downloading test pack (50%)."
     state.busy, state.installationProblem = false, "The RestedXP importer is unavailable."
+    state.guideStatus = "Unavailable"
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpStatus:GetText():find("importer is unavailable", 1, true), "adapter compatibility problems are visible")
-    assert(panel.restedxpStatus:GetText():find("50%", 1, true), "compatibility guidance does not conceal guide transfer status")
+    assert(panel.restedxpStatus:GetText() == "Unavailable"
+        and Details(panel, environment):find("importer is unavailable", 1, true), "compatibility problems have a concise status and detailed guidance")
+    assert(Details(panel, environment):find("50%", 1, true), "compatibility guidance preserves transfer details")
+    panel.tabs.chat:Click()
+    assert(not environment.GameTooltip.shown, "leaving RestedXP dismisses the status details")
 end
 
 do
-    local state = { installed = true, loaded = true, canUpdate = true, guides = {}, packs = {} }
+    local state = { installed = true, loaded = true, canUpdate = true, guides = {}, packs = {}, guideStatus = "Ready" }
     local addon, panel, calls, environment = Fixture(state)
     panel.restedxpShare:Click()
     local page = panel.pages.restedxp
@@ -173,7 +190,7 @@ do
     assert(panel.feedback:GetText() == "", "accepted imports clear prior errors and use live validation status")
     state.status = "Shared leveling (10 guides)."
     addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.feedback:GetText() == "" and panel.restedxpStatus:GetText():find("Shared leveling", 1, true),
+    assert(panel.feedback:GetText() == "" and Details(panel, environment):find("Shared leveling", 1, true),
         "completed sharing does not leave a permanent validating footer message")
     local function Draft()
         panel.restedxpShare:Click()
@@ -205,4 +222,4 @@ do
         "viewing guide availability and temporary import forms leaves the shared group key unchanged")
 end
 
-print("PASS: RestedXP Settings status, guide versions, publisher selection, updates, import drafts and privacy")
+print("PASS: RestedXP summary, player publishers, updates, import drafts and privacy")

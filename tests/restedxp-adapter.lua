@@ -209,6 +209,15 @@ local function cachedPack(addon, world, retain)
         id = item.id, revision = item.revision, hash = item.revision }
 end
 
+local function installedCanonical(world)
+    local canonical = pack()
+    canonical.guides[1].contentHash = string.rep("a", 64)
+    local previous = { key = "Test||Guide", version = 1,
+        metadata = { key = "Test||Guide", name = "Guide", group = "Test", version = 1 } }
+    world.rxp.db.profile.guides.previous = previous
+    return canonical, previous
+end
+
 do
     local addon, world = newAddon()
     local cached = cachedPack(addon, world)
@@ -219,6 +228,147 @@ do
     world:Step(4)
     assert(result == true and not problem and world.cachedEncodes == 1 and world.imports == 1 and world.hooks == 1,
         "cached packages without source metadata use native completion plus fresh ID/version confirmation")
+end
+
+for _, test in ipairs({ false, true }) do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.mode, world.rawGuide = "skip", "native input must not be content-hashed"
+    local sha = addon.Crypto.SHA256
+    function addon.Crypto.SHA256(message, ...)
+        assert(message ~= world.rawGuide, "test imports only count native processing without content hashing")
+        return sha(message, ...)
+    end
+    local result, problem, timing
+    assert(addon:InstallRestedXPPack(cached, function(success, failure, info) result, problem, timing = success, failure, info end,
+        test and { test = true } or nil))
+    world:Step(4)
+    assert(world.cachedEncodes == 1 and world.imports == 1, "same-version tests must still convert and enter the native importer")
+    assert(result == test and timing.unchanged == test and timing.conversionWall > 0 and timing.nativeWall > 0)
+    if test then assert(not problem)
+    else assert(problem:find("fresh guide installation", 1, true), "ordinary matching imports must retain strict fresh-write verification") end
+end
+
+for _, test in ipairs({ false, true }) do
+    local addon, world = newAddon()
+    local canonical = installedCanonical(world)
+    world.mode, world.rawGuide = "skip", "processed canonical source must not be hashed for a test skip"
+    local sha = addon.Crypto.SHA256
+    function addon.Crypto.SHA256(message, ...)
+        assert(message ~= world.rawGuide, "unchanged canonical tests use native metadata without source hashing")
+        return sha(message, ...)
+    end
+    local result, timing
+    assert(addon:InstallRestedXPPack(canonical, function(success, _, info) result, timing = success, info end,
+        test and { test = true } or nil))
+    world:Step(4)
+    assert(world.imports == 1 and not world.cachedEncodes and result == test and timing.unchanged == test,
+        "only test imports may confirm an already installed canonical package processed without fresh writes")
+end
+
+for _, mode in ipairs({ "missing", "error" }) do
+    local addon, world = newAddon()
+    local canonical = installedCanonical(world)
+    world.mode = mode
+    local result, timing
+    assert(addon:InstallRestedXPPack(canonical, function(success, _, info) result, timing = success, info end, { test = true }))
+    world:Step(4)
+    assert(result == false and not timing.unchanged, "canonical test skips require processed guides and error-free native completion")
+end
+
+do
+    local addon, world = newAddon()
+    local canonical, previous = installedCanonical(world)
+    world.mode = "skip"
+    local result
+    assert(addon:InstallRestedXPPack(canonical, function(success) result = success end, { test = true }))
+    world:Step(3)
+    previous.metadata.version = 2
+    world:Step()
+    assert(result == false, "canonical metadata must still match after native processing")
+end
+
+do
+    local addon, world = newAddon()
+    local canonical, previous = installedCanonical(world)
+    world.mode = "skip"
+    function addon.RestedXPCodec.Encode()
+        coroutine.yield()
+        return "personalized export"
+    end
+    local result
+    assert(addon:InstallRestedXPPack(canonical, function(success) result = success end, { test = true }))
+    world:Step()
+    previous.metadata.version = 2
+    world:Step()
+    previous.metadata.version = 1
+    world:Step(3)
+    assert(result == false, "canonical metadata changed before native import cannot be restored later to claim an unchanged test")
+end
+
+for _, mode in ipairs({ "missing", "error" }) do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.mode = mode
+    local result, timing
+    assert(addon:InstallRestedXPPack(cached, function(success, _, info) result, timing = success, info end, { test = true }))
+    world:Step(4)
+    assert(result == false and not timing.unchanged, "an idle importer without processed guides, or a native error, cannot complete a matching-version test")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.mode = "skip"
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end, { test = true }))
+    world:Step(3)
+    world.rxp.db.profile.guides.blueprint.metadata.version = 2
+    world:Step()
+    assert(result == false and problem:find("expected guide IDs and versions", 1, true),
+        "unchanged test success requires the expected metadata to remain installed")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.mode = "skip"
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end, { test = true }))
+    world:Step(3)
+    world.rxp.db.profile.guides.unrelated = { key = "Test||Unrelated", groupOrContent = "other source",
+        metadata = { key = "Test||Unrelated", name = "Unrelated", group = "Test", guideId = 200, version = 1 } }
+    world:Step()
+    assert(result == false and problem:find("for this group", 1, true),
+        "unrelated fresh writes must not masquerade as a matching test skip")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.mode = "skip"
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end, { test = true }))
+    world:Step()
+    world.importer:ImportString("personalized export")
+    world:Step()
+    assert(result == false and problem:find("Another RestedXP import", 1, true) and not world.aborts,
+        "test imports cannot claim or abort a replacement native import")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    local result, timing
+    assert(addon:InstallRestedXPPack(cached, function(success, _, info) result, timing = success, info end, { test = true }))
+    world:Step(4)
+    assert(result == true and timing.unchanged == false, "a test that writes native guides reports actual installation")
 end
 
 do
