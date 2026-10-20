@@ -5,6 +5,8 @@ function addon:ShowHelp()
     self:Print("/lit options - Open Settings for your group and features.")
     self:Print("/lit overview - Show group players and party actions.")
     self:Print("/lit ranking [on|off|lock|unlock] - Toggle or arrange the player ranking overlay.")
+    self:Print("/lit rxp test - Measure local RestedXP guide ID/version checks.")
+    self:Print("/lit rxp stats - Show recent RestedXP timings and group traffic counts.")
     self:Print("/lit help - Show commands.")
     self:Print("/lit chat - Write in the shared channel.")
     self:Print("/lit join or /lit leave - Join or leave the shared channel.")
@@ -51,6 +53,22 @@ function addon:HandleRankingCommand(argument)
     if not success then self:Print(message or "Unable to change the ranking overlay.") end
 end
 
+function addon:HandleRestedXPCommand(argument)
+    if not self.initialized or not self.ready then
+        self:Print("Still loading. Please try again after login.")
+        return
+    end
+    local action
+    if argument == "test" then action = self.StartRestedXPBenchmark
+    else action = self.ShowRestedXPPerformance end
+    if type(action) ~= "function" then
+        self:Print("RestedXP diagnostics are unavailable. Reload LockInTools and try again.")
+        return
+    end
+    local success, message = action(self)
+    if success == false then self:Print(message or "Unable to run RestedXP diagnostics.") end
+end
+
 function addon:HandleCommand(message)
     local command, argument = (message or ""):match("^%s*(%S*)%s*(.-)%s*$")
     command = command:lower()
@@ -67,6 +85,8 @@ function addon:HandleCommand(message)
     elseif command == "ranking" and (argument == "" or argument == "on" or argument == "off"
         or argument == "lock" or argument == "unlock") then
         self:HandleRankingCommand(argument)
+    elseif (command == "rxp" or command == "restedxp") and (argument == "test" or argument == "stats") then
+        self:HandleRestedXPCommand(argument)
     elseif command == "help" and argument == "" then
         self:ShowHelp()
     elseif command == "chat" and argument == "" then

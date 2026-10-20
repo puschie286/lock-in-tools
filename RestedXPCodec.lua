@@ -148,9 +148,14 @@ function Codec.SourceHash(raw)
 end
 local function Metadata(raw, normalized)
     local contentHash = Hash(raw)
-    local sourceHash, problem = contentHash
-    if not normalized then sourceHash, problem = Codec.SourceHash(raw) end
-    if not sourceHash then return nil, problem end
+    local sourceHash = contentHash
+    if not normalized then
+        local source, problem = Codec.NormalizeSource(raw)
+        if not source then return nil, problem end
+        -- Automatic packs already contain normalized sources. Their exact and
+        -- native-cache identities share this digest, so hash those bytes once.
+        if source ~= raw then sourceHash = Hash(source) end
+    end
     local guide = { version = 0, subgroup = "", contentHash = contentHash, sourceHash = sourceHash }
     for line in raw:gmatch("[^\r\n]+") do
         if line:match("^%s*step%s*$") or line:match("^%s*step%s+") then break end
@@ -320,6 +325,181 @@ function Codec.FromSources(sources)
     local data = tostring(#guides) .. "|" .. concat(canonical) .. "|40000"
     return {data = data, hash = Hash("LIT-RXP-1\000" .. concat(plain)), format = 40000,
         guides = guides, guideCount = #guides, blocks = blocks}
+end
+
+-- Native imported caches already contain raw Deflate. Keep those bytes opaque
+-- while publishing and transferring; only the recipient converts them into the
+-- native account-bound import envelope.
+local function ExpectedVersion(value)
+    if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then return nil end
+    if value == 0 then value = 0 end
+    return value, string.format("%.17g", value)
+end
+local function EncodeExpectedGuides(expected)
+    if type(expected) ~= "table" or #expected == 0 or #expected > MAX_GUIDES then
+        return nil, "The expected guide list is empty or exceeds its count limit."
+    end
+    local ordered, seen = {}, {}
+    for index = 1, #expected do
+        local guide = expected[index]
+        if type(guide) ~= "table" or type(guide.id) ~= "string" or #guide.id == 0 or #guide.id > 4096
+            or seen[guide.id] then return nil, "Expected guide identifiers are invalid or duplicated." end
+        local version = ExpectedVersion(guide.version)
+        if version == nil then return nil, "An expected guide version is invalid." end
+        ordered[index], seen[guide.id] = { id = guide.id, version = version }, true
+        if index % 64 == 0 then Pause() end
+    end
+    table.sort(ordered, function(a, b) return a.id < b.id end)
+    local fields, size = { tostring(#ordered) .. "|" }, #tostring(#ordered) + 1
+    for _, guide in ipairs(ordered) do
+        local _, version = ExpectedVersion(guide.version)
+        local field = #guide.id .. ":" .. guide.id .. #version .. ":" .. version
+        size = size + #field
+        if size > Codec.MAX_DATA then return nil, "Expected guide metadata exceeds the transfer size limit." end
+        fields[#fields + 1] = field
+    end
+    return concat(fields), ordered
+end
+local function ExpectedField(raw, offset, maximum)
+    local start, finish, lengthText = raw:find("(%d+):", offset)
+    local length = Integer(lengthText, maximum)
+    if start ~= offset or not length or length == 0 or finish + length > #raw then return nil end
+    return raw:sub(finish + 1, finish + length), finish + length + 1
+end
+local function DecodeExpectedGuides(raw)
+    local countText, offset = raw:match("^(%d+)|()")
+    local count = Integer(countText, MAX_GUIDES)
+    if not count or count == 0 then return nil, "Expected guide metadata has an invalid count." end
+    local expected, seen = {}, {}
+    for index = 1, count do
+        local id, nextOffset = ExpectedField(raw, offset, 4096)
+        if not id or seen[id] then return nil, "Expected guide metadata has an invalid or duplicated identifier." end
+        local versionText
+        versionText, offset = ExpectedField(raw, nextOffset, 32)
+        local version, canonical = ExpectedVersion(tonumber(versionText))
+        if version == nil or canonical ~= versionText then return nil, "Expected guide metadata has an invalid version." end
+        expected[index], seen[id] = { id = id, version = version }, true
+        if index % 64 == 0 then Pause() end
+    end
+    if offset ~= #raw + 1 then return nil, "Expected guide metadata has trailing data." end
+    return expected
+end
+function Codec.IsCachedPack(data)
+    return type(data) == "string" and (data:sub(1, 6) == "LITC1|" or data:sub(1, 6) == "LITC2|")
+end
+function Codec.FromCachedSources(sources, expectedGuides)
+    if type(sources) ~= "table" or #sources == 0 or #sources > MAX_GUIDES then
+        return nil, "The cached guide list is empty or exceeds the guide count limit."
+    end
+    local header, expected = "LITC1|" .. #sources .. "|"
+    if expectedGuides ~= nil then
+        local manifest, problem = EncodeExpectedGuides(expectedGuides)
+        if not manifest then return nil, problem end
+        expected = problem
+        if 4 * floor((#manifest + 2) / 3) + 8 + #tostring(#sources) > Codec.MAX_DATA then
+            return nil, "Expected guide metadata exceeds the transfer size limit."
+        end
+        header = "LITC2|" .. #sources .. "|" .. Base64Encode(manifest) .. "|"
+    end
+    local encoded, cached, size, compressedSize = {}, {}, #header, 0
+    for index = 1, #sources do
+        local compressed = sources[index]
+        if type(compressed) ~= "string" or #compressed == 0 or #compressed > Codec.MAX_DATA then
+            return nil, "A compressed guide cache is empty or exceeds the size limit."
+        end
+        compressedSize = compressedSize + #compressed
+        size = size + 4 * floor((#compressed + 2) / 3) + 1
+        if compressedSize > Codec.MAX_DATA or size > Codec.MAX_DATA then
+            return nil, "Cached guide transfer exceeds the 2 MiB limit."
+        end
+        cached[index], encoded[index] = compressed, Base64Encode(compressed) .. "%"
+        if index % 32 == 0 then Pause() end
+    end
+    return {data = header .. concat(encoded), cacheFormat = true,
+        format = 40000, guideCount = #sources, cachedSources = cached, expectedGuides = expected}
+end
+function Codec.DecodeCachedPack(data)
+    if type(data) ~= "string" or #data == 0 or #data > Codec.MAX_DATA then
+        return nil, "Cached guide transfer is empty or exceeds the 2 MiB limit."
+    end
+    local envelope, countText, offset = data:match("^LITC([12])|(%d+)|()")
+    local count = Integer(countText, MAX_GUIDES)
+    if not count or count == 0 then return nil, "Unsupported or invalid cached guide transfer." end
+    local expected
+    if envelope == "2" then
+        local delimiter = data:find("|", offset, true)
+        local manifest = delimiter and Base64Decode(data:sub(offset, delimiter - 1))
+        if not manifest then return nil, "Expected guide metadata has invalid Base64 framing." end
+        local problem
+        expected, problem = DecodeExpectedGuides(manifest)
+        if not expected then return nil, problem end
+        offset = delimiter + 1
+    end
+    local cached, compressedSize = {}, 0
+    while offset <= #data do
+        if #cached >= count then return nil, "Cached guide count does not match its content." end
+        local delimiter = data:find("%", offset, true)
+        if not delimiter then return nil, "Cached guide framing is incomplete." end
+        local compressed = Base64Decode(data:sub(offset, delimiter - 1))
+        if not compressed or #compressed == 0 then return nil, "Cached guide has invalid Base64 encoding." end
+        compressedSize = compressedSize + #compressed
+        if compressedSize > Codec.MAX_DATA then return nil, "Compressed guides exceed the transfer size limit." end
+        cached[#cached + 1] = compressed
+        offset = delimiter + 1
+        if #cached % 32 == 0 then Pause() end
+    end
+    if #cached ~= count then return nil, "Cached guide count does not match its content." end
+    return {data = data, cacheFormat = true, format = 40000, guideCount = count,
+        cachedSources = cached, expectedGuides = expected}
+end
+function Codec.EncodeCached(pack, destinationBattleTag)
+    local key = BattleTagKey(destinationBattleTag)
+    if not key then return nil, "The destination BattleTag is unavailable or invalid." end
+    if type(pack) ~= "table" then return nil, "Cached guide package is invalid." end
+    local verified, problem = Codec.DecodeCachedPack(pack.data)
+    if not verified then return nil, problem end
+    local compressor = LibStub and LibStub("LITLibDeflate", true)
+    if not compressor or type(compressor.DecompressDeflateBounded) ~= "function"
+        or type(compressor.CompressZlibCooperative) ~= "function" then
+        return nil, "The bundled guide conversion library is unavailable."
+    end
+    local blocks, entries, entrySize, inflated, outputSize, encodedSize = {}, {}, 0, 0, 0, 0
+    local function Flush()
+        if #entries == 0 then return true end
+        if #blocks >= MAX_BLOCKS then return nil, "Cached guides contain too many native import blocks." end
+        local content = concat(entries, "\000")
+        outputSize = outputSize + #content
+        if outputSize > Codec.MAX_INFLATED then return nil, "Cached guides exceed the decompressed size limit." end
+        local checksum = Adler32(content)
+        local compressed = compressor:CompressZlibCooperative(content, Pause)
+        if not compressed then return nil, "Cannot convert the cached guides for native import." end
+        local encoded = tostring(checksum) .. ":" .. Base64Encode(Crypt(compressed, key)) .. "%"
+        encodedSize = encodedSize + #encoded
+        if encodedSize + #tostring(verified.guideCount) + 7 > Codec.MAX_DATA then
+            return nil, "Native guide import exceeds the 2 MiB limit."
+        end
+        blocks[#blocks + 1] = encoded
+        entries, entrySize = {}, 0
+        Pause()
+        return true
+    end
+    for _, compressed in ipairs(verified.cachedSources) do
+        local raw, remaining = compressor:DecompressDeflateBounded(compressed, Codec.MAX_INFLATED - inflated, Pause)
+        if not raw or remaining ~= 0 then return nil, "Cannot decompress a cached guide within its size limit." end
+        inflated = inflated + #raw
+        -- Replace only the cache's account marker. Preserve all source bytes,
+        -- including comments, spacing and every class/race conditional branch.
+        raw = raw:gsub("^%-%-%d+\r?\n", "", 1)
+        if entrySize > 0 and entrySize + #raw + 1 > 131072 then
+            local success, failure = Flush()
+            if not success then return nil, failure end
+        end
+        entrySize = entrySize + #raw + (#entries > 0 and 1 or 0)
+        entries[#entries + 1] = raw
+    end
+    local success, failure = Flush()
+    if not success then return nil, failure end
+    return tostring(verified.guideCount) .. "|" .. concat(blocks) .. "|40000"
 end
 function Codec.Encode(pack, destinationBattleTag)
     local key = BattleTagKey(destinationBattleTag)

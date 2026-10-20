@@ -6,7 +6,7 @@ local function loadModule(file, addon, env)
 end
 
 local function client(name, saved, readOnly, automatic, metadata)
-    local world = { now = 0, timers = {}, sent = {}, observed = {}, output = {}, listeners = {}, events = {}, installs = {}, notifications = 0 }
+    local world = { now = 0, timers = {}, sent = {}, observed = {}, output = {}, listeners = {}, events = {}, installs = {}, installPayloads = {}, notifications = 0 }
     local addon = { db = saved or {}, savedDataReadOnly = readOnly, ready = true, initialized = true,
         connected = false, fingerprint = "test-group", dataState = { requestSession = name .. "-session" } }
     local env = setmetatable({ bit = false, bit32 = false, GetTime = function() return world.now end,
@@ -68,6 +68,7 @@ local function client(name, saved, readOnly, automatic, metadata)
     function addon:InstallRestedXPPack(pack, callback)
         if world.busy then return false, "Native import running", "busy" end
         world.installs[#world.installs + 1] = pack.hash
+        world.installPayloads[#world.installPayloads + 1] = pack
         world.installTimer = env.C_Timer.NewTimer(0.5, function()
             if not world.failInstall and world.afterInstall then world.afterInstall(pack) end
             callback(not world.failInstall, world.failInstall and "Synthetic import failure" or nil)
@@ -583,6 +584,88 @@ do
     assert(not current.busy and not current.status:find("Use Update guides to install", 1, true)
         and (current.status:find("shared with your group", 1, true) or current.status:find("up to date", 1, true)),
         "a completed publisher check reports its current shared inventory instead of offering to reinstall stale cached content")
+end
+
+-- Automatically shared exports carry native compressed cache entries intact.
+-- The transport never opens their guide contents; native import owns validation.
+do
+    local publisher, a, api = client("CachedAlpha", nil, nil, nil, true)
+    local recipient, b, recipientAPI = client("CachedBeta", nil, nil, nil, true)
+    local id = "cached-compressed-route"
+    local firstRevision, nextRevision, failedRevision = string.rep("1", 64), string.rep("2", 64), string.rep("3", 64)
+    local bytes = {}
+    for index = 0, 255 do bytes[#bytes + 1] = string.char(index) end
+    local opaque = string.rep(table.concat(bytes), 8)
+    local function Cached(revision, sources)
+        local pack = assert(publisher.RestedXPCodec.FromCachedSources(sources))
+        pack.hash, pack.id, pack.revision = revision, id, revision
+        return pack
+    end
+    local function Metadata(revision)
+        return { { id = id, label = "Cached Compressed Route", revision = revision, guideCount = 2 } }
+    end
+    local initial = Cached(firstRevision, { opaque, "initial native cache bytes\0\255" })
+    a.inventory, b.inventory = Metadata(firstRevision), Metadata(firstRevision)
+    a.preparedPacks[id] = { revision = firstRevision, pack = initial }
+    local function ForbidContentProcessing(addon, environment)
+        local function Forbidden() error("Cached transport must not decompress, normalize or hash guide contents") end
+        addon.RestedXPCodec.DecodeCanonical, addon.RestedXPCodec.DecodeCachedSource = Forbidden, Forbidden
+        local deflate = environment.LibStub("LITLibDeflate")
+        deflate.DecompressZlib, deflate.DecompressZlibBounded, deflate.DecompressDeflate = Forbidden, Forbidden, Forbidden
+        deflate.CompressZlib, deflate.CompressDeflate = Forbidden, Forbidden
+        local hash = addon.Crypto.SHA256
+        addon.Crypto.SHA256 = function(message, progress)
+            assert(#message <= 512, "Cached transport must not compute a whole-guide content hash")
+            return hash(message, progress)
+        end
+    end
+    ForbidContentProcessing(publisher, api)
+    ForbidContentProcessing(recipient, recipientAPI)
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    assert(recipient:SelectRestedXPPack(id, "cachedalpha-testrealm"))
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 4)
+    assert(not a.scans and not b.scans and #a.prepares == 0 and #b.prepares == 0
+        and transferMessages(a) == 0 and transferMessages(b) == 0,
+        "matching cache metadata never reads compressed guide contents or starts preparation")
+
+    local sources = { opaque .. "updated", "second opaque native cache entry\0\254" }
+    local changed = Cached(nextRevision, sources)
+    a.inventory, a.preparedPacks[id] = Metadata(nextRevision), { revision = nextRevision, pack = changed }
+    b.afterInstall = function(pack)
+        assert(pack.cacheFormat and pack.id == id and pack.revision == nextRevision and pack.hash == nextRevision,
+            "native installation receives the cached envelope and its metadata identity")
+        assert(pack.cachedSources[1] == sources[1] and pack.cachedSources[2] == sources[2],
+            "binary native cache bytes and source ordering survive the complete packet transfer")
+        b.inventory = Metadata(nextRevision)
+    end
+    a.installedChanged()
+    exchange(a, b, 70)
+    assert(#a.prepares == 1 and #b.installs == 1 and b.installs[1] == nextRevision
+        and b.installPayloads[1].cacheFormat and not b.installPayloads[1].guides,
+        "cached transfers prepare once and reach native import without decoding guide source")
+    local installed = recipient.db.restedxp.groups[recipient.fingerprint].installed["cachedbeta-testrealm"]
+    assert(installed[id] == nextRevision, "cached content becomes installed only after native completion succeeds")
+
+    b.failInstall, b.afterInstall = true, nil
+    local rejected = Cached(failedRevision, { opaque .. "rejected", "native validation will reject this entry" })
+    a.inventory, a.preparedPacks[id] = Metadata(failedRevision), { revision = failedRevision, pack = rejected }
+    a.installedChanged()
+    exchange(a, b, 70)
+    assert(#b.installs == 2 and b.installs[2] == failedRevision
+        and recipient.restedxpState.failed[id] == failedRevision and installed[id] == nextRevision,
+        "native rejection is propagated without marking the newly transferred cached bytes as installed")
+
+    local malformedRevision = string.rep("4", 64)
+    local truncated = Cached(malformedRevision, { opaque, "truncated cached envelope" })
+    truncated.data = truncated.data:sub(1, -2)
+    a.inventory, a.preparedPacks[id] = Metadata(malformedRevision), { revision = malformedRevision, pack = truncated }
+    a.installedChanged()
+    exchange(a, b, 70)
+    assert(#b.installs == 2 and recipient.restedxpState.failed[id] == malformedRevision and installed[id] == nextRevision,
+        "a truncated cached envelope fails before native installation (imports=" .. #b.installs
+            .. ", rejected=" .. tostring(recipient.restedxpState.failed[id]) .. ")")
 end
 
 -- Even a delayed native metadata API must replace discovery's temporary

@@ -206,4 +206,173 @@ while coroutine.status(building) ~= "dead" do
     resumed = resumed + 1
 end
 assert(resumed > 10 and assert(codec.DecodeCanonical(rebuilt.data)).hash == rebuilt.hash)
+
+-- Installed sharing transports native cache strings as opaque compressed bytes.
+-- The publisher and transfer reader must not inspect, hash or rebuild content.
+local oldSHA, oldNormalize = addon.Crypto.SHA256, codec.NormalizeSource
+local oldInflate, oldCompress = deflate.DecompressDeflateBounded, deflate.CompressZlibCooperative
+local function UnexpectedContentWork() error("Opaque transfer inspected guide content") end
+addon.Crypto.SHA256, codec.NormalizeSource = UnexpectedContentWork, UnexpectedContentWork
+deflate.DecompressDeflateBounded, deflate.CompressZlibCooperative = UnexpectedContentWork, UnexpectedContentWork
+local opaqueBytes = { "Not a Deflate stream\000\255", "Second\r\nopaque cache" }
+local opaquePack = assert(codec.FromCachedSources(opaqueBytes))
+local opaqueRead = assert(codec.DecodeCachedPack(opaquePack.data))
+local expectedGuides = { { id = "z|:guide", version = 2.5 }, { id = "a\000\195\169", version = -1e30 } }
+local manifestPack = assert(codec.FromCachedSources(opaqueBytes, expectedGuides))
+local manifestRead = assert(codec.DecodeCachedPack(manifestPack.data))
+assert(manifestPack.data:sub(1, 6) == "LITC2|" and codec.IsCachedPack(manifestPack.data))
+assert(manifestRead.expectedGuides[1].id == expectedGuides[2].id
+    and manifestRead.expectedGuides[1].version == expectedGuides[2].version
+    and manifestRead.expectedGuides[2].id == expectedGuides[1].id
+    and manifestRead.expectedGuides[2].version == expectedGuides[1].version)
+assert(manifestRead.cachedSources[1] == opaqueBytes[1] and manifestRead.cachedSources[2] == opaqueBytes[2])
+assert(assert(codec.FromCachedSources(opaqueBytes, { expectedGuides[2], expectedGuides[1] })).data == manifestPack.data,
+    "Metadata enumeration order changed the manifest framing")
+assert(opaqueRead.expectedGuides == nil)
+assert(codec.IsCachedPack(opaquePack.data) and not codec.IsCachedPack(canonical))
+assert(opaquePack.cacheFormat and opaqueRead.cacheFormat and opaqueRead.format == 40000
+    and opaqueRead.guideCount == 2 and opaqueRead.hash == nil and opaqueRead.guides == nil)
+for index, compressed in ipairs(opaqueBytes) do
+    assert(opaquePack.cachedSources[index] == compressed and opaqueRead.cachedSources[index] == compressed)
+end
+addon.Crypto.SHA256, codec.NormalizeSource = oldSHA, oldNormalize
+deflate.DecompressDeflateBounded, deflate.CompressZlibCooperative = oldInflate, oldCompress
+
+local function RejectCached(data)
+    local result, problem = codec.DecodeCachedPack(data)
+    assert(not result and type(problem) == "string")
+end
+RejectCached("")
+RejectCached("LITC3|1|Zg==%")
+RejectCached("LITC1|0|")
+RejectCached("LITC1|10001|Zg==%")
+RejectCached("LITC1|1|")
+RejectCached("LITC1|2|Zg==%")
+RejectCached("LITC1|1|Zg==%Zg==%")
+RejectCached("LITC1|1|Zg==")
+RejectCached("LITC1|1|%")
+RejectCached("LITC1|1|Zh==%")
+RejectCached("LITC1|1|Zm9=%")
+RejectCached("LITC1|1|Zg==%extra")
+RejectCached(string.rep("x", codec.MAX_DATA + 1))
+local function WithManifest(raw)
+    return "LITC2|1|" .. Base64(raw) .. "|Zg==%"
+end
+assert(assert(codec.DecodeCachedPack(WithManifest("1|1:a1:1"))).expectedGuides[1].version == 1)
+RejectCached("LITC2|1||Zg==%")
+RejectCached("LITC2|1|Zh==|Zg==%")
+RejectCached(WithManifest("0|"))
+RejectCached(WithManifest("10001|"))
+RejectCached(WithManifest("1|0:1:1"))
+RejectCached(WithManifest("1|4097:" .. string.rep("a", 4097) .. "1:1"))
+RejectCached(WithManifest("1|1:a2:+1"))
+RejectCached(WithManifest("1|1:a3:NaN"))
+RejectCached(WithManifest("1|1:a3:inf"))
+RejectCached(WithManifest("1|1:a33:" .. string.rep("1", 33)))
+RejectCached(WithManifest("1|1:a1:"))
+RejectCached(WithManifest("1|1:a1:1trailing"))
+RejectCached(WithManifest("2|1:a1:11:a1:1"))
+assert(codec.FromCachedSources({}) == nil and codec.FromCachedSources({ false }) == nil
+    and codec.FromCachedSources({ "" }) == nil and codec.FromCachedSources(tooMany) == nil)
+assert(codec.FromCachedSources(opaqueBytes, {}) == nil)
+assert(codec.FromCachedSources(opaqueBytes, { { id = "", version = 1 } }) == nil)
+assert(codec.FromCachedSources(opaqueBytes, { { id = string.rep("a", 4097), version = 1 } }) == nil)
+assert(codec.FromCachedSources(opaqueBytes, { { id = "a", version = "1" } }) == nil)
+assert(codec.FromCachedSources(opaqueBytes, { { id = "a", version = 0 / 0 } }) == nil)
+assert(codec.FromCachedSources(opaqueBytes, { { id = "a", version = math.huge } }) == nil)
+assert(codec.FromCachedSources(opaqueBytes, { { id = "a", version = 1 }, { id = "a", version = 1 } }) == nil)
+assert(codec.FromCachedSources(opaqueBytes, tooMany) == nil)
+codec.MAX_DATA = 20
+assert(codec.FromCachedSources(opaqueBytes) == nil)
+assert(codec.FromCachedSources(opaqueBytes, expectedGuides) == nil)
+RejectCached(opaquePack.data)
+codec.MAX_DATA = oldDataLimit
+
+-- Decode native RC4/zlib envelopes separately from the codec's metadata reader.
+-- This also verifies conversion of sources the native guide parser must reject.
+local function RefXor(a, b)
+    local result, place = 0, 1
+    for _ = 1, 8 do
+        if a % 2 ~= b % 2 then result = result + place end
+        a, b, place = math.floor(a / 2), math.floor(b / 2), place * 2
+    end
+    return result
+end
+local function RefBase64Decode(encoded)
+    local digits, result = {}, {}
+    for index = 1, #alphabet do digits[alphabet:sub(index, index)] = index - 1 end
+    for index = 1, #encoded, 4 do
+        local a, b, c, d = encoded:sub(index, index), encoded:sub(index + 1, index + 1),
+            encoded:sub(index + 2, index + 2), encoded:sub(index + 3, index + 3)
+        local value = digits[a] * 262144 + digits[b] * 4096 + (digits[c] or 0) * 64 + (digits[d] or 0)
+        result[#result + 1] = string.char(math.floor(value / 65536))
+            .. (c ~= "=" and string.char(math.floor(value / 256) % 256) or "")
+            .. (d ~= "=" and string.char(value % 256) or "")
+    end
+    return table.concat(result)
+end
+local function RefDecrypt(compressed, tag)
+    tag = tag:lower():sub(-16)
+    local padded, key, state, j = string.rep("\000", 16 - #tag) .. tag, {}, {}, 0
+    for index = 0, 15 do key[index] = padded:byte(index + 1) end
+    for index = 0, 15 do
+        key[(-index) % 16] = RefXor(RefXor(key[(15 - index) % 16], key[(13 - index) % 16]),
+            RefXor(key[(12 - index) % 16], key[(10 - index) % 16]))
+    end
+    for index = 0, 255 do state[index] = index end
+    for index = 0, 255 do
+        j = (j + state[index] + key[index % 16]) % 256
+        state[index], state[j] = state[j], state[index]
+    end
+    local i, bytes = 0, {}
+    j = 0
+    for index = 1, #compressed do
+        i = (i + 1) % 256
+        j = (j + state[i]) % 256
+        state[i], state[j] = state[j], state[i]
+        bytes[index] = string.char(RefXor(compressed:byte(index), state[(state[i] + state[j]) % 256]))
+    end
+    return table.concat(bytes)
+end
+local function NativePlain(exportText, tag)
+    local count, body = exportText:match("^(%d+)|(.+)|40000$")
+    assert(count and body)
+    local contents = {}
+    for checksum, encoded in body:gmatch("(%d+):([^%%]+)%%") do
+        local compressed = RefDecrypt(RefBase64Decode(encoded), tag)
+        local raw, remaining = deflate:DecompressZlib(compressed)
+        assert(raw and remaining == 0 and deflate:Adler32(raw) == tonumber(checksum))
+        contents[#contents + 1] = raw
+    end
+    assert(#contents > 0)
+    return table.concat(contents, "\000"), tonumber(count), #contents
+end
+local referencePlain = deflate:DecompressZlib(pack.blocks[1].compressed) .. "\000"
+    .. deflate:DecompressZlib(pack.blocks[2].compressed)
+assert(NativePlain(source, "Source#1234") == referencePlain, "Reference native decoder disagrees with independent fixtures")
+local exactRaw = "#classic\r\n#group Synthetic\r\n#name Exact cache\r\n#version 3\r\n"
+    .. "step << Mage\r\n  .note   Keep spacing -- Keep comment\r\n"
+local exactCaches = { (deflate:CompressDeflate("--123456789\n" .. exactRaw)),
+    (deflate:CompressDeflate("--987654321\r\n" .. conditional)) }
+local exactPack = assert(codec.FromCachedSources(exactCaches))
+local nativeExport = assert(codec.EncodeCached(exactPack, "Recipient#9876"))
+local rawConverted, convertedCount = NativePlain(nativeExport, "Recipient#9876")
+assert(convertedCount == 2 and rawConverted == exactRaw .. "\000" .. conditional,
+    "Native conversion changed source bytes beyond the leading account marker")
+local manifestedExact = assert(codec.FromCachedSources(exactCaches, expectedGuides))
+local manifestedExport = assert(codec.EncodeCached(manifestedExact, "Recipient#9876"))
+assert(NativePlain(manifestedExport, "Recipient#9876") == rawConverted,
+    "Expected metadata changed native guide source conversion")
+assert(codec.EncodeCached(exactPack, "Recipient") == nil and codec.EncodeCached({}, "Recipient#9876") == nil)
+assert(codec.EncodeCached(opaquePack, "Recipient#9876") == nil)
+local malformedGuide = "No guide metadata\n.note Let the native importer validate this source\n"
+local malformedPack = assert(codec.FromCachedSources({ (deflate:CompressDeflate("--123\n" .. malformedGuide)) }))
+local malformedExport = assert(codec.EncodeCached(malformedPack, "Recipient#9876"))
+assert(NativePlain(malformedExport, "Recipient#9876") == malformedGuide)
+assert(codec.Decode(malformedExport, "Recipient#9876") == nil, "Fixture must require native semantic validation")
+codec.MAX_INFLATED = #exactRaw - 1
+assert(codec.EncodeCached(exactPack, "Recipient#9876") == nil)
+codec.MAX_INFLATED = oldLimit
+local trailingCache = assert(codec.FromCachedSources({ exactCaches[1] .. "trailing" }))
+assert(codec.EncodeCached(trailingCache, "Recipient#9876") == nil)
 print("restedxp-codec: passed")

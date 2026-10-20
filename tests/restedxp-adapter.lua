@@ -28,7 +28,9 @@ local function newAddon()
         local expected = world.expected or { key = "Test||Guide", name = "Guide", group = "Test", version = 1 }
         local entry = {
             key = expected.key, version = expected.version,
-            metadata = { key = expected.key, name = expected.name, group = expected.group, subgroup = expected.subgroup, version = expected.version },
+            metadata = { key = expected.key, name = expected.name, group = expected.group, subgroup = expected.subgroup,
+                version = expected.version, guideId = expected.guideId },
+            groupOrContent = world.cachedImport and "native cached source" or nil,
         }
         rxp.db.profile.guides[expected.key .. "|new"] = entry
     end
@@ -66,6 +68,12 @@ local function newAddon()
     function addon.RestedXPCodec.Encode(pack, tag)
         assert(type(pack) == "table" and tag == world.tag)
         if world.encodeFailure then return nil, "bad canonical bytes" end
+        return "personalized export"
+    end
+    function addon.RestedXPCodec.EncodeCached(pack, tag)
+        world.cachedEncodes = (world.cachedEncodes or 0) + 1
+        assert(pack.cacheFormat and tag == world.tag)
+        if world.encodeFailure then return nil, "bad cached bytes" end
         return "personalized export"
     end
     local library = {}
@@ -144,6 +152,7 @@ local function useSourceCache(addon, world)
     setfenv(codec, environment)
     codec("LockInTools", addon)
     local deflate = libraries.LibStub("LITLibDeflate")
+    world.deflate = deflate
     function world:Cache(raw, key)
         self.cacheSerial = (self.cacheSerial or 0) + 1
         local metadata = assert(addon.RestedXPCodec.SourceMetadata(raw))
@@ -183,6 +192,123 @@ local function pack(guides)
     return { hash = "synthetic", format = 40000, data = "synthetic canonical bytes", guides = guides or {
         { key = "Test||Guide", name = "Guide", group = "Test", version = 1 },
     } }
+end
+
+local function cachedPack(addon, world, retain)
+    local expected = world.expected or { key = "Test||Guide", name = "Guide", group = "Test", version = 1, guideId = 100 }
+    world.expected = expected
+    local cache = world.rxp.db.profile.guides
+    cache.blueprint = { key = expected.key, version = expected.version, groupOrContent = "opaque native cache",
+        metadata = { key = expected.key, name = expected.name, group = expected.group,
+            subgroup = expected.subgroup, version = expected.version, guideId = expected.guideId } }
+    local inventory = assert(addon:CollectRestedXPInstalledInventory())
+    local item = assert(inventory[1])
+    if not retain then cache.blueprint = nil end
+    world.cachedImport = true
+    return { cacheFormat = true, data = "opaque cached package", format = 40000, guideCount = 1,
+        id = item.id, revision = item.revision, hash = item.revision }
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    function addon.RestedXPCodec.Encode() error("cached imports must use cached conversion") end
+    function addon.RestedXPCodec.SourceMetadata() error("cached imports must use native metadata") end
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step(4)
+    assert(result == true and not problem and world.cachedEncodes == 1 and world.imports == 1 and world.hooks == 1,
+        "cached packages without source metadata use native completion plus fresh ID/version confirmation")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.rxp.db.profile.guides.extra = { key = "Test||Extra", groupOrContent = "unrelated native source",
+        metadata = { key = "Test||Extra", name = "Extra", group = "Test", version = 7, guideId = 200 } }
+    function addon.RestedXPCodec.SourceMetadata() error("cached confirmation must not parse source") end
+    assert(not addon:MatchesRestedXPCachedPack(cached))
+    local result
+    assert(addon:InstallRestedXPPack(cached, function(success) result = success end))
+    world:Step(4)
+    assert(result == true and addon:MatchesRestedXPCachedPack(cached),
+        "the expected guide subset confirms installation while preserving additional guides in the same group")
+    cached.expectedGuides[1].version = 2
+    assert(not addon:MatchesRestedXPCachedPack(cached), "expected versions must match exactly")
+    cached.expectedGuides = { { id = "missing", version = 1 } }
+    assert(not addon:MatchesRestedXPCachedPack(cached), "a missing expected guide must not match a local superset")
+    cached.expectedGuides = {}
+    assert(not addon:MatchesRestedXPCachedPack(cached), "an empty metadata manifest cannot confirm installation")
+    cached.expectedGuides = { { id = "100", version = "1" } }
+    assert(not addon:MatchesRestedXPCachedPack(cached), "metadata manifest versions must be finite numbers")
+    local imports = world.imports
+    assert(not addon:InstallRestedXPPack(cached) and world.imports == imports,
+        "invalid manifest metadata is refused before native import")
+end
+
+for _, expected in ipairs({ { id = "missing", version = 1 }, { id = "100", version = 2 } }) do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    cached.expectedGuides = { expected }
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step(4)
+    assert(result == false and problem:find("expected guide IDs and versions", 1, true))
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    cached.expectedGuides = { { id = "100", version = 1 } }
+    world.expected = { key = "Test||Other", name = "Other", group = "Test", version = 1, guideId = 200 }
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step(4)
+    assert(result == false and problem:find("for this group", 1, true),
+        "a fresh write for an unrequested guide must not confirm the expected subset")
+end
+
+for _, mode in ipairs({ "missing", "skip", "error", "reject", "throw" }) do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    world.mode = mode
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step(4)
+    assert(result == false and type(problem) == "string", "native rejection or absent fresh guides must fail cached installation")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    world.expected.version = 2
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step(4)
+    assert(result == false and problem:find("expected guide IDs and versions", 1, true),
+        "fresh native writes with different versions cannot confirm a cached package")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world, true)
+    world.expected = { key = "Other||Foreign", name = "Foreign", group = "Other", version = 1 }
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step(4)
+    assert(result == false and problem:find("for this group", 1, true),
+        "preexisting matching metadata plus an unrelated fresh cache write must not confirm installation")
+end
+
+do
+    local addon, world = newAddon()
+    local cached = cachedPack(addon, world)
+    world.encodeFailure = true
+    local result, problem
+    assert(addon:InstallRestedXPPack(cached, function(success, failure) result, problem = success, failure end))
+    world:Step()
+    assert(result == false and problem == "bad cached bytes" and not world.imports and not world.aborts)
 end
 
 do
@@ -609,21 +735,21 @@ do
             if coroutine.status(thread) == "dead" then return result, info end
         until false
     end
-    local calls = { decode = 0, metadata = 0, pack = 0 }
-    local decode, metadata, fromSources = codec.DecodeCachedSource, codec.SourceMetadata, codec.FromSources
-    function codec.DecodeCachedSource(...)
-        calls.decode = calls.decode + 1
-        return decode(...)
-    end
-    function codec.SourceMetadata(...)
-        calls.metadata = calls.metadata + 1
-        return metadata(...)
-    end
-    function codec.FromSources(...)
-        calls.pack = calls.pack + 1
-        return fromSources(...)
-    end
     local storedSource = world.rxp.db.profile.guides[firstKey].groupOrContent
+    local calls = { decode = 0, metadata = 0, pack = 0, bundle = 0 }
+    for _, name in ipairs({ "DecodeCachedSource", "SourceMetadata", "FromSources", "SourceHash", "NormalizeSource", "Encode", "EncodeCached" }) do
+        codec[name] = function() error("publisher attempted content processing: " .. name) end
+    end
+    for name, callback in pairs(world.deflate) do
+        if type(callback) == "function" and (name:find("Compress") or name:find("Decompress") or name == "Adler32") then
+            world.deflate[name] = function() error("publisher attempted guide compression or validation") end
+        end
+    end
+    local fromCached = assert(codec.FromCachedSources)
+    function codec.FromCachedSources(...)
+        calls.bundle = calls.bundle + 1
+        return fromCached(...)
+    end
     local opaque = "Opaque compressed source must not be hashed"
     world.rxp.db.profile.guides[firstKey].groupOrContent = opaque
     local sha = addon.Crypto.SHA256
@@ -642,30 +768,35 @@ do
     inventory = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
     assert(inventory[1].revision == first.revision, "native guideId is stable when character-specific display keys change")
     local prepared = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
-    assert(calls.decode == 2 and calls.pack == 1 and prepared.guideCount == 2,
-        "requested preparation recovers only the newest requested group while retaining its conditional variants")
+    assert(calls.decode == 0 and calls.pack == 0 and calls.bundle == 1 and prepared.guideCount == 2
+        and prepared.cacheFormat and prepared.hash == first.revision and prepared.revision == first.revision and prepared.id == first.id,
+        "requested preparation wraps only the newest requested native cache strings, including every conditional variant")
+    assert(#prepared.expectedGuides == 1 and prepared.expectedGuides[1].id == "100"
+        and prepared.expectedGuides[1].version == 2 and addon:MatchesRestedXPCachedPack(prepared),
+        "publishers carry deduplicated ID/version metadata without source processing")
     local sourceHash = prepared.hash
     world.rxp.db.profile.guides[firstKey].groupOrContent = opaque
     local unchanged = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
     assert(unchanged[1].revision == first.revision)
     local repeated = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
-    assert(repeated == prepared and calls.decode == 2 and calls.pack == 1,
+    assert(repeated == prepared and calls.decode == 0 and calls.pack == 0 and calls.bundle == 1,
         "unchanged native guide ids and versions deliberately reuse preparation despite changed source bytes")
     local metadataCalls, nativeCache = calls.metadata, world.rxp.db.profile.guides
     assert(addon:ResetRestedXPInventoryMemo())
     local fresh = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
     local stillPrepared = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
     assert(fresh[1].revision == first.revision and stillPrepared == prepared and world.rxp.db.profile.guides == nativeCache
-        and calls.decode == 2 and calls.metadata == metadataCalls and calls.pack == 1,
+        and calls.decode == 0 and calls.metadata == metadataCalls and calls.pack == 0 and calls.bundle == 1,
         "resetting the inventory memo rereads metadata without clearing prepared sources or changing native guides")
-    local newKey = world:Cache(source("First inventory", "Chapter", 3, "New version"))
-    world.rxp.db.profile.guides[newKey].metadata.guideId = 100
+    world.rxp.db.profile.guides[firstKey].metadata.version = 3
     local changed = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
     assert(changed[1].id == first.id and changed[1].revision ~= first.revision)
     local rejected, problem = run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end)
     assert(not rejected and problem:find("versions changed", 1, true))
     local updated = assert(run(function() return addon:PrepareRestedXPInstalledPack(changed[1].id, changed[1].revision) end))
-    assert(updated.hash ~= sourceHash and calls.decode == 3 and calls.pack == 2)
+    assert(updated.hash ~= sourceHash and calls.decode == 0 and calls.pack == 0 and calls.bundle == 2
+        and updated.cachedSources[1] == opaque,
+        "an opaque invalid compressed source remains shareable without publisher-side content validation")
     world.rxp.db.profile.guides[secondKey].metadata.version = 8
     local secondChanged = assert(run(function() return addon:CollectRestedXPInstalledInventory() end))
     assert(secondChanged[1].revision == changed[1].revision and secondChanged[2].revision ~= changed[2].revision,
