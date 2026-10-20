@@ -80,7 +80,9 @@ local function NewTraffic()
 end
 local function NewPerformance()
     return { startedAt = WallTime(), tx = NewTraffic(), rx = NewTraffic(), jobs = {},
-        rejectedSends = 0, retryWindows = 0, duplicateChunks = 0 }
+        rejectedSends = 0, retryWindows = 0, duplicateChunks = 0,
+        serving = { addressed = 0, other = 0, windows = 0, preparing = 0, busy = 0,
+            unavailable = 0, queueFull = 0, cacheBypasses = 0 } }
 end
 local function AddTraffic(traffic, kind, bytes)
     traffic[kind], traffic.messages, traffic.bytes = traffic[kind] + 1, traffic.messages + 1, traffic.bytes + bytes
@@ -185,6 +187,18 @@ local function LocalIdentity(self)
 end
 local function Address(self, name)
     return self.Crypto.Hex(self.Crypto.SHA256(name)):sub(1, 12)
+end
+local function IsLocalAddress(self, target)
+    -- Native addon senders can use the unmodified player name. Accept the same
+    -- local aliases as the data layer instead of assuming UnitFullName matches.
+    if type(self.GetDataSelfIdentities) == "function" then
+        for identity in pairs(self:GetDataSelfIdentities()) do
+            if target == Address(self, identity) then return true end
+        end
+        return false
+    end
+    local identity = LocalIdentity(self)
+    return identity and target == Address(self, identity) or false
 end
 local function Available(self)
     return self.restedxpState and self.ready and self:HasGroup() and not self.savedDataReadOnly
@@ -742,6 +756,9 @@ end
 
 local function FinishDownload(self)
     local state, incoming = self.restedxpState, self.restedxpState.incoming
+    -- Preparing an outgoing pack may overlap an incoming transfer. Keep a
+    -- completed download until that bounded job releases the processing slot.
+    if state.job then incoming.complete = true; return end
     local data = table.concat(incoming.chunks)
     local receivedAt = WallTime()
     state.incoming = nil
@@ -852,11 +869,16 @@ local function Tick(self)
         end
     end
     local incoming = state.incoming
+    if incoming and incoming.complete and not state.job then
+        FinishDownload(self)
+        incoming = state.incoming
+    end
     if incoming and now >= incoming.nextRequest then
         -- An installed pack has no encoded size until the publisher prepares
         -- its requested source. Allow that work separately from a stalled wire.
-        local timedOut = incoming.size and (now - incoming.progressAt >= 30 or incoming.retries >= 8)
-            or not incoming.size and now - incoming.progressAt >= PREPARATION_TIMEOUT
+        local timedOut = incoming.complete and now - incoming.progressAt >= PREPARATION_TIMEOUT
+            or not incoming.complete and (incoming.size and (now - incoming.progressAt >= 30 or incoming.retries >= 8)
+                or not incoming.size and now - incoming.progressAt >= PREPARATION_TIMEOUT)
         if timedOut then
             PeerTestIncoming(state, incoming)
             state.incoming = nil
@@ -864,11 +886,12 @@ local function Tick(self)
             Changed(self, "Guide transfer timed out. Use Update guides to retry.", true)
             if incoming.test then PeerTestFinish(self, "failed", "The guide transfer timed out during the test.") end
             Reconcile(self)
-        else
+        elseif not incoming.complete then
             incoming.retries = incoming.retries + 1
             incoming.retryCount = incoming.retryCount + 1
             state.performance.retryWindows = state.performance.retryWindows + 1
             RequestWindow(self)
+        else incoming.nextRequest = now + PREPARATION_RETRY
         end
     end
     if state.updateAt and now >= state.updateAt then
@@ -898,29 +921,52 @@ end
 
 ServeWindow = function(self, source, id, hash, first, count)
     local state = self.restedxpState
-    local function Send(pack)
+    local serving = state.performance.serving
+    local request = { source = source, id = id, status = "received" }
+    serving.last = request
+    local function Send(pack, packLabel)
+        serving.last = request
         local last = math.min(first + count - 1, math.ceil(#pack.data / CHUNK))
-        if first > last then return false end
+        if first > last then request.status = "invalid window"; return false end
+        local queued = true
         if pack.revision and first == 1 then
-            local label = PackLabel(pack.label)
-            Queue(self, "1|O|" .. id .. "|" .. hash .. "|" .. #pack.data
+            local label = PackLabel(packLabel or pack.label)
+            queued = Queue(self, "1|O|" .. id .. "|" .. hash .. "|" .. #pack.data
                 .. (label and ("|" .. label) or ""), "ready:" .. id .. ":" .. source)
+            if not queued then
+                serving.queueFull, request.status = serving.queueFull + 1, "send queue full"
+                return false
+            end
         end
         for sequence = first, last do
-            Queue(self, "1|D|" .. hash:sub(1, 16) .. "|" .. sequence .. "|"
+            if not Queue(self, "1|D|" .. hash:sub(1, 16) .. "|" .. sequence .. "|"
                 .. pack.data:sub((sequence - 1) * CHUNK + 1, sequence * CHUNK), hash .. ":" .. sequence)
+                then queued = false end
         end
-        return true
+        local counter = queued and "windows" or "queueFull"
+        serving[counter] = serving[counter] + 1
+        request.status = queued and "data queued" or "send queue full"
+        return queued
     end
     local saved = SavedPack(self, id)
     local inventory = state.inventory[id]
     if saved and Revision(saved) == hash and (not saved.localInstalled or state.autoReady) then return Send(saved) end
-    if not inventory or inventory.revision ~= hash or type(self.PrepareRestedXPInstalledPack) ~= "function"
-        or state.job or state.incoming or state.installing then return false end
+    if not inventory or inventory.revision ~= hash or type(self.PrepareRestedXPInstalledPack) ~= "function" then
+        serving.unavailable, request.status = serving.unavailable + 1, "requested guide version unavailable"
+        return false
+    end
+    if state.job or state.installing then
+        serving.busy, request.status = serving.busy + 1, "waiting for guide processing"
+        return false
+    end
+    -- Receiving bytes does not change the native guide cache. Allow preparing
+    -- a reply while downloading, so two peers cannot wait on each other.
+    serving.preparing, request.status = serving.preparing + 1, "preparing cached guides"
     return StartJob(self, "Collecting cached guide data...", function()
         return self:PrepareRestedXPInstalledPack(id, hash)
     end, function(pack, problem)
         if not pack then
+            request.status, request.problem = "preparation failed", problem
             state.inventory[id], state.sentOffers[id] = nil, nil
             state.sharingStatus = problem or "The requested guide source could not be prepared."
             Queue(self, "1|X|" .. id, "withdraw:" .. id)
@@ -929,8 +975,13 @@ ServeWindow = function(self, source, id, hash, first, count)
         end
         local stored, failure = StorePack(self, id, pack, LocalIdentity(self),
             { label = inventory.label, localInstalled = true, revision = hash })
-        if not stored then Changed(self, failure, true); return end
-        Send(SavedPack(self, id))
+        if not stored then
+            -- The native source is already retained by RestedXP. A full LIT
+            -- cache must not prevent sending this prepared response directly.
+            serving.cacheBypasses = serving.cacheBypasses + 1
+            request.cacheProblem = failure
+        end
+        Send(stored and SavedPack(self, id) or pack, inventory.label)
         Changed(self, "Requested guide pack is ready to share.")
     end, "export")
 end
@@ -1008,9 +1059,11 @@ Receive = function(self, sender, wire)
         else Changed(self) end
     elseif kind == "W" then
         local target, id, hash, startText, countText = rest:match("^([^|]+)|([^|]+)|([^|]+)|(%d+)|(%d+)$")
-        local identity = LocalIdentity(self)
         local first, count = Integer(startText, math.ceil(MAX_BYTES / CHUNK)), Integer(countText, WINDOW)
-        if not identity or target ~= Address(self, identity) or not PackID(id) or not Hash(hash) or not first or not count then return false end
+        if not PackID(id) or not Hash(hash) or not first or not count then return false end
+        local serving = state.performance.serving
+        if not IsLocalAddress(self, target) then serving.other = serving.other + 1; return false end
+        serving.addressed = serving.addressed + 1
         if state.requests[source] and now - state.requests[source] < 0.5 then return false end
         if not state.requests[source] and Count(state.requests) >= MAX_PEERS then return false end
         state.requests[source] = now
@@ -1417,6 +1470,11 @@ function addon:GetRestedXPPerformance()
         end
     end
     result.queue = #state.queue
+    result.publisherIdentities = {}
+    local identities = type(self.GetDataSelfIdentities) == "function" and self:GetDataSelfIdentities()
+        or { [LocalIdentity(self) or "unavailable"] = true }
+    for identity in pairs(identities) do result.publisherIdentities[#result.publisherIdentities + 1] = identity end
+    table.sort(result.publisherIdentities)
     if state.job then
         result.activeJob = CopyPerformance(state.job.metrics)
         result.activeJob.kind = state.job.kind or "processing"
@@ -1638,6 +1696,20 @@ function addon:ShowRestedXPPerformance()
         rx.messages, rx.bytes / 1024, rx.Q, rx.V, rx.O, rx.W, rx.D, rx.X))
     self:Print(string.format("Queue %d; rejected sends %d; retry windows %d; duplicate chunks %d. Counts include addon payload framing; other features and WoW overhead are excluded.",
         report.queue, report.rejectedSends, report.retryWindows, report.duplicateChunks))
+    local serving = report.serving
+    if serving then
+        self:Print(string.format("Publisher requests: %d addressed here, %d for other addresses; %d windows queued, %d preparations, %d busy, %d unavailable, %d full queue, %d cache bypasses.",
+            serving.addressed, serving.other, serving.windows, serving.preparing, serving.busy,
+            serving.unavailable, serving.queueFull, serving.cacheBypasses))
+        local function Display(value) return tostring(value):gsub("|", "||") end
+        self:Print("Local guide identities: " .. Display(table.concat(report.publisherIdentities, ", ")) .. ".")
+        if serving.last then
+            local last = serving.last
+            self:Print("Last publisher request: " .. Display(last.source) .. " / " .. Display(last.id)
+                .. "; " .. Display(last.status) .. ".")
+            if last.problem or last.cacheProblem then self:Print(Display(last.problem or last.cacheProblem)) end
+        end
+    end
     local transfer = report.receiving or report.lastTransfer
     if transfer then
         self:Print(string.format("%s %.1f KiB in %.2fs (%.2f KiB/s)%s.", report.receiving and "Receiving" or "Last download:",

@@ -166,7 +166,7 @@ local function client(name, saved, readOnly, automatic, metadata)
             local wire = self.sent[self.delivered]
             if not filter or filter(wire) then
                 other.observed[#other.observed + 1] = wire
-                other.receive(name .. "-TestRealm", wire)
+                other.receive(self.senderName or name .. "-TestRealm", wire)
             end
         end
     end
@@ -1313,6 +1313,97 @@ local function checkPeerPhases(report)
     SameTraffic(report.rx, totalRx, "peer phase receive counters account for the entire test")
 end
 
+-- Each player can request the other's uncached native pack at the same time.
+-- One export deliberately outlasts the opposite download's final chunk.
+do
+    local alpha, a = client("DuplexAlpha", nil, nil, nil, true)
+    local beta, b = client("DuplexBeta", nil, nil, nil, true)
+    local alphaID, betaID = "rxpi-" .. string.rep("a", 24), "rxpi-" .. string.rep("b", 24)
+    local alphaRevision, betaRevision = string.rep("a", 64), string.rep("b", 64)
+    local alphaPack = assert(alpha.RestedXPCodec.FromCachedSources({ "opaque alpha native cache" }, { { id = "alpha-native", version = 1 } }))
+    local betaPack = assert(beta.RestedXPCodec.FromCachedSources({ "opaque beta native cache" }, { { id = "beta-native", version = 2 } }))
+    alphaPack.id, alphaPack.hash, alphaPack.revision = alphaID, alphaRevision, alphaRevision
+    betaPack.id, betaPack.hash, betaPack.revision = betaID, betaRevision, betaRevision
+    a.inventory = { { id = alphaID, label = "Alpha Native Pack", revision = alphaRevision, guideCount = 1 } }
+    b.inventory = { { id = betaID, label = "Beta Native Pack", revision = betaRevision, guideCount = 1 } }
+    a.preparedPacks[alphaID], b.preparedPacks[betaID] = { revision = alphaRevision, pack = alphaPack }, { revision = betaRevision, pack = betaPack }
+    a.prepareYields = 6400
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    assert(next(alpha.db.restedxp.groups[alpha.fingerprint].packs) == nil
+        and next(beta.db.restedxp.groups[beta.fingerprint].packs) == nil, "both native sources begin uncached")
+    assert(alpha:StartRestedXPPeerTest("duplexbeta-testrealm", betaID))
+    assert(beta:StartRestedXPPeerTest("duplexalpha-testrealm", alphaID))
+    local alphaReport, betaReport, deferred
+    for _ = 1, math.ceil(80 / 0.15) do
+        exchange(a, b, 0.15)
+        local incoming, job = alpha.restedxpState.incoming, alpha.restedxpState.job
+        if incoming and incoming.complete and job and job.kind == "export" then deferred = true end
+        alphaReport, betaReport = alpha:GetRestedXPPerformance().peerTest, beta:GetRestedXPPerformance().peerTest
+        if alphaReport.status ~= "running" and betaReport.status ~= "running" then break end
+    end
+    assert(alphaReport.status == "complete" and betaReport.status == "complete"
+        and #a.installs == 1 and a.installs[1] == betaRevision and #b.installs == 1 and b.installs[1] == alphaRevision,
+        "simultaneous on-demand peer tests can publish, download and import in both directions")
+    assert(#a.prepares == 1 and #b.prepares == 1 and a.installOptions[1].test and b.installOptions[1].test,
+        "both directions prepare once and retain forced native test installation")
+    assert(alphaReport.rx.D == math.ceil(#betaPack.data / 128) and betaReport.rx.D == math.ceil(#alphaPack.data / 128),
+        "a completed incoming download survives while that player's longer export still owns the processing slot")
+    assert(deferred and alpha:GetRestedXPPerformance().serving.preparing == 1
+        and beta:GetRestedXPPerformance().serving.preparing == 1,
+        "the regression exercises completed-download deferral while both players serve requested source")
+end
+
+-- Saving a prepared pack is optional for sharing an already imported source.
+-- Eight unrelated retained packs cannot prevent its first requested transfer.
+do
+    local publisher, a, recipient, b, id, revision, pack = peerFixture()
+    local group = publisher.db.restedxp.groups[publisher.fingerprint]
+    local archived = {}
+    for index = 1, 8 do
+        local key = "retained-" .. index
+        archived[key] = { id = key, data = pack.data, hash = revision, revision = revision, source = "archive-testrealm",
+            cacheFormat = true, guideCount = pack.guideCount, expectedGuides = Copy(pack.expectedGuides) }
+        group.packs[key] = archived[key]
+    end
+    assert(recipient:StartRestedXPPeerTest("peeralpha-testrealm", id))
+    local report = finishPeerTest(recipient, a, b)
+    assert(report.status == "complete" and #b.installs == 1 and b.installs[1] == revision
+        and report.rx.D == math.ceil(#pack.data / 128) and report.rx.X == 0,
+        "native source sharing succeeds even when its publisher cannot retain another persistent pack")
+    assert(group.packs[id] == nil, "serving without cache space does not force the requested native pack into saved data")
+    for key, entry in pairs(archived) do assert(group.packs[key] == entry, "serving preserves all existing retained packs") end
+    local serving = publisher:GetRestedXPPerformance().serving
+    assert(serving.addressed > 0 and serving.cacheBypasses > 0 and serving.windows > 0 and serving.queueFull == 0,
+        "publisher diagnostics identify its successful uncached transfer after persistent storage was bypassed")
+end
+
+-- Native channel senders can use a NameUtil character alias that differs from
+-- UnitFullName. Requests target the observed alias and must reach its holder.
+do
+    local publisher, a = client("NativeAlpha", nil, nil, nil, true)
+    local recipient, b = client("AliasBeta", nil, nil, nil, true)
+    local id, revision = "rxpi-" .. string.rep("c", 24), string.rep("c", 64)
+    local pack = assert(publisher.RestedXPCodec.FromCachedSources({ "opaque aliased native cache" }, { { id = "alias-native", version = 3 } }))
+    pack.id, pack.hash, pack.revision = id, revision, revision
+    a.inventory = { { id = id, label = "Alias Native Pack", revision = revision, guideCount = 1 } }
+    a.preparedPacks[id] = { revision = revision, pack = pack }
+    a.senderName = "AliasAlpha-TestRealm"
+    function publisher:GetDataSelfIdentities()
+        return { ["nativealpha-testrealm"] = true, ["aliasalpha-testrealm"] = true }
+    end
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    assert(recipient:StartRestedXPPeerTest("aliasalpha-testrealm", id))
+    local report = finishPeerTest(recipient, a, b)
+    assert(report.status == "complete" and report.source == "aliasalpha-testrealm"
+        and #a.prepares == 1 and #b.installs == 1 and b.installs[1] == revision,
+        "a request addressed to the observed character alias prepares and serves the native publisher's pack")
+    local serving = publisher:GetRestedXPPerformance().serving
+    assert(serving.addressed > 0 and serving.other == 0 and serving.windows > 0,
+        "alias-targeted requests count as locally addressed and served")
+end
+
 -- A peer test forces one ordinary discovery, download and native import even
 -- when both the installed metadata and cached package already match exactly.
 do
@@ -1390,6 +1481,105 @@ do
     assert(report.status == "complete" and report.id == id and report.source == "peeralpha-testrealm"
         and next(recipient.db.restedxp.groups[recipient.fingerprint].sources) == nil,
         "with no followed publisher the default test uses an available peer without persisting a source")
+end
+
+-- Random tests draw a player before drawing one of that player's packs. A
+-- prolific or early publisher must not outweigh another eligible player.
+do
+    local alpha, a = client("RandomAlpha", nil, nil, nil, true)
+    local zulu, c = client("RandomZulu", nil, nil, nil, true)
+    local recipient, b, environment = client("RandomBeta", nil, nil, nil, true)
+    local alphaIDs = { "rxpi-" .. string.rep("a", 24), "rxpi-" .. string.rep("b", 24), "rxpi-" .. string.rep("c", 24) }
+    local zuluIDs = { "rxpi-" .. string.rep("d", 23) .. "1", "rxpi-" .. string.rep("d", 23) .. "2" }
+    local packs = {}
+    local function AddPack(addon, world, id, revision)
+        local pack = assert(addon.RestedXPCodec.FromCachedSources({ "opaque native cached guide " .. id },
+            { { id = "guide-" .. id, version = 1 } }))
+        pack.id, pack.hash, pack.revision = id, revision, revision
+        world.inventory[#world.inventory + 1] = { id = id, label = id, revision = revision, guideCount = 1 }
+        world.preparedPacks[id], packs[id] = { revision = revision, pack = pack }, pack
+    end
+    for index, id in ipairs(alphaIDs) do AddPack(alpha, a, id, string.rep(tostring(index), 64)) end
+    for index, id in ipairs(zuluIDs) do AddPack(zulu, c, id, string.rep(tostring(index + 3), 64)) end
+    b.inventory = Copy(a.inventory)
+    local peers = { { world = a, name = "RandomAlpha-TestRealm" }, { world = c, name = "RandomZulu-TestRealm" },
+        { world = b, name = "RandomBeta-TestRealm" } }
+    local cursors, held, firstReply = {}, {}, nil
+    local function Deliver(sender, target, wire)
+        target.observed[#target.observed + 1] = wire
+        target.receive(sender.name, wire)
+    end
+    local function GroupStep()
+        for _, peer in ipairs(peers) do peer.world:advance(0.15) end
+        for _, sender in ipairs(peers) do
+            local first = (cursors[sender.world] or 0) + 1
+            cursors[sender.world] = #sender.world.sent
+            for index = first, #sender.world.sent do
+                local wire = sender.world.sent[index]
+                for _, target in ipairs(peers) do
+                    if target ~= sender then
+                        local run = recipient.restedxpState.peerTest
+                        local reply = target.world == b and run and run.querySentAt and wire:match("^1|[VO]|")
+                        if reply and sender.world == c and not firstReply then
+                            held[#held + 1] = { sender = sender, wire = wire }
+                        else
+                            if reply and not firstReply then firstReply = sender.name end
+                            Deliver(sender, target.world, wire)
+                        end
+                    end
+                end
+            end
+        end
+        if firstReply then
+            for _, entry in ipairs(held) do Deliver(entry.sender, b, entry.wire) end
+            held = {}
+        end
+    end
+    a:connect(true); b:connect(true); c:connect(true)
+    for _ = 1, 30 do GroupStep() end
+    assert(recipient:SelectRestedXPPack(alphaIDs[1], "randomalpha-testrealm"))
+    local group = recipient.db.restedxp.groups[recipient.fingerprint]
+    local followed = Copy(group.sources)
+    local staleID = "rxpi-" .. string.rep("f", 24)
+    local staleBody = "1|V|" .. staleID .. "|" .. string.rep("f", 64) .. "|1"
+    local staleWire = staleBody .. "|" .. recipient:SignGroupMessage("restedxp", staleBody)
+    assert(b.receive("Offline-TestRealm", staleWire))
+    recipient.restedxpState.offers[staleID]["offline-testrealm"].seen = b.now - 181
+    assert(not b.receive("RandomBeta-TestRealm", staleWire), "self announcements cannot become random publisher candidates")
+    local draws, originalRandom = {}, math.random
+    environment.math = {}
+    for name, value in pairs(math) do environment.math[name] = value end
+    environment.math.random = function(maximum)
+        if maximum == nil then return originalRandom() end
+        draws[#draws + 1] = maximum
+        return 2
+    end
+    assert(recipient:StartRestedXPPeerTest(nil, nil, { random = true }))
+    for _ = 1, 25 do GroupStep() end
+    local gathering = recipient:GetRestedXPPerformance().peerTest
+    assert(gathering.random and gathering.status == "running" and gathering.phase == "discovery" and #draws == 0
+        and firstReply == "RandomAlpha-TestRealm",
+        "random discovery collects replies instead of selecting the first or followed publisher early")
+    local report
+    for _ = 1, 600 do
+        GroupStep()
+        report = recipient:GetRestedXPPerformance().peerTest
+        if report.status ~= "running" then break end
+    end
+    assert(report.status == "complete" and report.random and report.source == "randomzulu-testrealm" and report.id == zuluIDs[2],
+        "stable random draws select another player's second pack despite a followed first responder")
+    assert(#draws == 2 and draws[1] == 2 and draws[2] == 2,
+        "random selection draws among two distinct fresh players, then only that player's two packs")
+    assert(report.phases.discovery.wall >= 10 and report.tx.Q == 1 and report.tx.W >= 1
+        and report.rx.D == math.ceil(#packs[zuluIDs[2]].data / 128),
+        "random testing waits for ordinary discovery replies and uses one normal query and one pack transfer")
+    assert(#a.prepares == 0 and #c.prepares == 1 and c.prepares[1].id == zuluIDs[2]
+        and #b.installs == 1 and b.installPayloads[1].id == zuluIDs[2] and b.installOptions[1].test,
+        "only the randomly selected pack is downloaded and passed through native test import")
+    for id, source in pairs(group.sources) do assert(followed[id] == source, "random testing adds no followed publishers") end
+    for id, source in pairs(followed) do assert(group.sources[id] == source, "random testing preserves followed publishers") end
+    checkPeerPhases(report)
+    Traffic(a.sent); Traffic(b.sent); Traffic(c.sent)
 end
 
 -- Partial transfers expose useful counters before completion and retain those
