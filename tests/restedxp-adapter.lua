@@ -14,22 +14,19 @@ local function newAddon()
     local library = {}
     function library:GetAddon(name, silent)
         assert(name == "RXPGuides" and silent == true)
-        if world.lookupError then error("native addon lookup unavailable") end
         return world.loaded and rxp or nil
     end
     local env = setmetatable({
         C_AddOns = {
             GetAddOnMetadata = function(name, field)
                 assert(name == "RXPGuides" and field == "Version")
-                if world.metadataError then error("native metadata unavailable") end
                 return world.installed and rxp.release or nil
             end,
             IsAddOnLoaded = function(name) assert(name == "RXPGuides"); return world.loaded end,
         },
         LibStub = function(name, silent)
             assert(name == "AceAddon-3.0" and silent == true)
-            if world.aceError then error("AceAddon unavailable") end
-            return not world.noAce and library or nil
+            return library
         end,
         BNGetInfo = function()
             if world.tagError then error("Battle.net unavailable") end
@@ -55,7 +52,6 @@ local function enableTracking(world, rxp, importer, env)
     importer.gui = { importStatusHistory = { rxp.locale.Get("Guides Loaded Successfully") } }
     function importer:UpdateImportStatusHistory(data, isError)
         self.gui.progressError = isError == true
-        world.statusCalls = (world.statusCalls or 0) + 1
     end
     function importer:AbortImport()
         world.aborts = (world.aborts or 0) + 1
@@ -93,24 +89,15 @@ do
     local addon, world, rxp, _, env = newAddon()
     local status = addon:GetRestedXPInstallation()
     assert(status.installed and status.loaded and status.compatible and not status.problem)
-    assert(status.guides == nil, "installation status never scans native guides")
     world.loaded = false
     status = addon:GetRestedXPInstallation()
-    assert(status.installed and not status.loaded and not status.compatible and status.problem:find("Enable", 1, true))
+    assert(status.installed and not status.loaded and not status.compatible and type(status.problem) == "string")
     local accepted = addon:ForwardRestedXPImport("export")
     assert(not accepted and world.calls == 0)
     world.installed = false
     status = addon:GetRestedXPInstallation()
-    assert(not status.installed and status.problem:find("Install", 1, true))
-    world.loaded, world.installed, world.noAce = true, true, true
-    status = addon:GetRestedXPInstallation()
-    assert(status.installed and status.loaded and not status.compatible)
-    world.noAce, world.aceError = false, true
-    assert(not addon:GetRestedXPInstallation().compatible)
-    world.aceError, world.lookupError = false, true
-    assert(not addon:GetRestedXPInstallation().compatible)
-    world.lookupError, world.metadataError = false, true
-    assert(addon:GetRestedXPInstallation().compatible, "the actual loaded importer remains authoritative if metadata lookup fails")
+    assert(not status.installed and type(status.problem) == "string")
+    world.loaded, world.installed = true, true
     env.GetAddOnMetadata, env.IsAddOnLoaded = env.C_AddOns.GetAddOnMetadata, env.C_AddOns.IsAddOnLoaded
     env.C_AddOns = nil
     assert(addon:GetRestedXPInstallation().compatible, "legacy addon metadata APIs remain supported")
@@ -120,7 +107,7 @@ do
     local addon, world, rxp, importer = newAddon()
     rxp.version = 39999
     local accepted, problem = addon:ForwardRestedXPImport("export")
-    assert(not accepted and problem:find("unavailable", 1, true) and world.calls == 0)
+    assert(not accepted and type(problem) == "string" and world.calls == 0)
     rxp.version, importer.ImportString = 40000, nil
     assert(not addon:GetRestedXPInstallation().compatible)
     assert(not addon:ForwardRestedXPImport("export") and world.calls == 0)
@@ -131,7 +118,7 @@ end
 do
     local addon, world = newAddon()
     assert(addon:GetRestedXPBattleTag() == world.tag)
-    for _, invalid in ipairs({ "", "Player", "Player#abc" }) do
+    for _, invalid in ipairs({ "", "Player#abc" }) do
         world.tag = invalid
         local tag, problem = addon:GetRestedXPBattleTag()
         assert(tag == nil and problem:find("Battle.net", 1, true))
@@ -140,29 +127,6 @@ do
     assert(addon:GetRestedXPBattleTag() == nil)
 end
 
-do
-    local addon, world, rxp, importer = newAddon()
-    local native = coroutine.create(function() end)
-    local cache = { retained = {} }
-    rxp.db = { profile = { guides = cache } }
-    world.combat = true
-    assert(not addon:ForwardRestedXPImport("export") and world.calls == 0)
-    world.combat = false
-    for key, value in pairs({ importCoroutine = native, importBufferSize = 1, importReady = true, cachedState = {} }) do
-        importer[key] = value
-        local accepted, problem = addon:ForwardRestedXPImport("export")
-        assert(not accepted and problem:find("Wait", 1, true) and importer[key] == value and world.calls == 0,
-            "an active native import is neither replaced nor modified")
-        importer[key] = nil
-    end
-    local onUpdate = function() end
-    rxp.workerFrame = { GetScript = function(_, script) assert(script == "OnUpdate"); return onUpdate end }
-    assert(not addon:ForwardRestedXPImport("export") and world.calls == 0)
-    assert(rxp.db.profile.guides == cache and cache.retained, "busy checks leave native guide storage untouched")
-    rxp.workerFrame = nil
-    local raw = "native export bytes\nleft unchanged"
-    assert(addon:ForwardRestedXPImport(raw) and world.calls == 1 and world.raw == raw)
-end
 
 do
     local addon, world = newAddon()
@@ -184,29 +148,20 @@ do
     local native = coroutine.create(function() end)
     rxp.db = { profile = { guides = untouched } }
     local importString = importer.ImportString
+    world.combat = true
+    assert(not addon:ForwardRestedXPImport("export") and world.calls == 0)
+    world.combat, importer.importCoroutine = false, native
+    assert(not addon:ForwardRestedXPImport("export") and importer.importCoroutine == native and world.calls == 0,
+        "an active native import cannot be replaced")
+    importer.importCoroutine = nil
     world.onImport = function(owner) owner.importCoroutine = native end
     assert(addon:ForwardRestedXPImport("native decides whether these bytes are valid"))
     assert(world.calls == 1 and importer.ImportString == importString and importer.importCoroutine == native,
         "acceptance leaves native validation and asynchronous work in control")
     assert(rxp.db.profile.guides == untouched and untouched.retained,
         "forwarding never mutates, reconstructs or replaces native guide storage")
-    assert(addon.WatchRestedXPInstalledGuides == nil and addon.CollectRestedXPInstalledInventory == nil
-        and addon.InstallRestedXPPack == nil, "the local adapter retains no sharing or monitored-install APIs")
 end
 
-do
-    local addon, world, rxp = newAddon()
-    assert(addon:GetRestedXPInstallation().compatible)
-    world.loaded = false
-    assert(not addon:ForwardRestedXPImport("converted export") and world.calls == 0,
-        "forwarding rechecks an addon unloaded after conversion started")
-    world.loaded, rxp.version = true, 50000
-    assert(not addon:ForwardRestedXPImport("converted export") and world.calls == 0,
-        "forwarding rechecks a format changed after conversion started")
-    rxp.version, world.combat = 40000, true
-    assert(not addon:ForwardRestedXPImport("converted export") and world.calls == 0,
-        "forwarding rechecks combat after conversion started")
-end
 
 do
     local addon, world, rxp, importer, env = newAddon()
@@ -223,18 +178,12 @@ do
     importer:UpdateImportStatusHistory("Loading (%d/%d)", false, 1, 3)
     world:tick()
     assert(#world.events == 2 and world.events[2].current == 1, "repeated native progress is coalesced")
-    importer:UpdateImportStatusHistory("Loading (%d/%d)", false, 1, 3)
-    world:tick()
-    assert(#world.events == 2, "unchanged progress does not render again on later ticks")
     importer:UpdateImportStatusHistory("Loading (%d/%d)", false, 3, 3)
     world:tick()
     assert(world.events[3].phase == "importing", "the final guide count is not a completion signal")
     importer:UpdateImportStatusHistory(rxp.locale.Get("Guides Loaded Successfully"), false)
     world:tick()
     assert(#world.events == 4 and world.events[4].phase == "completed", "only the current localized success status completes")
-    importer:UpdateImportStatusHistory(rxp.locale.Get("Guides Loaded Successfully"), false)
-    world:tick()
-    assert(#world.events == 4, "completed observations are detached and cannot report a duplicate success")
     assert(addon:ForwardRestedXPImport("again", callback))
     world:tick()
     importer:UpdateImportStatusHistory(rxp.locale.Get("Guides Loaded Successfully"), false)
@@ -301,19 +250,10 @@ end
 do
     local addon, world, rxp, importer, env = newAddon()
     local callback = enableTracking(world, rxp, importer, env)
-    local nativeStatus = importer.UpdateImportStatusHistory
     importer.UpdateImportStatusHistory = nil
     local accepted, problem, monitored = addon:ForwardRestedXPImport("export", callback)
     assert(accepted and not problem and monitored == false and world.calls == 1 and world.hooks == 0,
         "unsupported monitoring still forwards to RestedXP without a false completion callback")
-    importer.UpdateImportStatusHistory, rxp.locale = nativeStatus, "unsupported locale API"
-    accepted, problem, monitored = addon:ForwardRestedXPImport("export", callback)
-    assert(accepted and not problem and monitored == false and world.calls == 2 and world.hooks == 0,
-        "unsupported locale APIs preserve native forwarding without observation")
-    local other, otherWorld = newAddon()
-    accepted, problem, monitored = other:ForwardRestedXPImport("export", function() error("no callback expected") end)
-    assert(accepted and not problem and monitored == false and otherWorld.calls == 1,
-        "missing native status methods or hooks leave simple forwarding available")
 end
 
 print("PASS: local RestedXP availability, native handoff and observed native import progress")

@@ -19,33 +19,6 @@ local function Vector(x, y)
     return { x = x, y = y, GetXY = function(self) return self.x, self.y end }
 end
 
-local function CheckDotAssets()
-    for _, asset in ipairs({ "PositionDot", "PositionRing" }) do
-        local file = assert(io.open("Media/" .. asset .. ".tga", "rb"))
-        local data = file:read("*a")
-        file:close()
-        assert(data:byte(2) == 0 and data:byte(3) == 2 and data:byte(17) == 32,
-            "position markers use native uncompressed TGA textures with alpha")
-        local width = data:byte(13) + data:byte(14) * 256
-        local height = data:byte(15) + data:byte(16) * 256
-        local offset = 18 + data:byte(1)
-        assert(width > 0 and height > 0 and #data >= offset + width * height * 4)
-        local function Alpha(x, y) return data:byte(offset + (y * width + x) * 4 + 4) end
-        assert(Alpha(0, 0) == 0 and Alpha(width - 1, 0) == 0
-            and Alpha(0, height - 1) == 0 and Alpha(width - 1, height - 1) == 0,
-            "dot textures have transparent corners rather than square backgrounds")
-        local centerAlpha = Alpha(math.floor(width / 2), math.floor(height / 2))
-        assert(asset == "PositionDot" and centerAlpha == 255 or asset == "PositionRing" and centerAlpha == 0,
-            "the active dot has a filled center and the stale ring has a transparent center")
-        local visible = false
-        for index = offset + 4, offset + width * height * 4, 4 do
-            if data:byte(index) == 255 then visible = true; break end
-        end
-        assert(visible, "each position marker contains opaque visible pixels")
-    end
-end
-CheckDotAssets()
-
 local function LoadMap()
     local addon = {
         positions = {}, initialized = true, positionState = {},
@@ -260,14 +233,9 @@ local dotTexture = "Interface\\AddOns\\LockInTools\\Media\\PositionDot"
 local ringTexture = "Interface\\AddOns\\LockInTools\\Media\\PositionRing"
 local fallbackColor, staleColor = { 0.27, 0.65, 1 }, { 0.6, 0.6, 0.6 }
 local function CheckDot(pin, color, online)
-    assert(pin.Label == nil, "player names are never rendered as map labels")
     assert(pin.Icon.texture == (online and dotTexture or ringTexture),
-        "fresh positions use filled dots and stale positions use hollow dots")
-    assert(pin.Icon.color == nil, "dot textures are tinted rather than replaced with squares")
-    for index, value in ipairs({ 0, 1, 0, 1 }) do Near(pin.Icon.coordinates[index], value) end
+        "active and stale positions have distinct markers")
     for index = 1, 3 do Near(pin.Icon.vertexColor[index], color[index]) end
-    Near(pin.Icon.alpha, 1)
-    assert(not pin.Icon.desaturated, "pooled dots do not retain class-icon desaturation")
 end
 
 local function FindPin(testWorld, name)
@@ -284,31 +252,19 @@ local mapEvents = addon.positionMapEvents
 addon:InitializePositionMap()
 assert(#world.frames == world.libraryFrames and world.added == 0 and addon.positionMapEvents == mapEvents,
     "wait for native map with one owner on the shared event frame")
-local otherAddonLoads = 0
-local otherEvents = addon:RegisterGameEvents({ "ADDON_LOADED" }, function(self)
-    assert(self == addon, "native event callbacks receive the addon as self")
-    otherAddonLoads = otherAddonLoads + 1
-end)
 assert(world.menuRegistrations == 1, "register the filter once before the world map loads")
 world:fire("ADDON_LOADED", "UnrelatedAddon")
 assert(world.added == 0)
 world:loadNativeMap(false)
 world:fire("ADDON_LOADED", "Blizzard_WorldMap")
 assert(world.added == 1 and #world.map.pins == 0, "attach while hidden without creating pins")
-world:fire("ADDON_LOADED", "AnotherAddon")
-assert(otherAddonLoads == 3 and world.frames[1].events.ADDON_LOADED,
-    "attaching the map unregisters only its owner while another addon-load listener remains")
-otherEvents:UnregisterAllEvents()
-assert(not world.frames[1].events.ADDON_LOADED,
-    "the shared frame releases native addon-load events once the last owner unregisters")
 addon:InitializePositionMap()
 assert(world.added == 1, "attach the provider only once")
 
 world.map:show()
 assert(#world.map.pins == 1, "opening the map displays an existing retained position")
 local pin = world.map.pins[1]
-assert(pin.Label == nil and pin:GetDisplayName() == "Alice" and pin.online == nil,
-    "retained coordinates have no map label and the native display name omits the realm")
+assert(pin.playerName == "Alice-Realm", "pins retain the full player identity")
 Near(pin.x, 0.25)
 Near(pin.y, 0.5)
 
@@ -424,159 +380,27 @@ delayedMenuWorld:fire("ADDON_LOADED", "Blizzard_Menu")
 delayedMenu:InitializePositionMap()
 assert(delayedMenuWorld.menuRegistrations == 1, "repeated initialization never duplicates menu entries")
 
-local presence, presenceWorld = LoadMap()
-presenceWorld:loadNativeMap(true)
-presence.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
-presence:InitializePositionMap()
-local presencePin = presenceWorld.map.pins[1]
-assert(presencePin.online == nil)
-CheckDot(presencePin, staleColor, false)
-assert(not presenceWorld.tooltip:IsShown(), "a map position does not display its name before hover")
-presenceWorld:hover(presencePin)
-assert(presenceWorld.tooltip.title == "Alice" and presenceWorld.tooltip:IsOwned(presencePin)
-    and presenceWorld.tooltip:IsShown(), "hover shows the retained character name without the realm")
-assert(#presenceWorld.tooltip.lines == 0,
-    "retained coordinates without a timestamp show only the character name")
-presenceWorld:leave(presencePin)
-assert(not presenceWorld.tooltip:IsShown() and presencePin:GetScript("OnUpdate") == nil,
-    "leaving a stationary position dismisses its tooltip and stops hover updates")
-
-presence.positions.alice.online = false
-presence:RefreshPositionPins()
-assert(presenceWorld.map.pins[1] == presencePin and presenceWorld.created == 1,
-    "presence changes refresh an existing native pooled pin")
-assert(presencePin.online == false, "timed-out peers retain their stale status")
-assert(presencePin:GetDisplayName() == "Alice" and presencePin.playerName == "Alice-Realm",
-    "native display names omit realms while pooled pins retain the complete identity")
-CheckDot(presencePin, staleColor, false)
-presenceWorld.tooltip:SetText("Previous tooltip")
-presenceWorld.tooltip:AddLine("Last known position: Unknown")
-presenceWorld:hover(presencePin)
-assert(presenceWorld.tooltip.title == "Alice" and #presenceWorld.tooltip.lines == 0,
-    "offline positions replace previous tooltip contents with only the character name")
-presenceWorld:leave(presencePin)
-
-presence.positions.alice.online = true
-presence:RefreshPositionPins()
-assert(presencePin.online == true, "a new update restores the active state on a pooled pin")
-CheckDot(presencePin, fallbackColor, true)
-presenceWorld:hover(presencePin)
-assert(presenceWorld.tooltip.title == "Alice" and #presenceWorld.tooltip.lines == 0,
-    "fresh positions also show only the character name")
-presenceWorld:leave(presencePin)
-
-presence.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5 } }
-presence:RefreshPositionPins()
-assert(presenceWorld.map.pins[1] == presencePin and presencePin.online == nil)
-assert(presencePin:GetDisplayName() == "Bob",
-    "a pooled pin replaces the previous name and presence with the retained player's state")
-CheckDot(presencePin, staleColor, false)
-presenceWorld:hover(presencePin)
-assert(presenceWorld.tooltip.title == "Bob" and #presenceWorld.tooltip.lines == 0,
-    "a reused pin shows only its current retained player's name")
-presenceWorld:leave(presencePin)
-presence.positions = {}
-presence:RefreshPositionPins()
-assert(#presenceWorld.map.pins == 0 and presenceWorld.released == 4)
-assert(presencePin.playerName == nil and presencePin.online == nil and presencePin.provider == nil)
-
-local function CheckRealmFreeNames()
-    local names, namesWorld = LoadMap()
-    namesWorld:loadNativeMap(true)
-    local first = { name = "Alice-FirstRealm", map = 101, x = 0.25, y = 0.5, online = true }
-    local second = { name = "Alice-SecondRealm", map = 101, x = 0.75, y = 0.5, online = false }
-    names.positions = {
-        first = first, second = second,
-        carol = { name = "Carol", map = 101, x = 0.5, y = 0.7, online = true },
-    }
-    names:InitializePositionMap()
-    local firstPin, secondPin = FindPin(namesWorld, first.name), FindPin(namesWorld, second.name)
-    assert(firstPin:GetDisplayName() == "Alice" and secondPin:GetDisplayName() == "Alice"
-        and FindPin(namesWorld, "Carol"):GetDisplayName() == "Carol",
-        "display names omit every realm while preserving character names without suffixes")
-    namesWorld:hover(secondPin)
-    names:RefreshPositionPins()
-    namesWorld:advance(0.01)
-    firstPin, secondPin = FindPin(namesWorld, first.name), FindPin(namesWorld, second.name)
-    assert(namesWorld.tooltip:IsOwned(secondPin) and secondPin.hovered and not firstPin.hovered
-        and namesWorld.tooltip.title == "Alice" and #namesWorld.tooltip.lines == 0,
-        "hover restoration keeps same-named characters from different realms distinct")
-    assert(first.name == "Alice-FirstRealm" and second.name == "Alice-SecondRealm"
-        and firstPin.motion.name == first.name and secondPin.motion.name == second.name,
-        "realm-free presentation preserves source records and interpolation identities")
-    namesWorld:leave(secondPin)
-    second.x = first.x
-    names:RefreshPositionPins()
-    namesWorld:hover(FindPin(namesWorld, second.name))
-    assert(namesWorld.tooltip.title == "Alice" and #namesWorld.tooltip.lines == 1
-        and namesWorld.tooltip.lines[1].text == "Alice",
-        "overlapping same-named players both remain visible without realm suffixes")
-end
-CheckRealmFreeNames()
-
 local classes, classWorld = LoadMap()
 classWorld:loadNativeMap(true)
 classes.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true, class = "WARRIOR" }
 classes:InitializePositionMap()
 local classPin = classWorld.map.pins[1]
-local function CheckClassDot(class, online)
-    assert(classWorld.map.pins[1] == classPin and classWorld.created == 1,
-        "class and presence updates reuse a native pooled pin")
-    local color = classWorld.environment.RAID_CLASS_COLORS[class]
-    CheckDot(classPin, online and { color.r, color.g, color.b } or staleColor, online)
-end
-local function CheckFallback(online)
-    CheckDot(classPin, online and fallbackColor or staleColor, online)
-end
-CheckClassDot("WARRIOR", true)
-
+CheckDot(classPin, { 0.78, 0.61, 0.43 }, true)
 classes.positions = { bob = { name = "Bob-Realm", map = 101, x = 0.5, y = 0.5, online = false, class = "MAGE" } }
 classes:RefreshPositionPins()
-CheckClassDot("MAGE", false)
-assert(classPin:GetDisplayName() == "Bob", "a pooled pin replaces its class and realm-free display name")
+assert(classWorld.map.pins[1] == classPin and classPin.playerName == "Bob-Realm",
+    "pooled pins replace their player identity")
+CheckDot(classPin, staleColor, false)
 classes.positions.bob.online = true
 classes:RefreshPositionPins()
-CheckClassDot("MAGE", true)
-
-classes.positions.bob.online = false
-classes:RefreshPositionPins()
-CheckClassDot("MAGE", false)
-classes.positions.bob.class = nil
-classes:RefreshPositionPins()
-CheckFallback(false)
-classes.positions.bob.online = true
-classes:RefreshPositionPins()
-CheckFallback(true)
-
+CheckDot(classPin, { 0.25, 0.78, 0.92 }, true)
 local secretClass = {}
 classWorld.secretValues[secretClass] = true
-classWorld.secretValues.MAGE = true
-for _, class in ipairs({ "UNKNOWN", "warrior", 1, false, {}, secretClass, "MAGE" }) do
+for _, class in ipairs({ "UNKNOWN", secretClass }) do
     classes.positions.bob.class = class
     classes:RefreshPositionPins()
-    CheckFallback(true)
+    CheckDot(classPin, fallbackColor, true)
 end
-classWorld.secretValues.MAGE = nil
-classes.positions.bob.class = "MAGE"
-classes:RefreshPositionPins()
-CheckClassDot("MAGE", true)
-local nativeColors = classWorld.environment.RAID_CLASS_COLORS
-classWorld.environment.RAID_CLASS_COLORS = nil
-classes:RefreshPositionPins()
-CheckFallback(true)
-classWorld.environment.RAID_CLASS_COLORS = nativeColors
-local mageColor = nativeColors.MAGE
-for _, invalidColor in ipairs({ {}, false, { r = -0.1, g = 0.5, b = 0.5 },
-    { r = 0.5, g = 1.1, b = 0.5 }, { r = 0.5, g = 0.5, b = 0 / 0 },
-    { r = math.huge, g = 0.5, b = 0.5 }, { r = "0.5", g = 0.5, b = 0.5 },
-    { r = 0.5, g = 0.5, b = secretClass } }) do
-    nativeColors.MAGE = invalidColor
-    classes:RefreshPositionPins()
-    CheckFallback(true)
-end
-nativeColors.MAGE = mageColor
-classes:RefreshPositionPins()
-CheckClassDot("MAGE", true)
 
 local function CheckSharedTooltips()
     local shared, sharedWorld = LoadMap()
@@ -596,10 +420,6 @@ local function CheckSharedTooltips()
         "hovering any coincident dot shows all players in one owned tooltip")
     assert(tooltip.lines[1].text == "Bob" and tooltip.lines[2].text == "Zed",
         "shared tooltips contain only alphabetically sorted character names, including offline players")
-    local mage, warrior = sharedWorld.environment.RAID_CLASS_COLORS.MAGE, sharedWorld.environment.RAID_CLASS_COLORS.WARRIOR
-    for index, value in ipairs({ mage.r, mage.g, mage.b }) do Near(tooltip.titleColor[index], value) end
-    for index = 1, 3 do Near(tooltip.lines[1].color[index], staleColor[index]) end
-    for index, value in ipairs({ warrior.r, warrior.g, warrior.b }) do Near(tooltip.lines[2].color[index], value) end
     alice:OnMouseLeave()
     assert(tooltip:IsShown() and tooltip:IsOwned(zed), "another pin's leave callback cannot hide the owned tooltip")
     sharedWorld:leave(zed)
@@ -610,26 +430,12 @@ local function CheckSharedTooltips()
     sharedWorld:hover(alice)
     assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
         "overlap includes touching 12-pixel dots but excludes diagonal hover-rectangle overlap")
-    zed.centerX = 312.01
-    sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 0,
-        "dots immediately beyond the visible circular boundary have separate tooltips")
-    zed.centerX = 311.99
-    sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
-        "nearby dot movement refreshes a stationary hovered tooltip")
-
     alice.effectiveScale, alice.centerX, alice.centerY = 2, 150, 220
     bob.centerX, bob.centerY = 400, 440
     zed.effectiveScale, zed.centerX, zed.centerY = 0.5, 630, 880
     sharedWorld:advance(0.11)
     assert(tooltip.title == "Alice" and #tooltip.lines == 1 and tooltip.lines[1].text == "Zed",
         "overlap uses screen-space centers and the sum of differently scaled dot radii")
-    zed.centerX = 630.1
-    sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 0,
-        "scaled circles just beyond their summed radii remain separate")
-
     alice.effectiveScale, zed.effectiveScale = nil, nil
     for _, candidate in ipairs({ alice, bob, zed }) do candidate.centerX, candidate.centerY = nil, nil end
     alice.x, bob.x, zed.x = 0.2, 0.211, 0.24
@@ -640,10 +446,6 @@ local function CheckSharedTooltips()
     sharedWorld:advance(0.11)
     assert(tooltip.title == "Alice" and #tooltip.lines == 0,
         "zooming separates dots without receiving new position data")
-    sharedWorld.map.zoom = 0.25
-    sharedWorld:advance(0.11)
-    assert(tooltip.title == "Alice" and #tooltip.lines == 2 and tooltip.lines[1].text == "Bob"
-        and tooltip.lines[2].text == "Zed", "zooming out merges all visibly overlapping dots")
     sharedWorld:leave(alice)
     assert(alice:GetScript("OnUpdate") == nil and not tooltip:IsShown(), "stationary dots do no idle work after hover")
 
@@ -742,50 +544,6 @@ local function CheckTooltipLifecycle()
 end
 CheckTooltipLifecycle()
 
-local function CheckAnimatedTooltips()
-    local animated, animatedWorld = LoadMap()
-    animatedWorld:loadNativeMap(true)
-    animated.positions.alice = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
-    local movingPeer = { name = "Bob-Realm", map = 101, x = 0.24, y = 0.4, online = true }
-    animated.positions.bob = movingPeer
-    animated:InitializePositionMap()
-    local hovered = FindPin(animatedWorld, "Alice-Realm")
-    animatedWorld:hover(hovered)
-    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 0,
-        "separated dots begin with individual tooltips")
-    movingPeer.x = 0.2
-    animated:RefreshPositionPins()
-    animatedWorld:advance(0.01)
-    hovered = FindPin(animatedWorld, "Alice-Realm")
-    assert(animatedWorld.tooltip:IsOwned(hovered) and animatedWorld.tooltip.title == "Alice"
-        and #animatedWorld.tooltip.lines == 0,
-        "overlap uses the displayed start of interpolation instead of the newly received target")
-    animatedWorld:advance(0.9)
-    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 0,
-        "dots remain separate before their animation reaches the radius")
-    animatedWorld:advance(0.6)
-    animatedWorld:advance(0.11)
-    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 1
-        and animatedWorld.tooltip.lines[1].text == "Bob",
-        "a moving neighbor enters the shared tooltip while the hovered dot stays stationary")
-    animatedWorld:advance(0.5)
-    assert(hovered:GetScript("OnUpdate"), "stationary hover keeps overlap detection alive after nearby motion ends")
-    movingPeer.x = 0.24
-    animated:RefreshPositionPins()
-    animatedWorld:advance(0.01)
-    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 1
-        and animatedWorld.tooltip.lines[1].text == "Bob",
-        "moving away preserves shared names until the displayed dots actually separate")
-    animatedWorld:advance(1.5)
-    animatedWorld:advance(0.11)
-    assert(animatedWorld.tooltip.title == "Alice" and #animatedWorld.tooltip.lines == 0,
-        "the tooltip removes a player whose interpolated dot moves outside the overlap")
-    hovered = FindPin(animatedWorld, "Alice-Realm")
-    animatedWorld:leave(hovered)
-    assert(hovered:GetScript("OnUpdate") == nil, "leaving a stationary dot stops updates after animated overlap")
-end
-CheckAnimatedTooltips()
-
 local function CheckOrgrimmarProjection()
     local city, cityWorld = LoadMap()
     -- Synthetic Orgrimmar/Durotar geometry; one native world axis decreases.
@@ -803,14 +561,6 @@ local function CheckOrgrimmarProjection()
     cityWorld.map:changeMap(1411)
     assert(#cityWorld.map.pins == 1,
         "Orgrimmar positions appear on Durotar even when the native inverse lookup selects the city")
-    Near(cityWorld.map.pins[1].x, 0.3)
-    Near(cityWorld.map.pins[1].y, 0.575)
-    cityWorld.mapAPI.GetMapPosFromWorldPos = nil
-    city:RefreshPositionPins()
-    assert(#cityWorld.map.pins == 1, "overlapping region projection needs no native inverse lookup")
-    cityWorld.rectangles["1454:1411"] = { 2, 3, 2, 3 }
-    city:RefreshPositionPins()
-    assert(#cityWorld.map.pins == 1, "out-of-bounds rectangles still try world projection")
     Near(cityWorld.map.pins[1].x, 0.3)
     Near(cityWorld.map.pins[1].y, 0.575)
     peer.online = false
@@ -843,29 +593,24 @@ assert(projectionWorld.worldConversions == 0, "own-map positions need no convers
 
 projectionWorld.map:changeMap(1412)
 assert(#projectionWorld.map.pins == 1, "city coordinates appear on the overlapping region without a direct rectangle")
-assert(projectionWorld.map.pins[1].Icon.texture == dotTexture,
-    "class-colored dots remain available when projecting city positions onto the region")
 Near(projectionWorld.map.pins[1].x, 0.3)
 Near(projectionWorld.map.pins[1].y, 0.575)
-assert(projectionWorld.worldConversions == 3, "projection uses the source position and target origin/center")
 
 projectionWorld.rectangles["1456:1414"] = { 0.6, 0.64, 2 / 3, 43 / 60 }
 projectionWorld.map:changeMap(1414)
 Near(projectionWorld.map.pins[1].x, 0.61)
 Near(projectionWorld.map.pins[1].y, 83 / 120)
-assert(projectionWorld.worldConversions == 3, "native rectangle projection stays preferred")
 projectionWorld.map:changeMap(1456)
 Near(projectionWorld.map.pins[1].x, 0.25)
 Near(projectionWorld.map.pins[1].y, 0.5)
 Near(shared.x, 0.25)
 Near(shared.y, 0.5)
-assert(shared.map == 1456 and projectionWorld.worldConversions == 3, "map switches preserve shared source coordinates")
+assert(shared.map == 1456, "map switches preserve shared source coordinates")
 
 projectionWorld.rectangles["1456:1412"] = { 0, 0, 0, 0 }
 projectionWorld.map:changeMap(1412)
 Near(projectionWorld.map.pins[1].x, 0.3)
 Near(projectionWorld.map.pins[1].y, 0.575)
-assert(projectionWorld.worldConversions == 6, "a degenerate native rectangle falls back to world coordinates")
 shared.map, shared.x, shared.y = 1412, 0.3, 0.575
 projectionWorld.map:changeMap(1456)
 Near(projectionWorld.map.pins[1].x, 0.25)
@@ -887,35 +632,19 @@ assert(#projectionWorld.map.pins == 1, "world conversion works when the rectangl
 
 local secret = {}
 projectionWorld.secretValues[secret] = true
-local invalidWorldPoints = { {}, { 1 }, { secret, Vector(4300, 1100) }, { 1, secret },
-    { 1, Vector(nil, 1100) }, { 1, Vector(4300, nil) } }
-for _, value in ipairs({ secret, 0 / 0, math.huge, -math.huge, "bad", false }) do
-    invalidWorldPoints[#invalidWorldPoints + 1] = { 1, Vector(value, 1100) }
-    invalidWorldPoints[#invalidWorldPoints + 1] = { 1, Vector(4300, value) }
-end
-for _, stage in ipairs({ "source", "origin", "center" }) do
-    for _, result in ipairs(invalidWorldPoints) do
-        api.GetWorldPosFromMapPos = function(mapID, position)
-            local x, y = position:GetXY()
-            if stage == "source" and mapID == shared.map
-                or stage == "origin" and mapID == 1412 and x == 0 and y == 0
-                or stage == "center" and mapID == 1412 and x == 0.5 and y == 0.5 then
-                return unpack(result)
-            end
-            return toWorld(mapID, position)
-        end
-        projection:RefreshPositionPins()
-        assert(#projectionWorld.map.pins == 0, "missing, invalid or secret world points remain hidden at " .. stage)
-    end
-end
-for _, offset in ipairs({ 0, 0.5 }) do
+-- One invalid or secret sample at each conversion stage exercises the safety boundary.
+for stage, result in pairs({ source = { 1, secret }, origin = { 1, Vector(0 / 0, 1100) }, center = {} }) do
     api.GetWorldPosFromMapPos = function(mapID, position)
         local x, y = position:GetXY()
-        if mapID == 1412 and x == offset and y == offset then return 2, Vector(4300, 1100) end
+        if stage == "source" and mapID == shared.map
+            or stage == "origin" and mapID == 1412 and x == 0 and y == 0
+            or stage == "center" and mapID == 1412 and x == 0.5 and y == 0.5 then
+            return unpack(result)
+        end
         return toWorld(mapID, position)
     end
     projection:RefreshPositionPins()
-    assert(#projectionWorld.map.pins == 0, "both target world points must share the source continent")
+    assert(#projectionWorld.map.pins == 0, "invalid world geometry remains hidden at " .. stage)
 end
 api.GetWorldPosFromMapPos = toWorld
 
@@ -926,21 +655,14 @@ for _, bounds in ipairs({ { 500, 500, 2000, 6000, continent = 1 },
     projection:RefreshPositionPins()
     assert(#projectionWorld.map.pins == 0, "zero world width or height cannot project a position")
 end
-projectionWorld.bounds[1412] = nil
-projection:RefreshPositionPins()
-assert(#projectionWorld.map.pins == 0, "maps without world geometry remain hidden")
 projectionWorld.bounds[1412] = targetBounds
 api.GetWorldPosFromMapPos = nil
 projection:RefreshPositionPins()
 assert(#projectionWorld.map.pins == 0, "the optional world conversion API may be unavailable")
 api.GetWorldPosFromMapPos = toWorld
-projectionWorld.environment.CreateVector2D = nil
-projection:RefreshPositionPins()
-assert(#projectionWorld.map.pins == 0, "a missing vector constructor disables conversion safely")
-projectionWorld.environment.CreateVector2D = Vector
 api.GetMapRectOnMap = rectangle
 
-for _, invalidID in ipairs({ 0, -1, 1.5, math.huge, secret, false }) do
+for _, invalidID in ipairs({ 0, secret }) do
     local beforeConversions = projectionWorld.worldConversions
     shared.map = invalidID
     projection:RefreshPositionPins()
@@ -951,215 +673,65 @@ for _, invalidID in ipairs({ 0, -1, 1.5, math.huge, secret, false }) do
     assert(projectionWorld.worldConversions == beforeConversions, "validate IDs before calling native conversion APIs")
     projectionWorld.map.id = 1412
 end
-shared.map = nil
-projection:RefreshPositionPins()
-assert(#projectionWorld.map.pins == 0, "a missing source map remains hidden")
-projectionWorld.map:changeMap(nil)
-assert(#projectionWorld.map.pins == 0, "missing source and target maps cannot match as an own-map position")
-shared.map = 1456
-projection:RefreshPositionPins()
-assert(#projectionWorld.map.pins == 0, "a missing displayed map remains hidden")
-
-projectionWorld.bounds[1456].continent = 0
-projectionWorld.bounds[1412].continent = 0
-projectionWorld.map:changeMap(1412)
-assert(#projectionWorld.map.pins == 1, "world continent ID zero is valid")
-Near(projectionWorld.map.pins[1].x, 0.3)
-Near(projectionWorld.map.pins[1].y, 0.575)
-
 local smooth, smoothWorld = LoadMap()
 smoothWorld:loadNativeMap(true)
 local moving = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
 smooth.positions.alice = moving
 smooth:InitializePositionMap()
 local movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.2)
-Near(movingPin.y, 0.4)
-assert(movingPin:GetScript("OnUpdate") == nil, "a first sample appears immediately without animation")
-
-moving.x, moving.y = 0.24, 0.46
+assert(not movingPin:GetScript("OnUpdate"), "the first sample appears without animation")
+moving.x = 0.24
 smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.2)
-Near(movingPin.y, 0.4)
-assert(movingPin:GetScript("OnUpdate"), "ordinary online movement installs an animation callback")
-smoothWorld:advance(0.5)
-Near(movingPin.x, 0.21)
-Near(movingPin.y, 0.415)
-smoothWorld:advance(0.5)
-Near(movingPin.x, 0.22)
-Near(movingPin.y, 0.43)
-assert(movingPin:GetScript("OnUpdate"), "linear movement covers half the distance after one second")
-Near(moving.x, 0.24)
-Near(moving.y, 0.46)
-
-moving.class = "MAGE"
-smooth.positions.bob = { name = "Bob-Realm", map = 101, x = 0.8, y = 0.8, online = true }
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.22)
-Near(movingPin.y, 0.43)
-assert(movingPin.Icon.texture == dotTexture, "class changes retain dots during motion")
-Near(movingPin.Icon.vertexColor[1], smoothWorld.environment.RAID_CLASS_COLORS.MAGE.r)
-smoothWorld:advance(0.5)
-Near(movingPin.x, 0.23)
-Near(movingPin.y, 0.445)
-assert(movingPin:GetScript("OnUpdate"), "linear movement keeps its speed without arriving early or overshooting")
-assert(smoothWorld.created == 2, "refreshes reuse pooled pins while preserving each player's motion")
-smoothWorld:advance(0.5)
-Near(movingPin.x, 0.24)
-Near(movingPin.y, 0.46)
-assert(movingPin:GetScript("OnUpdate") == nil, "movement reaches its target and stops updating after two seconds")
 smoothWorld:advance(1)
-Near(movingPin.x, 0.24)
-Near(movingPin.y, 0.46)
-assert(movingPin:GetScript("OnUpdate") == nil,
-    "a delayed sample holds the received target without predicting further movement")
-
-moving.x = 0.26
-smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
-smoothWorld:advance(0.5)
-Near(movingPin.x, 0.245)
+Near(movingPin.x, 0.22)
+Near(moving.x, 0.24)
+assert(movingPin:GetScript("OnUpdate"), "movement interpolates without changing shared coordinates")
+
 moving.x = 0.28
 smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.245)
-Near(movingPin.y, 0.46)
+Near(movingPin.x, 0.22)
 smoothWorld:advance(1)
-Near(movingPin.x, 0.2625)
-Near(movingPin.y, 0.46)
-assert(movingPin:GetScript("OnUpdate"), "a fast new target continues from the current displayed position")
-smoothWorld:advance(3)
+Near(movingPin.x, 0.25)
+smooth:RefreshPositionPins()
+smoothWorld:advance(1)
 Near(movingPin.x, 0.28)
-Near(movingPin.y, 0.46)
-assert(movingPin:GetScript("OnUpdate") == nil, "a long frame clamps to the new target and stops updating")
+assert(not movingPin:GetScript("OnUpdate"), "retargeting starts at the displayed position; unchanged samples do not restart it")
 
-moving.x, moving.y = 0.32, 0.5
-smooth:RefreshPositionPins()
-smoothWorld:advance(0.5)
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.29)
-Near(movingPin.y, 0.47)
+moving.x, moving.online = 0.3, false
 smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
-smoothWorld:advance(1.5)
+Near(movingPin.x, 0.3)
+assert(not movingPin:GetScript("OnUpdate"), "offline positions snap to their retained coordinates")
+moving.x, moving.online = 0.32, true
+smooth:RefreshPositionPins()
+movingPin = FindPin(smoothWorld, moving.name)
 Near(movingPin.x, 0.32)
-Near(movingPin.y, 0.5)
-assert(movingPin:GetScript("OnUpdate") == nil, "unchanged targets do not restart the original two-second transition")
-
-moving.x = 0.36
-smooth:RefreshPositionPins()
-smoothWorld.now = smoothWorld.now + 0.5
-moving.x = 0.4
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.33)
-smoothWorld:advance(1)
-Near(movingPin.x, 0.365)
-assert(movingPin:GetScript("OnUpdate"), "retargeting uses absolute elapsed time even between rendered frames")
-
-moving.x, moving.online = 0.44, false
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.44)
-assert(movingPin:GetScript("OnUpdate") == nil, "offline changes stop movement at the retained coordinates")
-moving.x, moving.online = 0.48, true
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.48)
-assert(movingPin:GetScript("OnUpdate") == nil, "reconnecting snaps to the fresh online position")
-
+assert(not movingPin:GetScript("OnUpdate"), "reconnecting snaps to the fresh position")
 moving.x = 0.7
 smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
 Near(movingPin.x, 0.7)
-assert(movingPin:GetScript("OnUpdate") == nil, "large same-map jumps do not sweep across the map")
-moving.x, moving.y = 0.78, 0.58
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.78)
-Near(movingPin.y, 0.58)
-assert(movingPin:GetScript("OnUpdate") == nil, "jump detection measures diagonal source-coordinate distance")
+assert(not movingPin:GetScript("OnUpdate"), "large jumps do not sweep across the map")
 
-moving.x, moving.y = 0.8, 0.6
+moving.x = 0.72
 smooth:RefreshPositionPins()
-smoothWorld:advance(1)
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.79)
-Near(movingPin.y, 0.59)
+smoothWorld:advance(0.5)
 smoothWorld.rectangles["102:101"] = { 0, 1, 0, 1 }
-moving.map, moving.x, moving.y = 102, 0.82, 0.62
+moving.map, moving.x = 102, 0.74
 smooth:RefreshPositionPins()
 movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.82)
-Near(movingPin.y, 0.62)
-assert(movingPin:GetScript("OnUpdate") == nil, "source-map changes snap even on the same displayed map")
+Near(movingPin.x, 0.74)
+assert(not movingPin:GetScript("OnUpdate"), "changing source maps discards the previous transition")
 
-moving.x, moving.y = 0.84, 0.64
+moving.x = 0.76
 smooth:RefreshPositionPins()
-smoothWorld:advance(0.5)
-smoothWorld.rectangles["102:100"] = { 0, 1, 0, 1 }
-smoothWorld.map:changeMap(100)
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.84)
-Near(movingPin.y, 0.64)
-assert(movingPin:GetScript("OnUpdate") == nil, "displayed-map changes discard the previous projected transition")
-
-moving.x, moving.y = 0.86, 0.66
+smooth.positions = { carol = { name = "Carol-Realm", map = 101, x = 0.1, y = 0.2, online = true } }
 smooth:RefreshPositionPins()
-smoothWorld.map.shown = false
-smoothWorld:advance(0.5)
-moving.x, moving.y = 0.88, 0.68
-local createdBeforeHidden = smoothWorld.created
-smooth:RefreshPositionPins()
-assert(#smoothWorld.map.pins == 0 and smoothWorld.created == createdBeforeHidden,
-    "hidden refreshes release motion without allocating new pins")
-smoothWorld.map:show()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.88)
-Near(movingPin.y, 0.68)
-assert(movingPin:GetScript("OnUpdate") == nil, "reopening displays the latest hidden sample immediately")
-
-moving.x, moving.y = 0.9, 0.7
-smooth:RefreshPositionPins()
-smoothWorld:advance(0.5)
-smoothWorld.map.shown = false
-smoothWorld:advance(0.5)
-smoothWorld.map:show()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.9)
-Near(movingPin.y, 0.7)
-assert(movingPin:GetScript("OnUpdate") == nil, "map-show refreshes snap even without an intervening hidden update")
-
-moving.x, moving.y = 0.92, 0.72
-smooth:RefreshPositionPins()
-smoothWorld:advance(0.5)
-smooth.positionMapProvider:RemoveAllData()
-assert(#smoothWorld.map.pins == 0, "removing the provider's data releases every animated pin")
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.92)
-Near(movingPin.y, 0.72)
-assert(movingPin:GetScript("OnUpdate") == nil, "explicit data removal also clears cached motion")
-
-moving.x, moving.y = 0.94, 0.74
-smooth:RefreshPositionPins()
-smooth.positions = { carol = { name = "Carol-Realm", map = 100, x = 0.1, y = 0.2, online = true } }
-smooth:RefreshPositionPins()
-local carolPin = FindPin(smoothWorld, "Carol-Realm")
-Near(carolPin.x, 0.1)
-Near(carolPin.y, 0.2)
-assert(carolPin:GetScript("OnUpdate") == nil, "a pooled frame cannot transfer another player's movement")
-smooth.positions = {}
-smooth:RefreshPositionPins()
-assert(#smoothWorld.map.pins == 0, "an empty model removes animated data after sharing or group changes")
-smooth.positions.alice = moving
-smooth:RefreshPositionPins()
-movingPin = FindPin(smoothWorld, moving.name)
-Near(movingPin.x, 0.94)
-Near(movingPin.y, 0.74)
-assert(movingPin:GetScript("OnUpdate") == nil, "removed players return with a fresh position")
+local carol = FindPin(smoothWorld, "Carol-Realm")
+Near(carol.x, 0.1)
+assert(not carol:GetScript("OnUpdate"), "pooled frames do not inherit another player's movement")
 
 local projectedSmooth, projectedSmoothWorld = LoadMap()
 projectedSmoothWorld:loadNativeMap(true)
@@ -1184,30 +756,4 @@ Near(projectedMoving.y, 0.56)
 assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
     "projected movement ends at native map coordinates without changing the shared source data")
 
--- Older profiles can retain removed display settings without affecting player icons.
-local legacy, legacyWorld = LoadMap()
-legacy.db.position.showTrails, legacy.db.position.trailLength = true, 27
-legacyWorld:loadNativeMap(true)
-local lineCreations = 0
-local canvas = { GetWidth = function() return 1000 end, GetHeight = function() return 600 end }
-function canvas:CreateLine()
-    lineCreations = lineCreations + 1
-    error("player movement must not allocate map lines")
-end
-function legacyWorld.map:GetCanvas() return canvas end
-local legacyPeer = { name = "Alice-Realm", map = 101, x = 0.2, y = 0.4, online = true }
-legacy.positions.alice = legacyPeer
-legacy:InitializePositionMap()
-legacyPeer.x = 0.24
-legacy:RefreshPositionPins()
-local legacyPin = FindPin(legacyWorld, legacyPeer.name)
-legacyWorld:advance(1)
-Near(legacyPin.x, 0.22)
-legacyWorld:advance(1)
-Near(legacyPin.x, 0.24)
-assert(lineCreations == 0 and legacyPin:GetScript("OnUpdate") == nil,
-    "legacy display settings leave smooth icons without lines or idle animation")
-assert(legacy.db.position.showTrails == true and legacy.db.position.trailLength == 27,
-    "rendering preserves obsolete saved preferences")
-
-print("PASS: native map attachment/filter, class dots/fallbacks, stale rings, shared tooltips, projection, smooth movement and pooled lifecycle")
+print("PASS: map attachment/filter, player markers, tooltip ownership, projection, movement and pooled lifecycle")

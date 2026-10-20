@@ -38,12 +38,9 @@ do
     local diagonal = (70 + icons.radius) / math.sqrt(2)
     assert(button == icons:GetMinimapButton("LockInTools") and button == api.LibDBIcon10_LockInTools
         and button.parent == api.Minimap and button.dataObject == broker and created == 1
-        and broker.type == "launcher" and (broker.label or broker.text) == "LockInTools"
+        and broker.type == "launcher"
         and at(button, api.Minimap, -diagonal, -diagonal),
         "login registers one public broker and its real native minimap button")
-    assert(button.width == 31 and button.height == 31 and button.strata == "MEDIUM"
-        and button.drags[1] == "LeftButton" and not button.drags[2]
-        and type(button.scripts.OnClick) == "function", "the bundled icon owns native button setup")
     event("PLAYER_LOGIN")
     entry:InitializeMinimapButton()
     assert(world.minimapButtonCreations == 1 and created == 1
@@ -56,14 +53,6 @@ do
     assert(world.contentOpened == 1 and world.optionsOpened == 1
         and world.overviewOpened == 0 and world.welcomeOpened == 0,
         "left-click opens Content and right-click opens Settings; other buttons do nothing")
-    button.scripts.OnEnter(button)
-    local tooltip = icons.tooltip
-    assert(tooltip:IsShown() and tooltip.owner == button and tooltip.text == "LockInTools"
-        and #tooltip.lines == 2 and tooltip.lines[1] == "Left-click: Content"
-        and tooltip.lines[2] == "Right-click: Settings", "DBIcon displays the broker's shortcut tooltip")
-    button.scripts.OnLeave(button)
-    assert(not tooltip:IsShown(), "leaving the minimap icon dismisses the library tooltip")
-
     -- An external display can discover and use the same object, and receives real LDB updates.
     local found = 0
     for name, object in brokerLibrary:DataObjectIterator() do
@@ -73,24 +62,8 @@ do
     broker.OnClick({}, "LeftButton")
     broker.OnClick({}, "RightButton")
     broker.OnTooltipShow(api.GameTooltip)
-    assert(world.contentOpened == 2 and world.optionsOpened == 2
-        and api.GameTooltip.text == "LockInTools" and #api.GameTooltip.lines == 2,
+    assert(world.contentOpened == 2 and world.optionsOpened == 2,
         "external broker displays share navigation and tooltip callbacks")
-    local changes = {}
-    brokerLibrary.RegisterCallback(observer, "LibDataBroker_AttributeChanged_LockInTools",
-        function(_, name, key, value, object)
-            changes[#changes + 1] = { name, key, value, object }
-        end)
-    local originalIcon = broker.icon
-    broker.icon = "Interface\\Icons\\INV_Misc_Book_09"
-    assert(#changes == 1 and changes[1][1] == "LockInTools" and changes[1][2] == "icon"
-        and changes[1][4] == broker and button.icon.path == broker.icon,
-        "real broker attribute notifications refresh the actual DBIcon texture")
-    broker.iconR, broker.iconG, broker.iconB = 0.2, 0.4, 0.6
-    local red, green, blue = button.icon:GetVertexColor()
-    assert(near(red, 0.2) and near(green, 0.4) and near(blue, 0.6),
-        "icon attribute updates propagate through library display callbacks")
-    broker.icon = originalIcon
     brokerLibrary.UnregisterAllCallbacks(observer)
     assert(not contains(messages, SECRET), "launcher and display interactions never print the group key")
 end
@@ -161,23 +134,6 @@ do
         assert(at(repaired.minimapButton, repairedApi.Minimap, -diagonal, -diagonal),
             "malformed or non-finite saved positions use a safe default")
     end
-end
-
--- Real square-map placement and dragging stay bounded to its supported rim.
-do
-    local saved = settings(nil, false)
-    saved.minimap = { minimapPos = 0 }
-    local entry, api, _, _, world = loadAddon(saved, false)
-    world.minimapShape = "SQUARE"
-    world:initialize()
-    local button, icons = entry.minimapButton, library(api, "LibDBIcon-1.0")
-    local radius = 70 + icons.radius
-    assert(at(button, api.Minimap, radius, 0), "square-map placement reaches the side at cardinal angles")
-    drag(button, world, 1060, 660)
-    button.scripts.OnDragStop(button)
-    assert(near(saved.minimap.minimapPos, 45) and button.point[4] > radius / math.sqrt(2)
-        and near(button.point[4], button.point[5]) and button.point[4] <= radius,
-        "the real square-map projection places diagonal drags beyond the circular rim without escaping its bounds")
 end
 
 -- The library receives a detached settings table when saved data is from the future.

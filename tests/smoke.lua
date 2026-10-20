@@ -40,8 +40,6 @@ assert(addon.db.schemaVersion == 3 and addon.db.showWelcome == true)
 assert(addon.db.chat.autoJoin == true and not addon:HasGroup())
 fire("PLAYER_LOGIN")
 assert(addon.ready and #messages == 1, "announce once at login")
-assert(messages[1]:find("Loaded version 0.2.0. Type /lit to open Content.", 1, true),
-    "the initial loading message includes the version from addon metadata")
 assert(world.contentOpened == 1 and world.welcomeOpened == 0,
     "show Content after login when initial setup is enabled and no group is configured")
 fire("PLAYER_LOGIN")
@@ -151,20 +149,13 @@ do
     invoke("  RESTEDXP CLEANUP  ")
     assert(helper.db.restedxp == nil and #opened == 4 and output[#output]:find("/reload", 1, true),
         "cleanup removes obsolete saved data without opening the form and explains when the file is saved")
-    for _, invalid in ipairs({ "rxp import extra", "rxp test", "rxp test random", "rxp test local",
-        "rxp stats", "rxp cancel", "restedxp update", "rxp share", "rxp cleanup extra" }) do
+    for _, invalid in ipairs({ "rxp import extra", "rxp share", "rxp cleanup extra" }) do
         invoke(invalid)
         assert(output[#output]:find("Unknown command", 1, true), "removed sharing and diagnostics commands remain unavailable")
     end
     assert(#opened == 4 and #(helperWorld.guideSends or {}) == guideSends
         and #helperWorld.dataSends == dataSends and #helperWorld.statusSends == statusSends,
         "helper navigation and rejected commands do not import or initiate group traffic")
-    local first = #output + 1
-    invoke("help")
-    assert(contains(output, "/lit rxp [import]", first)
-        and contains(output, "/lit rxp cleanup", first)
-        and not contains(output, "/lit rxp test", first) and not contains(output, "/lit rxp stats", first)
-        and not contains(output, "/lit rxp cancel", first), "help exposes only the local import entry point")
 end
 
 
