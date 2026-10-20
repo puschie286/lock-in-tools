@@ -124,6 +124,16 @@ local function client(name, saved, readOnly, automatic, metadata)
             if not entry or entry.revision ~= revision then return nil, "The requested installed guide version is no longer available." end
             return entry.pack
         end
+        function world:enableCachedMatching()
+            self.cachedMatches = {}
+            function addon:MatchesRestedXPCachedPack(pack)
+                if not world.cachedMatches[pack.revision] then return false end
+                world.cachedMatchCalls = (world.cachedMatchCalls or 0) + 1
+                if not pack.cachedSources then world.persistedCachedMatchCalls = (world.persistedCachedMatchCalls or 0) + 1 end
+                if world.validateCachedMatch then world.validateCachedMatch(pack) end
+                return true
+            end
+        end
     end
     loadModule("RestedXP.lua", addon, env)
     addon:InitializeRestedXP()
@@ -666,6 +676,72 @@ do
     assert(#b.installs == 2 and recipient.restedxpState.failed[id] == malformedRevision and installed[id] == nextRevision,
         "a truncated cached envelope fails before native installation (imports=" .. #b.installs
             .. ", rejected=" .. tostring(recipient.restedxpState.failed[id]) .. ")")
+end
+
+-- A recipient's native group can contain extra guide IDs. The transferred
+-- subset's explicit ID/version manifest must survive metadata refresh and reload.
+do
+    local publisher, a = client("SubsetAlpha", nil, nil, nil, true)
+    local recipient, b = client("SubsetBeta", nil, nil, nil, true)
+    local id = "cached-subset-route"
+    local sourceRevision, localRevision = string.rep("5", 64), string.rep("6", 64)
+    local expected = { { id = "expected-one", version = 1 }, { id = "expected-two", version = 2 } }
+    local pack = assert(publisher.RestedXPCodec.FromCachedSources({ "opaque native cache one", "opaque native cache two" }, expected))
+    pack.id, pack.revision, pack.hash = id, sourceRevision, sourceRevision
+    assert(pack.data:sub(1, 6) == "LITC2|", "the fixture includes its expected guide ID/version manifest")
+    a.inventory = { { id = id, label = "Shared Subset", revision = sourceRevision, guideCount = 2 } }
+    a.preparedPacks[id] = { revision = sourceRevision, pack = pack }
+    b.inventory = { { id = id, label = "Own Group With Extra Guide", revision = localRevision, guideCount = 3 } }
+    local function EnableSubsetMatch(world)
+        world:enableCachedMatching()
+        world.validateCachedMatch = function(candidate)
+            assert(candidate.id == id and candidate.expectedGuides and #candidate.expectedGuides == 2
+                and candidate.expectedGuides[1].id == "expected-one" and candidate.expectedGuides[1].version == 1
+                and candidate.expectedGuides[2].id == "expected-two" and candidate.expectedGuides[2].version == 2,
+                "native matching receives the persisted subset identity and expected versions without reading source")
+        end
+    end
+    EnableSubsetMatch(b)
+    b.afterInstall = function(received)
+        assert(received.cacheFormat and received.expectedGuides and received.revision == sourceRevision,
+            "native installation receives the transferred subset manifest")
+        b.cachedMatches[sourceRevision] = true
+    end
+    a:connect(true); b:connect(true)
+    exchange(a, b, 4)
+    assert(recipient:SelectRestedXPPack(id, "subsetalpha-testrealm"))
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 40)
+    assert(#b.installs == 1 and b.installs[1] == sourceRevision,
+        "the missing guide subset is installed once despite the recipient's different aggregate group revision")
+    local group = recipient.db.restedxp.groups[recipient.fingerprint]
+    local saved = assert(group.packs[id])
+    assert(saved.id == id and saved.expectedGuides and #saved.expectedGuides == 2,
+        "the cached transfer persists the metadata needed to recognize its installed subset")
+    local requests, prepares = transferMessages(b), #a.prepares
+    recipient.restedxpState.decoded = {}
+    b.installedChanged()
+    exchange(a, b, 4)
+    assert(recipient:UpdateRestedXPGuides())
+    exchange(a, b, 5)
+    assert(group.installed["subsetbeta-testrealm"][id] == sourceRevision
+        and b.persistedCachedMatchCalls and b.persistedCachedMatchCalls > 0
+        and transferMessages(b) == requests and #a.prepares == prepares and #b.installs == 1,
+        "extra local guide IDs cannot erase the installed subset marker or trigger repeated downloads and imports")
+
+    local reloaded, c = client("SubsetBeta", Copy(recipient.db), nil, nil, true)
+    c.inventory = Copy(b.inventory)
+    EnableSubsetMatch(c)
+    c.cachedMatches[sourceRevision] = true
+    c:connect(true)
+    exchange(a, c, 5)
+    assert(reloaded:UpdateRestedXPGuides())
+    exchange(a, c, 5)
+    local persisted = reloaded.db.restedxp.groups[reloaded.fingerprint]
+    assert(persisted.installed["subsetbeta-testrealm"][id] == sourceRevision
+        and c.persistedCachedMatchCalls and c.persistedCachedMatchCalls > 0
+        and transferMessages(c) == 0 and #c.prepares == 0 and #c.installs == 0,
+        "reloading restores installed subset recognition from saved expected metadata with no source transfer or native import")
 end
 
 -- Even a delayed native metadata API must replace discovery's temporary

@@ -162,10 +162,8 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
     local flags = {}
     for _, name in ipairs(STATUS_FLAGS) do
         local value = fields[name]
-        if IsSecret(value) then return Reject() end
-        if value == true or value == "true" then flags[name] = true
-        elseif value == false or value == "false" then flags[name] = false
-        elseif value ~= nil then return Reject() end
+        if IsSecret(value) or (value ~= nil and type(value) ~= "boolean") then return Reject() end
+        flags[name] = value
     end
     local kind = fields.xpState
     if IsSecret(kind) then return Reject() end

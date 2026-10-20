@@ -185,7 +185,9 @@ local function newAddon(saved, readOnly, name, configure)
     end
     function world:status(name, fields, stamp, sequence, metadata)
         local decoded = {}
-        for key, value in pairs(fields) do decoded[key] = tostring(value) end
+        for key, value in pairs(fields) do
+            decoded[key] = type(value) == "number" and tostring(value) or value
+        end
         return self.receiveStatus(name, decoded, stamp or self.epoch + math.floor(self.now), sequence or 1, metadata)
     end
     function world:find(id)
@@ -661,7 +663,11 @@ do
         { level = 34, xpMax = 700, xpState = "known" },
         { level = 34, xpState = "future" }, { level = 0, xpState = "max" },
         { level = 34, xpState = "unavailable", inParty = "maybe" },
+        { level = 34, xpState = "unavailable", inParty = "true" },
+        { level = 34, xpState = "unavailable", canInvite = "false" },
+        { level = 34, xpState = "unavailable", partyFull = 0 },
         { level = 34, xpState = "unavailable", sharing = "1" },
+        { level = 34, xpState = "unavailable", sharing = "false" },
         { level = 34 }, { unrelated = "future provider" },
     }) do
         assert(not world:status("Malformed-TestRealm", malformed), "Malformed player status is ignored")

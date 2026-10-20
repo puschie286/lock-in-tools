@@ -31,27 +31,36 @@ local function StatusField(name)
 end
 
 -- Permanent wire registry. Add fields with new IDs; never renumber or reuse an
--- ID. False reserves an attachment ID or a retired provider field.
+-- ID or flag bit. False reserves an attachment ID or a retired provider field.
 local STATUS_FIELD_REGISTRY = {
     { 1, "level" },
     { 2, "xp" },
     { 3, "xpMax" },
-    { 4, "xpState" },
-    { 5, "inParty" },
-    { 6, "canInvite" },
-    { 7, "partyFull" },
-    { 8, "sharing" },
+    { 4, "xpState", enum = { [0] = "unavailable", [1] = "known", [2] = "max" } },
+    { 5, false }, -- Retired inParty field; now a bit in field 10.
+    { 6, false }, -- Retired canInvite field.
+    { 7, false }, -- Retired partyFull field.
+    { 8, "sharing", boolean = true },
     { POSITION_FIELD_ID, false }, -- Position is independent of status revisions.
+    { 10, "partyFlags", flags = { { "inParty", 1 }, { "canInvite", 2 }, { "partyFull", 4 } } },
 }
-local STATUS_FIELD_NAMES, STATUS_FIELD_IDS, STATUS_FIELD_ORDER = {}, {}, {}
+local STATUS_FIELDS, STATUS_FIELD_IDS, STATUS_FIELD_ORDER = {}, {}, {}
+local statusNames = {}
 for _, field in ipairs(STATUS_FIELD_REGISTRY) do
     local id, name = field[1], field[2]
     assert(type(id) == "number" and id >= 1 and id <= 65535 and id % 1 == 0
-        and STATUS_FIELD_NAMES[id] == nil, "Invalid or duplicate status field ID.")
-    assert(name == false or (StatusField(name) and STATUS_FIELD_IDS[name] == nil),
+        and STATUS_FIELDS[id] == nil, "Invalid or duplicate status field ID.")
+    assert(name == false or (StatusField(name) and not statusNames[name]),
         "Invalid or duplicate status field name.")
-    STATUS_FIELD_NAMES[id] = name
-    if name then STATUS_FIELD_IDS[name] = id end
+    STATUS_FIELDS[id] = field
+    if name then statusNames[name] = true end
+    if field.flags then
+        for index, flag in ipairs(field.flags) do
+            assert(StatusField(flag[1]) and not statusNames[flag[1]] and flag[2] == 2 ^ (index - 1),
+                "Invalid or duplicate status flag.")
+            statusNames[flag[1]], STATUS_FIELD_IDS[flag[1]] = true, id
+        end
+    elseif name then STATUS_FIELD_IDS[name] = id end
     STATUS_FIELD_ORDER[#STATUS_FIELD_ORDER + 1] = id
 end
 table.sort(STATUS_FIELD_ORDER)
@@ -79,6 +88,38 @@ local function StatusString(value)
     return value
 end
 
+local function EncodeStatusField(field, values)
+    if field.flags then
+        local mask = 0
+        for _, flag in ipairs(field.flags) do
+            local value = values[flag[1]]
+            -- A mask describes the entire group: partial unknowns cannot be
+            -- represented as false. Omit a broken provider instead.
+            if IsSecret(value) or type(value) ~= "boolean" then return nil end
+            if value then mask = mask + flag[2] end
+        end
+        return tostring(mask)
+    end
+    local value = values[field[2]]
+    if IsSecret(value) then return nil end
+    if field.boolean then
+        if type(value) == "boolean" then return value and "1" or "0" end
+    elseif field.enum then
+        for code, label in pairs(field.enum) do
+            if value == label then return tostring(code) end
+        end
+    else return StatusString(value) end
+end
+
+local function ValidStatusValue(id, value)
+    local field = STATUS_FIELDS[id]
+    if not field then return true end
+    if field.flags then return StatusInteger(value, 4294967295, 0) ~= nil end
+    if field.boolean then return value == "0" or value == "1" end
+    if field.enum then return StatusInteger(value, 65535, 0) ~= nil end
+    return true
+end
+
 local function EscapeStatus(value)
     return (value:gsub("[%%|=]", function(character) return string.format("%%%02X", string.byte(character)) end))
 end
@@ -97,7 +138,7 @@ local function UnescapeStatus(value)
 end
 
 local function DecodeStatus(payload)
-    local session, stampText, revisionText, body = payload:match("^3|F|([^|]+)|(%d+)|(%d+)|(.*)$")
+    local session, stampText, revisionText, body = payload:match("^4|F|([^|]+)|(%d+)|(%d+)|(.*)$")
     local stamp = StatusInteger(stampText, MAX_STATUS_STAMP, 0)
     local revision = StatusInteger(revisionText, MAX_STATUS_REVISION, 1)
     if not ValidStatusSession(session) or not stamp or not revision then return nil end
@@ -109,7 +150,7 @@ local function DecodeStatus(payload)
             local id = StatusFieldID(idText)
             if not id or message.fields[id] ~= nil then return nil end
             local value = UnescapeStatus(encoded)
-            if value == nil then return nil end
+            if value == nil or not ValidStatusValue(id, value) then return nil end
             message.fields[id] = value
         end
     end
@@ -134,8 +175,20 @@ end
 local function NamedStatus(fields)
     local named = {}
     for id, value in pairs(fields) do
-        local name = STATUS_FIELD_NAMES[id]
-        if name then named[name] = value end
+        local field = STATUS_FIELDS[id]
+        if field and field[2] then
+            if field.flags then
+                local mask = tonumber(value)
+                for _, flag in ipairs(field.flags) do
+                    named[flag[1]] = math.floor(mask / flag[2]) % 2 == 1
+                end
+            elseif field.boolean then named[field[2]] = value == "1"
+            elseif field.enum then
+                -- A future state must not make XP look known or discard the
+                -- other independently useful player fields.
+                named[field[2]] = field.enum[tonumber(value)] or field.enum[0]
+            else named[field[2]] = value end
+        end
     end
     return named
 end
@@ -147,17 +200,23 @@ local function CollectStatus(self)
     for _, name in ipairs(status.providerNames) do
         local ok, values = pcall(status.providers[name].collect)
         if ok and not IsSecret(values) and type(values) == "table" then
-            local collected, valid = {}, true
-            for key, value in pairs(values) do
-                local encoded = StatusString(value)
-                if IsSecret(key) or not STATUS_FIELD_IDS[key] or encoded == nil then valid = false; break end
-                collected[key] = encoded
+            local collected, touched, valid = {}, {}, true
+            for key in pairs(values) do
+                if IsSecret(key) or not STATUS_FIELD_IDS[key] then valid = false; break end
+                touched[STATUS_FIELD_IDS[key]] = true
+            end
+            if valid then
+                for id in pairs(touched) do
+                    local encoded = EncodeStatusField(STATUS_FIELDS[id], values)
+                    if encoded == nil then valid = false; break end
+                    collected[id] = encoded
+                end
             end
             if valid then
                 available = true
-                for key, value in pairs(collected) do
-                    if fields[key] ~= nil then return nil end
-                    fields[key] = value
+                for id, value in pairs(collected) do
+                    if fields[id] ~= nil then return nil end
+                    fields[id] = value
                 end
             end
         end
@@ -186,11 +245,10 @@ local function EncodeStatus(self, fields, revision, budget)
     status.lastStamp = stamp
     local encoded = {}
     for _, id in ipairs(STATUS_FIELD_ORDER) do
-        local name = STATUS_FIELD_NAMES[id]
-        local value = name and fields[name]
-        if value ~= nil and name then encoded[#encoded + 1] = id .. "=" .. EscapeStatus(value) end
+        local value = fields[id]
+        if value ~= nil then encoded[#encoded + 1] = id .. "=" .. EscapeStatus(value) end
     end
-    local payload = "3|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
+    local payload = "4|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
     -- Sample only when a status packet is already due. Movement must not make
     -- player status dirty or change the contents associated with its revision.
     local position = self.GetPositionSnapshot and self:GetPositionSnapshot()

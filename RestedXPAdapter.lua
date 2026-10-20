@@ -758,16 +758,18 @@ function addon:PrepareRestedXPInstalledPack(id, revision)
     if cached and cached.revision == revision then return cached.pack end
     local codec = self.RestedXPCodec
     if not codec or type(codec.FromCachedSources) ~= "function" then return nil, "Cached guide sharing is unavailable." end
-    local keys, compressed, bytes = {}, {}, 0
+    local keys, compressed, seen, bytes = {}, {}, {}, 0
     for key in pairs(selection.keys) do keys[#keys + 1] = key end
     table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
     for index, key in ipairs(keys) do
         local entry = memo.cache[key]
         local source = type(entry) == "table" and entry.groupOrContent
         if type(source) ~= "string" or #source == 0 then return nil, "The cached guide source became unavailable." end
-        bytes = bytes + #source
-        if bytes > MAX_SCAN_BYTES then return nil, "The cached guide group exceeds the supported size limit." end
-        compressed[#compressed + 1] = source
+        if not seen[source] then
+            bytes = bytes + #source
+            if bytes > MAX_SCAN_BYTES then return nil, "The cached guide group exceeds the supported size limit." end
+            compressed[#compressed + 1], seen[source] = source, true
+        end
         if index % 64 == 0 then Pause() end
     end
     local pack, problem = codec.FromCachedSources(compressed, selection.expectedGuides)

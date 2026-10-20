@@ -727,6 +727,7 @@ do
     local variantKey = world:Cache(source("First inventory", "Class variant", 2, "Variant", "Druid"))
     local secondKey = world:Cache(source("Second inventory", "Other", 7))
     for _, key in ipairs({ oldKey, firstKey, variantKey }) do world.rxp.db.profile.guides[key].metadata.guideId = 100 end
+    world.rxp.db.profile.guides.duplicate = world.rxp.db.profile.guides[firstKey]
     local function run(callback)
         local thread = coroutine.create(callback)
         repeat
@@ -770,7 +771,7 @@ do
     local prepared = assert(run(function() return addon:PrepareRestedXPInstalledPack(first.id, first.revision) end))
     assert(calls.decode == 0 and calls.pack == 0 and calls.bundle == 1 and prepared.guideCount == 2
         and prepared.cacheFormat and prepared.hash == first.revision and prepared.revision == first.revision and prepared.id == first.id,
-        "requested preparation wraps only the newest requested native cache strings, including every conditional variant")
+        "requested preparation deduplicates identical cache strings while retaining distinct conditional variants")
     assert(#prepared.expectedGuides == 1 and prepared.expectedGuides[1].id == "100"
         and prepared.expectedGuides[1].version == 2 and addon:MatchesRestedXPCachedPack(prepared),
         "publishers carry deduplicated ID/version metadata without source processing")

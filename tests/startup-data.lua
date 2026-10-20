@@ -113,14 +113,14 @@ do
         and #connectedWorld.addCalls == 0, "idle data connects without attaching to human chat")
     local presence = assert(connectedWorld.statusSends[1], "shared status broadcasts while position sharing is off")
     assert(presence.prefix == connected:GetDataPrefix() and presence.target == "7"
-        and presence.message:match("^1|Q|status|[^|]+|3|F|[^|]+|%d+|%d+|")
+        and presence.message:match("^1|Q|status|[^|]+|4|F|[^|]+|%d+|%d+|")
         and presence.message:find("|1=12", 1, true) and presence.message:find("|2=0", 1, true)
-        and presence.message:find("|3=1000", 1, true) and presence.message:find("|4=known", 1, true)
-        and presence.message:find("|5=false", 1, true) and presence.message:find("|6=false", 1, true)
-        and presence.message:find("|7=false", 1, true) and presence.message:find("|8=false", 1, true)
+        and presence.message:find("|3=1000", 1, true) and presence.message:find("|4=1", 1, true)
+        and presence.message:find("|8=0", 1, true) and presence.message:find("|10=0", 1, true)
+        and not presence.message:match("|[567]=")
         and not presence.message:match("|[%a_][%w_]*=")
         and #connectedWorld.rosterSends == 0,
-        "production startup shares numeric v3 level, XP and party metadata once without named fields or roster packets")
+        "production startup shares compact v4 player metadata once without retired fields or roster packets")
     connectedEvent("CHAT_MSG_ADDON", presence.prefix, presence.message, "CHANNEL", "RosterFriend", nil, 0, 7, dataRoom)
     local rosterFriend
     for _, player in ipairs(connected:GetOverviewPlayers()) do

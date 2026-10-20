@@ -53,14 +53,27 @@ local function Overlaps(first, second)
     return dx * dx + dy * dy <= (radius + otherRadius) * (radius + otherRadius)
 end
 
+local function WorldPoint(mapID, x, y)
+    local continentID, position = C_Map.GetWorldPosFromMapPos(mapID, CreateVector2D(x, y))
+    if not Number(continentID) or IsSecret(position) or not position then return nil end
+    local worldX, worldY = position:GetXY()
+    if Number(worldX) and Number(worldY) then return continentID, worldX, worldY end
+end
+
 local function WorldPositionOnMap(peer, mapID)
-    if not C_Map or not C_Map.GetWorldPosFromMapPos or not C_Map.GetMapPosFromWorldPos
-        or not CreateVector2D then return nil end
-    local continentID, worldPosition = C_Map.GetWorldPosFromMapPos(peer.map, CreateVector2D(peer.x, peer.y))
-    if not Number(continentID) or IsSecret(worldPosition) or not worldPosition then return nil end
-    local projectedMap, position = C_Map.GetMapPosFromWorldPos(continentID, worldPosition, mapID)
-    if IsSecret(projectedMap) or projectedMap ~= mapID or IsSecret(position) or not position then return nil end
-    local x, y = position:GetXY()
+    if not C_Map or not C_Map.GetWorldPosFromMapPos or not CreateVector2D then return nil end
+    local continentID, worldX, worldY = WorldPoint(peer.map, peer.x, peer.y)
+    if not continentID then return nil end
+    local originContinent, originX, originY = WorldPoint(mapID, 0, 0)
+    if originContinent ~= continentID then return nil end
+    -- The native inverse lookup can select the city instead of the overlapping region.
+    -- Derive the target bounds from its origin and center; (1,1) is inaccurate on some maps.
+    local centerContinent, centerX, centerY = WorldPoint(mapID, 0.5, 0.5)
+    if centerContinent ~= continentID then return nil end
+    local width, height = centerY - originY, centerX - originX
+    if not Number(width) or not Number(height) or width == 0 or height == 0 then return nil end
+    -- Native world X follows map Y, and world Y follows map X; spans may be negative.
+    local x, y = (worldY - originY) / width * 0.5, (worldX - originX) / height * 0.5
     if Coordinate(x) and Coordinate(y) then return x, y end
 end
 
@@ -74,7 +87,6 @@ local function PositionOnMap(peer, mapID)
             local x = minX + peer.x * (maxX - minX)
             local y = minY + peer.y * (maxY - minY)
             if Coordinate(x) and Coordinate(y) then return x, y end
-            return nil
         end
     end
     -- Overlapping city/zone maps need not have a direct parent-map rectangle.
