@@ -126,6 +126,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         loadModule(file, addon, environment)
     end
     addon:InitializeGroup()
+    if native and native.configure then native.configure(environment, world) end
     addon:InitializeData()
     if withPositions then
         loadModule("Position.lua", addon, environment)
@@ -441,6 +442,39 @@ do
     assert(left:GetSharedPositions()["right-testrealm"].x == 0.6 and right:GetSharedPositions()["left-testrealm"].x == 0.4,
         "Native channel events carry positions through the shared feature envelope")
     assert(first.restrictionChecks == 0 and second.restrictionChecks == 0)
+end
+
+-- WoW event delivery uses the native dispatcher; direct/custom callers retain
+-- their input boundary. Both routes still require a recognized protocol.
+do
+    local current, clock = newAddon(nil, false, false, {})
+    local received = {}
+    assert(current:RegisterDataFeature("echo", function(sender, payload)
+        received[#received + 1] = { sender = sender, payload = payload }
+    end))
+    clock:login()
+    clock:member(7)
+    local marker = {}
+    clock.environment.issecretvalue = function(value) return rawequal(value, marker) end
+    for _, sender in ipairs({ false, 123, "", marker, "Friend|forged", "Friend\000forged",
+        "Friend\nforged", "Friend\127forged", string.rep("a", 129) }) do
+        assert(not current:ReceiveData(sender, "1|echo|direct"))
+    end
+    for _, message in ipairs({ false, 123, marker, "1|echo|bad\000data", string.rep("x", 256) }) do
+        assert(not current:ReceiveData("Friend", message))
+    end
+    assert(#received == 0)
+    assert(current:ReceiveData("Friend", "1|echo|direct"))
+    current.ReceiveData = function() error("Native delivery must not re-enter the arbitrary-input boundary") end
+    clock:incoming("1|echo|native", "Friend-TestRealm")
+    assert(#received == 2 and received[2].sender == "Friend-TestRealm" and received[2].payload == "native")
+    for _, frame in ipairs({ "2|echo|wrong version", "1|echo", "1||missing feature",
+        "1|Upper|bad feature", "1|unknown|unregistered feature" }) do
+        clock:incoming(frame, "Friend")
+    end
+    clock:incoming("1|echo|other prefix", "Friend", { prefix = "OTHER" })
+    clock:incoming("1|echo|other distribution", "Friend", { distribution = "WHISPER" })
+    assert(#received == 2, "Native trust preserves envelope, registration and route checks")
 end
 
 -- Missing joins retry indefinitely with capped delays and a single timer despite UI-event storms.
@@ -803,7 +837,7 @@ for _, reason in ipairs({ "WRONG_PASSWORD", "BANNED", "YOU_KICKED", "CHANNEL_PAS
     clock:advance(30)
     assert(#clock.joins == 3 and clock:activeTimers() == 1)
 end
--- Prefix registration and thrown join requests retry, then recover when the native API becomes available.
+-- Prefix registration and thrown join requests retry, then recover when calls succeed.
 for _, failure in ipairs({ "prefixResult", "prefixThrows", "joinThrows" }) do
     local failed, clock = newAddon(nil, false, false, {})
     clock[failure] = failure == "prefixResult" and 2 or true
@@ -819,6 +853,37 @@ for _, failure in ipairs({ "prefixResult", "prefixThrows", "joinThrows" }) do
     assert(#clock.joins == (failure == "joinThrows" and 4 or 1))
     clock:member(7)
     assert(failed:IsDataConnected())
+end
+
+-- Native capabilities are detected during initialization, independently of
+-- later retry attempts or manually requested reconnects.
+for _, capability in ipairs({ "register", "send", "join", "channel", "registerResults", "sendResults" }) do
+    local restore
+    local missing, clock = newAddon(nil, false, false, { configure = function(environment)
+        local target, key
+        if capability == "register" then target, key = environment.C_ChatInfo, "RegisterAddonMessagePrefix"
+        elseif capability == "send" then target, key = environment.C_ChatInfo, "SendAddonMessage"
+        elseif capability == "join" then target, key = environment, "JoinTemporaryChannel"
+        elseif capability == "channel" then target, key = environment, "GetChannelName"
+        elseif capability == "registerResults" then target, key = environment.Enum, "RegisterAddonMessagePrefixResult"
+        else target, key = environment.Enum, "SendAddonMessageResult" end
+        local original = target[key]
+        target[key] = false
+        restore = function() target[key] = original end
+    end })
+    clock:login()
+    assert(not missing:IsDataConnected() and missing.dataState.phase == "error", capability)
+    restore()
+    missing:InitializeData()
+    missing:JoinDataChannel(true)
+    clock:advance(90)
+    clock:member(7)
+    assert(not missing:IsDataConnected() and #clock.prefixCalls == 0 and #clock.joins == 0,
+        "A previously missing native capability remains unavailable until reload: " .. capability)
+    missing:RegisterDataFeature("echo", function() end)
+    clock:connect()
+    assert(missing:SendData("echo", "alternate transport"),
+        "An explicit backend does not require native capabilities: " .. capability)
 end
 
 -- Removing the configured group cancels both retry and healthy membership timers.
@@ -928,8 +993,8 @@ do
     assert(#alice.responses == 2 and #alice.requests == 0 and #bus.queue == 0)
 end
 
-local function requestFixture(onRequest, onResponse)
-    local current, clock = newAddon(nil, false, false, { playerName = "Self" })
+local function requestFixture(onRequest, onResponse, native)
+    local current, clock = newAddon(nil, false, false, native or { playerName = "Self" })
     clock:login()
     clock:member(7)
     assert(current:RegisterDataRequest("snapshot", onRequest or function() return "own" end, onResponse or function() end))
@@ -939,7 +1004,10 @@ end
 do
     local requests, responses = 0, {}
     local current, clock = requestFixture(function(_, payload) requests = requests + 1; return payload end,
-        function(sender, payload) responses[#responses + 1] = { sender = sender, payload = payload } end)
+        function(sender, payload) responses[#responses + 1] = { sender = sender, payload = payload } end,
+        { configure = function(environment)
+            environment.NameUtil = { GetUnmodifiedUnitFullName = function() return "Native-Test Realm" end }
+        end })
     assert(not current:RegisterDataRequest("snapshot", function() error("Duplicate replacement") end, function() end))
     for _, name in ipairs({ "", "Upper", "bad|name", string.rep("a", 33) }) do
         assert(not current:RegisterDataRequest(name, function() end, function() end))
@@ -947,7 +1015,6 @@ do
     assert(not current:RegisterDataRequest("missing", nil, function() end))
     assert(not current:RegisterDataRequest("missing", function() end, false))
     assert(not current:RequestData("missing", "") and not current:RequestData("snapshot", nil))
-    clock.environment.NameUtil = { GetUnmodifiedUnitFullName = function() return "Native-Test Realm" end }
     assert(current:IsDataSelf("SELF-TestRealm") and current:IsDataSelf("Native-TestRealm"))
     local accepted, id = current:RequestData("snapshot", "")
     assert(accepted)
@@ -994,7 +1061,11 @@ do
     }) do
         assert(not current:ReceiveData("Friend", frame), frame)
     end
+    for _, sender in ipairs({ "Friend|forged", "Friend\000forged", string.rep("a", 129) }) do
+        assert(not current:ReceiveData(sender, "1|Q|snapshot|bad-sender|"))
+    end
     assert(requests == 0 and responses == 0)
+    assert(#clock.nativeSends == sent, "Invalid direct sender names cannot become response headers")
     local header = "1|R|snapshot|maximum|friend-testrealm|"
     response = string.rep("x", 255 - #header)
     assert(current:ReceiveData("Friend", "1|Q|snapshot|maximum|"))
@@ -1108,8 +1179,8 @@ do
         "A connection callback may request fresh data, but the old callback's reply must be discarded")
 end
 
-local function statusFixture(values, accepted)
-    local current, clock = newAddon()
+local function statusFixture(values, accepted, native)
+    local current, clock = newAddon(nil, false, false, native)
     local samples, connections, contacts = {}, {}, {}
     assert(current:RegisterDataStatusProvider("player", function() return values end,
         function(sender, fields, stamp, sequence, metadata)
@@ -1118,8 +1189,13 @@ local function statusFixture(values, accepted)
         function(sender, stamp, metadata)
             contacts[#contacts + 1] = { sender = sender, stamp = stamp, metadata = metadata }
         end))
-    current.ready = true
-    clock:connect(accepted)
+    if native then
+        clock:login()
+        clock:member(7)
+    else
+        current.ready = true
+        clock:connect(accepted)
+    end
     return current, clock, samples, connections, contacts
 end
 
@@ -1367,6 +1443,50 @@ do
     assert(samples[#samples].fields.level == "27" and samples[#samples].metadata.kind == "full")
 end
 
+-- Status snapshots received through nested requests and replies keep their
+-- decoded fields until delivery, including unknown IDs and escaped values.
+do
+    local current, clock, samples = statusFixture({ level = 24 })
+    local requestID = clock.sent[1].message:match("^1|Q|status|([^|]+)|")
+    local nested = false
+    assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
+        function(sender)
+            if nested then return end
+            nested = true
+            assert(current:ReceiveData(sender, "1|Q|status|nested|"
+                .. full("peer", 2000000001, 2, "1=26|4=a%7Cb%3Dc%25|9=future")))
+            assert(current:ReceiveData("FRIEND-Test Realm", "1|R|status|" .. requestID .. "|self-testrealm|"
+                .. full("peer", 2000000002, 3, "1=27|4=a%7Cb%3Dc%25|9=changed")))
+        end))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25")))
+    assert(#samples == 3 and samples[1].fields.level == "25" and samples[2].fields.level == "26"
+        and samples[3].fields.level == "27" and samples[3].fields.xpState == "a|b=c%"
+        and samples[3].fields[9] == nil and samples[3].sequence == 3)
+    assert(receive(current, "Friend", delta("peer", 2000000003, 4, 3, "4|9|2=20")))
+    assert(equal(samples[4].fields, { level = "27", xp = "20" }))
+    assert(receive(current, "Friend", full("peer", 2000000004, 4, "1=27|2=20")),
+        "Queued snapshots preserve the baseline used by later removals and comparisons")
+end
+
+-- A route change during delivery discards queued old samples while accepting
+-- newly queued samples from the replacement transport.
+do
+    local current, clock, samples = statusFixture({ level = 24 })
+    local switched = false
+    assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
+        function(sender)
+            if switched then return end
+            switched = true
+            assert(receive(current, sender, full("old-peer", 2000000001, 2, "1=stale")))
+            current:SetDataTransport(nil)
+            clock:connect()
+            assert(receive(current, sender, full("new-peer", 2000000002, 1, "1=27")))
+        end))
+    assert(not receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
+    assert(#samples == 1 and samples[1].fields.level == "27" and samples[1].metadata.session == "new-peer",
+        "A queued decoded sample must remain bound to the connection that received it")
+end
+
 -- Logically targeted replies do not postpone the public heartbeat needed by
 -- other peers. Switching to read-only settings stops this scheduler as well.
 do
@@ -1399,8 +1519,9 @@ end
 -- Decode every field before dispatch. Invalid frames cannot partially merge or
 -- consume a revision. Old status versions and named wire fields are rejected.
 do
-    local current, _, samples = statusFixture({ level = 24 })
-    for _, payload in ipairs({
+    local current, clock, samples = statusFixture({ level = 24 }, nil, {})
+    local initialSends = #clock.nativeSends
+    for index, payload in ipairs({
         "1|2000000000|1|level=25", "2|F|peer|2000000000|1|level=25",
         "2|F|peer|2000000000|1|1=25", "4|F|peer|2000000000|1|1=25",
         "2|D|peer|2000000000|2|1|1=25", "2|H|peer|2000000000|1", "2|S",
@@ -1425,20 +1546,28 @@ do
         "3|D|peer|2000000000|2|1|9|9=25", "3|D|peer|2000000000|2|1|9|9",
         "3|D|peer|2000000000|2|1|0", "3|D|peer|2000000000|2|1|01",
         "3|D|peer|2000000000|2|1|65536",
+        "3|F|peer\n|2000000000|1|1=25", "3|F|peer|2000000000\n|1|1=25",
+        "3|F|peer|2000000000|1\n|1=25", "3|F|peer|2000000000|1|1\n=25",
+        "3|D|peer|2000000000|2|1\n|1=25", "3|D|peer|2000000000|2|1|1\n",
+        "3|H|peer|2000000000|1\n",
     }) do
         assert(not receive(current, "Friend", payload), payload)
-        assert(not current:ReceiveData("Friend", "1|Q|status|malformed|" .. payload), payload)
+        assert(not current:ReceiveData("Friend", "1|Q|status|direct-" .. index .. "|" .. payload), payload)
+        clock:incoming("1|status|" .. payload, "Friend")
+        clock:incoming("1|Q|status|native-" .. index .. "|" .. payload, "Friend")
+        assert(#samples == 0 and #clock.nativeSends == initialSends,
+            "Malformed direct and native status frames cannot dispatch or receive replies: " .. payload)
     end
-    assert(#samples == 0)
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25")))
+    clock:incoming("1|status|" .. full("peer", 2000000000, 1, "1=25"), "Friend")
     assert(#samples == 1)
     for _, body in ipairs({ "2=20|9=%GG", "2=20|0=x", "2=20|65536=x", "2=20|9|9=bad" }) do
         assert(not receive(current, "Friend", delta("malformed-session", 9999999999, 999999999, 1, body)))
+        clock:incoming("1|status|" .. delta("malformed-session", 9999999999, 999999999, 1, body), "Friend")
         assert(#samples == 1 and not current.dataState.status.resyncNeeded,
             "Malformed later IDs cannot partially dispatch or poison sender ordering")
     end
-    assert(receive(current, "Friend", delta("peer", 2000000005, 2, 1, "2=20")))
-    assert(samples[2].fields.level == "25" and samples[2].fields.xp == "20")
+    clock:incoming("1|status|" .. delta("peer", 2000000005, 2, 1, "2=20"), "Friend")
+    assert(#samples == 2 and samples[2].fields.level == "25" and samples[2].fields.xp == "20")
 end
 
 -- The full envelope, including the request ID and normalized recipient name,

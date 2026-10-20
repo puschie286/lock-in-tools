@@ -25,32 +25,39 @@ local function ValidFeature(feature)
         and feature:match("^[a-z][a-z0-9_-]*$")
 end
 
-local function SenderName(name)
-    if IsSecret(name) or type(name) ~= "string" or name == "" or #name > 128
-        or name:find("[|%z]") then return nil end
+local function SenderName(self, name)
     local character, realm = name:match("^([^%-]+)%-(.+)$")
-    if not character then character, realm = name, GetNormalizedRealmName() end
-    if IsSecret(realm) or type(realm) ~= "string" or realm == "" then return nil end
+    if not character then
+        if not self.dataState.nameAPIs.realm then return nil end
+        character, realm = name, GetNormalizedRealmName()
+        if IsSecret(realm) or type(realm) ~= "string" or realm == "" then return nil end
+    end
     return (character .. "-" .. realm:gsub("%s", "")):lower()
 end
 
-local function SelfNames()
+local function SelfNames(self)
     local names = {}
-    if type(UnitFullName) == "function" then
+    local apis = self.dataState.nameAPIs
+    if apis.fullName then
         local ok, name, realm = pcall(UnitFullName, "player")
         if ok and not IsSecret(name) and type(name) == "string" and name ~= ""
             and not IsSecret(realm) then
             if type(realm) == "string" and realm ~= "" then name = name .. "-" .. realm end
-            local normalized = SenderName(name)
+            local normalized = SenderName(self, name)
             if normalized then names[normalized] = true end
         end
     end
-    if NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" then
+    if apis.unmodifiedFullName then
         local ok, name = pcall(NameUtil.GetUnmodifiedUnitFullName, "player")
-        local normalized = ok and SenderName(name)
+        local normalized = ok and not IsSecret(name) and type(name) == "string" and name ~= ""
+            and SenderName(self, name)
         if normalized then names[normalized] = true end
     end
     return names
+end
+
+local function IsSelfName(self, normalized)
+    return normalized ~= nil and SelfNames(self)[normalized] == true
 end
 
 local function ResetRequests(state)
@@ -81,7 +88,7 @@ local function SendFrame(self, message)
 end
 
 local function ValidRequestID(id)
-    return type(id) == "string" and #id <= 32 and id:match("^[a-zA-Z0-9_-]+$")
+    return id and #id <= 32 and id:match("^[a-zA-Z0-9_-]+$")
 end
 
 local function SameChannel(first, second)
@@ -90,14 +97,18 @@ local function SameChannel(first, second)
 end
 
 local function ChannelID(name)
-    if not name or type(GetChannelName) ~= "function" then return nil end
+    if not name then return nil end
     local ok, id = pcall(GetChannelName, name)
-    if ok and not IsSecret(id) and type(id) == "number" and id > 0 then return id end
+    if ok and id > 0 then return id end
+end
+
+local function CanUseData(self)
+    return self.initialized == true and self.ready == true and not self.savedDataReadOnly and self:HasGroup()
 end
 
 local function Wanted(self)
     local state = self.dataState
-    return self.initialized and self.ready and not self.savedDataReadOnly and self:HasGroup()
+    return CanUseData(self)
         and state.wanted and not state.stopped
         and (not state.send or state.send == state.nativeSend)
 end
@@ -117,8 +128,19 @@ end
 function addon:InitializeData()
     if self.dataState then return end
     self:InitializeGroupChannelCleanup()
+    local prefixResults = Enum and Enum.RegisterAddonMessagePrefixResult
+    local sendResults = Enum and Enum.SendAddonMessageResult
     self.dataState = { features = {}, requests = {}, phase = "idle", attempts = 0, generation = 0,
         channelName = self:GetGroupDataChannelName(), nextRequestID = 0,
+        -- Native capabilities are stable for this UI session; retry connection
+        -- failures without probing API availability again.
+        nativeAvailable = C_ChatInfo and type(C_ChatInfo.RegisterAddonMessagePrefix) == "function"
+            and type(C_ChatInfo.SendAddonMessage) == "function" and type(JoinTemporaryChannel) == "function"
+            and type(GetChannelName) == "function" and prefixResults and sendResults
+            and prefixResults.Success ~= nil and prefixResults.DuplicatePrefix ~= nil and sendResults.Success ~= nil
+            or false,
+        nameAPIs = { fullName = type(UnitFullName) == "function", realm = type(GetNormalizedRealmName) == "function",
+            unmodifiedFullName = NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" or false },
         requestSession = string.format("%x-%x", GetServerTime(), math.floor(GetTime() * 1000) % 2147483647) }
     ResetRequests(self.dataState)
     self.dataEvents = self:RegisterGameEvents({ "CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE",
@@ -127,8 +149,8 @@ end
 
 function addon:IsDataConnected()
     local state = self.dataState
-    return state ~= nil and self.initialized == true and self.ready == true and not self.savedDataReadOnly
-        and self:HasGroup() and state.send ~= nil and state.groupFingerprint == self:GetGroupFingerprint()
+    return state ~= nil and CanUseData(self) and state.send ~= nil
+        and state.groupFingerprint == self:GetGroupFingerprint()
 end
 
 local function NotifyConnection(self)
@@ -175,10 +197,16 @@ for _, field in ipairs(STATUS_FIELD_REGISTRY) do
 end
 table.sort(STATUS_FIELD_ORDER)
 
+local function StatusInteger(value, maximum, minimum)
+    if not value or #value > 10 or not value:match("^[0-9]+$")
+        or (#value > 1 and value:sub(1, 1) == "0") then return nil end
+    local number = tonumber(value)
+    if number < minimum or number > maximum then return nil end
+    return number
+end
+
 local function StatusFieldID(value)
-    if not value or #value > 5 or not value:match("^[1-9][0-9]*$") then return nil end
-    local id = tonumber(value)
-    return id <= 65535 and id or nil
+    return StatusInteger(value, 65535, 1)
 end
 
 local function StatusString(value)
@@ -206,19 +234,10 @@ local function UnescapeStatus(value)
         index = at + 3
     end
     value = value:gsub("%%([0-9A-F][0-9A-F])", function(hex) return string.char(tonumber(hex, 16)) end)
-    return StatusString(value)
-end
-
-local function StatusInteger(value, maximum, minimum)
-    if not value or #value > 10 or not value:match("^%d+$")
-        or (#value > 1 and value:sub(1, 1) == "0") then return nil end
-    local number = tonumber(value)
-    if number < minimum or number > maximum then return nil end
-    return number
+    if not value:find("[%z\001-\031\127]") then return value end
 end
 
 local function DecodeStatus(payload)
-    if IsSecret(payload) or type(payload) ~= "string" or payload:find("[%z\001-\031\127]") then return nil end
     local kind, session, stampText, revisionText, body = payload:match("^3|([FDH])|([^|]+)|(%d+)|(%d+)(.*)$")
     local stamp = StatusInteger(stampText, MAX_STATUS_STAMP, 0)
     local revision = StatusInteger(revisionText, MAX_REQUEST_SEQUENCE, 1)
@@ -283,7 +302,7 @@ local function CollectStatus(self)
             local collected, valid = {}, true
             for key, value in pairs(values) do
                 local encoded = StatusString(value)
-                if not StatusField(key) or not STATUS_FIELD_IDS[key] or encoded == nil then valid = false; break end
+                if IsSecret(key) or not STATUS_FIELD_IDS[key] or encoded == nil then valid = false; break end
                 collected[key] = encoded
             end
             if valid then
@@ -345,10 +364,9 @@ local function ContactStatus(self, sender, message, peer)
     return metadata
 end
 
-local function ProcessStatus(self, sender, payload, requested)
-    local status, normalized = self.dataState.status, SenderName(sender)
-    local message = DecodeStatus(payload)
-    if not message or not normalized or normalized:find("[%z\001-\031\127]") or self:IsDataSelf(sender) then return false end
+local function ProcessStatus(self, sender, message, requested)
+    local status, normalized = self.dataState.status, SenderName(self, sender)
+    if not normalized or IsSelfName(self, normalized) then return false end
     local peer, generation = status.received[normalized], status.generation
     if not peer then
         peer = { retired = {}, revision = 0, advertised = 0 }
@@ -400,25 +418,25 @@ local function ProcessStatus(self, sender, payload, requested)
     return true
 end
 
-local function ReceiveStatus(self, sender, payload, requested)
+local function ReceiveStatus(self, sender, message, requested)
     local status = self.dataState.status
     if status.receiving then
-        if not DecodeStatus(payload) or #status.receiveQueue >= 64 then return false end
+        if #status.receiveQueue >= 64 then return false end
         status.receiveQueue[#status.receiveQueue + 1] = {
-            sender = sender, payload = payload, requested = requested, generation = status.generation }
+            sender = sender, message = message, requested = requested, generation = status.generation }
         return true
     end
     -- Deliver one coherent sample to all consumers before processing a nested
     -- transport callback. Otherwise one provider could see an old revision with
     -- the fields of a newer sample received reentrantly by another provider.
     status.receiving, status.receiveQueue = true, {}
-    local ok, accepted = pcall(ProcessStatus, self, sender, payload, requested)
+    local ok, accepted = pcall(ProcessStatus, self, sender, message, requested)
     local count = 0
     while #status.receiveQueue > 0 and count < 64 do
         local nextMessage = table.remove(status.receiveQueue, 1)
         count = count + 1
         if nextMessage.generation == status.generation then
-            pcall(ProcessStatus, self, nextMessage.sender, nextMessage.payload, nextMessage.requested)
+            pcall(ProcessStatus, self, nextMessage.sender, nextMessage.message, nextMessage.requested)
         end
     end
     status.receiving, status.receiveQueue = false, {}
@@ -484,7 +502,7 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
             if payload ~= "3|S" then
                 local message = DecodeStatus(payload)
                 if not message or message.kind ~= "F" then return nil end
-                ReceiveStatus(self, sender, payload, true)
+                ReceiveStatus(self, sender, message, true)
             end
             if status.generation ~= generation then return nil end
             local fields, revision = CurrentStatus(self)
@@ -497,10 +515,12 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
             -- A reply never marks a changed snapshot as broadcast to all peers.
         end, function(sender, payload)
             local message = DecodeStatus(payload)
-            return message and message.kind == "F" and ReceiveStatus(self, sender, payload, true) or false
+            return message and message.kind == "F" and ReceiveStatus(self, sender, message, true) or false
         end)
-        self:RegisterDataFeature("status", function(sender, payload) return ReceiveStatus(self, sender, payload) end,
-            function(connected) StatusConnectionChanged(self, connected) end)
+        self:RegisterDataFeature("status", function(sender, payload)
+            local message = DecodeStatus(payload)
+            return message and ReceiveStatus(self, sender, message) or false
+        end, function(connected) StatusConnectionChanged(self, connected) end)
     elseif connectionChanged then pcall(connectionChanged, self:IsDataConnected()) end
     return true
 end
@@ -586,8 +606,8 @@ function addon:RegisterDataRequest(name, onRequest, onResponse)
 end
 
 function addon:IsDataSelf(sender)
-    local normalized = SenderName(sender)
-    return normalized ~= nil and SelfNames()[normalized] == true
+    return self.dataState ~= nil and not IsSecret(sender) and type(sender) == "string" and sender ~= ""
+        and IsSelfName(self, SenderName(self, sender)) or false
 end
 
 function addon:RequestData(feature, payload)
@@ -595,7 +615,7 @@ function addon:RequestData(feature, payload)
     local state = self.dataState
     if not ValidFeature(feature) or not state.requests[feature] then return false, "Unknown data request." end
     if IsSecret(payload) or type(payload) ~= "string" then return false, "Invalid data payload." end
-    local targets = SelfNames()
+    local targets = SelfNames(self)
     if not next(targets) then return false, "The local player name is unavailable." end
     if state.nextRequestID >= MAX_REQUEST_SEQUENCE then return false, "Data request identifiers exhausted." end
     PruneRequests(state)
@@ -687,7 +707,7 @@ end
 
 function addon:ConfirmDataMembership()
     local state = self.dataState
-    if not Wanted(self) or state.awaitingLeave then return false end
+    if not state.nativeAvailable or not Wanted(self) or state.awaitingLeave then return false end
     local name = self:GetGroupDataChannelName()
     if not state.prefixRegistered or not ChannelID(name) then return false end
     if state.phase == "joined" and state.send == state.nativeSend then
@@ -734,6 +754,7 @@ function addon:JoinDataChannel(manual)
         state.attempts, state.wanted = 0, true
     end
     if not Wanted(self) then return false end
+    if not state.nativeAvailable then return self:FailDataJoin("The native group-data API is unavailable.") end
     state.channelName = self:GetGroupDataChannelName()
     if state.awaitingLeave then
         -- Native leave notices can arrive before cached membership disappears.
@@ -754,11 +775,6 @@ function addon:JoinDataChannel(manual)
         state.awaitingLeave, state.leaveChecks = false, 0
     end
     state.failed = false
-    if not C_ChatInfo or type(C_ChatInfo.RegisterAddonMessagePrefix) ~= "function"
-        or type(C_ChatInfo.SendAddonMessage) ~= "function" or type(JoinTemporaryChannel) ~= "function"
-        or not Enum or not Enum.RegisterAddonMessagePrefixResult or not Enum.SendAddonMessageResult then
-        return self:FailDataJoin("The native group-data API is unavailable.")
-    end
     if not state.prefixRegistered then
         local ok, result = pcall(C_ChatInfo.RegisterAddonMessagePrefix, PREFIX)
         local results = Enum.RegisterAddonMessagePrefixResult
@@ -797,6 +813,8 @@ function addon:LeaveDataChannel()
     return true
 end
 
+local DispatchData
+
 function addon:OnDataEvent(event, ...)
     local state = self.dataState
     if event == "PLAYER_LOGOUT" then
@@ -811,9 +829,9 @@ function addon:OnDataEvent(event, ...)
     local name = self:GetGroupDataChannelName()
     if event == "CHAT_MSG_ADDON" then
         local prefix, message, distribution, sender = ...
-        if IsSecret(prefix) or IsSecret(distribution) or prefix ~= PREFIX or distribution ~= "CHANNEL"
+        if prefix ~= PREFIX or distribution ~= "CHANNEL"
             or state.send ~= state.nativeSend or not self:IsDataConnected() then return end
-        return self:ReceiveData(sender, message)
+        return DispatchData(self, sender, message)
     elseif event == "CHANNEL_LEFT" or event == "CHAT_MSG_CHANNEL_NOTICE" then
         local reason, noticeName
         if event == "CHANNEL_LEFT" then reason, noticeName = "YOU_LEFT", select(2, ...)
@@ -833,7 +851,7 @@ function addon:OnDataEvent(event, ...)
             Refresh(self)
         elseif reason == "YOU_JOINED" or reason == "YOU_CHANGED" then
             if state.awaitingLeave then return end
-            if ChannelID(name) then state.failed, state.wanted = false, true end
+            if state.nativeAvailable and ChannelID(name) then state.failed, state.wanted = false, true end
             self:ConfirmDataMembership()
         end
     elseif event == "CHANNEL_PASSWORD_REQUEST" then
@@ -868,8 +886,8 @@ end
 local function ReceiveRequest(self, sender, message)
     local state = self.dataState
     local feature, id, payload = message:match("^1|Q|([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
-    local normalized = SenderName(sender)
-    if not ValidFeature(feature) or not ValidRequestID(id) or not normalized or self:IsDataSelf(sender) then return false end
+    local normalized = SenderName(self, sender)
+    if not feature or not ValidRequestID(id) or not normalized or IsSelfName(self, normalized) then return false end
     local registration = state.requests[feature]
     if not registration then return false end
     local now = PruneRequests(state)
@@ -885,8 +903,8 @@ end
 
 local function ReceiveResponse(self, sender, message)
     local feature, id, target, payload = message:match("^1|R|([a-z][a-z0-9_-]*)|([^|]+)|([^|]+)|(.*)$")
-    local normalized = SenderName(sender)
-    if not ValidFeature(feature) or not ValidRequestID(id) or not normalized or self:IsDataSelf(sender) then return false end
+    local normalized = SenderName(self, sender)
+    if not feature or not ValidRequestID(id) or not normalized or IsSelfName(self, normalized) then return false end
     local state = self.dataState
     PruneRequests(state)
     local request = state.pendingRequests[id]
@@ -900,19 +918,25 @@ local function ReceiveResponse(self, sender, message)
     return ok and accepted ~= false
 end
 
--- The backend supplies WoW's sender after matching our prefix and current group route.
-function addon:ReceiveData(sender, message)
-    if not self:IsDataConnected() or IsSecret(sender) or type(sender) ~= "string" or sender == ""
-        or IsSecret(message) or type(message) ~= "string" or #message > MAX_MESSAGE_BYTES
-        or message:find("\000", 1, true) then return false end
+-- Native events already supply ordinary bounded strings. Decode only our wire
+-- protocol here; alternate transports enter through ReceiveData below.
+DispatchData = function(self, sender, message)
     if message:sub(1, 4) == "1|Q|" then return ReceiveRequest(self, sender, message) end
     if message:sub(1, 4) == "1|R|" then return ReceiveResponse(self, sender, message) end
     local feature, payload = message:match("^1|([a-z][a-z0-9_-]*)|(.*)$")
-    if not feature or not ValidFeature(feature) then return false end
+    if not feature then return false end
     local registration = self.dataState.features[feature]
     if not registration then return false end
     local ok, accepted = pcall(registration.receive, sender, payload)
     return ok and accepted ~= false
+end
+
+function addon:ReceiveData(sender, message)
+    if not self:IsDataConnected() or IsSecret(sender) or type(sender) ~= "string" or sender == ""
+        or #sender > 128 or sender:find("[|%z\001-\031\127]")
+        or IsSecret(message) or type(message) ~= "string" or #message > MAX_MESSAGE_BYTES
+        or message:find("\000", 1, true) then return false end
+    return DispatchData(self, sender, message)
 end
 
 function addon:GetDataStatusText()

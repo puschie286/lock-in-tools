@@ -263,7 +263,7 @@ do
     assert(failed:IsDataConnected(), "eventual membership succeeds after repeated shared-data failures")
 end
 
--- Recoverable native API failures recover on their own; leaving the group or logging out stops retries.
+-- Native API availability is fixed at initialization; group leave and logout stop retries.
 do
     local unavailable, api, _, _, apiWorld = loadAddon(settings(nil, false), false)
     local join = api.JoinTemporaryChannel
@@ -274,12 +274,18 @@ do
     apiWorld:advance(29)
     assert(#apiWorld.dataJoinCalls == 0)
     apiWorld:advance(1)
-    assert(#apiWorld.dataJoinCalls == 1,
-        "native API recovery retries automatically even with position sharing disabled")
+    assert(#apiWorld.dataJoinCalls == 0 and not unavailable:IsDataConnected(),
+        "restoring an API does not change the capability captured at initialization")
     assert(unavailable:LeaveGroup())
     apiWorld:advance(90)
-    assert(#apiWorld.dataJoinCalls == 1 and not unavailable:IsDataConnected(),
+    assert(#apiWorld.dataJoinCalls == 0 and not unavailable:IsDataConnected(),
         "group leave cancels pending shared-data retries")
+
+    local reloaded, _, _, _, reloadWorld = loadAddon(settings(nil, false), false)
+    reloadWorld:initialize()
+    assert(#reloadWorld.dataJoinCalls == 1, "fresh initialization discovers available native APIs")
+    reloadWorld:completeJoin(reloaded:GetGroupDataChannelName(), 7)
+    assert(reloaded:IsDataConnected())
 
     local stopped, _, _, stoppedEvent, stoppedWorld = loadAddon(settings(nil, false), false)
     stoppedWorld:initialize()
