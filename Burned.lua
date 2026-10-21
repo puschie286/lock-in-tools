@@ -1,5 +1,6 @@
 local _, addon = ...
 local CONTACT_TIMEOUT = 90
+local CHANGE_COOLDOWN = 300
 
 local function Number(value, maximum)
     return not (issecretvalue and issecretvalue(value)) and type(value) == "number"
@@ -48,6 +49,11 @@ function addon:GetBurnedStatus()
     return self.burnedState and self.burnedState.value or 0
 end
 
+function addon:GetBurnedStatusCooldown()
+    local deadline = self.burnedState and self.burnedState.changeAvailableAfter
+    return deadline and math.max(0, math.ceil(deadline - GetTime())) or 0
+end
+
 function addon:SetBurnedStatus(value)
     if not self.initialized or not self.burnedState then return false, "Still loading. Please try again after login." end
     if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
@@ -55,9 +61,16 @@ function addon:SetBurnedStatus(value)
         or value < 0 or value > 100 then return false, "Choose a burned status from 0 to 100%." end
     value = math.floor(value + 0.5)
     if self.burnedState.value == value then return true end
+    local remaining = self:GetBurnedStatusCooldown()
+    if remaining > 0 then
+        return false, string.format("You can change your burned status again in %d:%02d.",
+            math.floor(remaining / 60), remaining % 60)
+    end
     self.burnedState.value, self.db.burned.status = value, value
+    self.db.burned.changeAvailableAt = GetServerTime() + CHANGE_COOLDOWN
+    self.burnedState.changeAvailableAfter = GetTime() + CHANGE_COOLDOWN
     Refresh(self)
-    -- The shared status scheduler coalesces dragging and retains its send limit.
+    -- Accepted edits use the existing shared status send limit and heartbeat.
     if self.ready then self:DataStatusTick() end
     return true
 end
@@ -102,13 +115,19 @@ function addon:InitializeBurned()
     local database = self.savedDataReadOnly and type(LockInToolsDB) == "table" and LockInToolsDB or self.db
     local saved = type(database.burned) == "table" and database.burned or {}
     local value = Number(saved.status, 100) and saved.status or 0
+    local now, deadline = GetServerTime(), saved.changeAvailableAt
+    deadline = Number(deadline, 9999999999) and deadline > now
+        and math.min(deadline, now + CHANGE_COOLDOWN) or nil
     if not self.savedDataReadOnly then
         self.db.burned = saved
         saved.status = value
+        saved.changeAvailableAt = deadline
     end
-    -- Only the personal value is saved. Peer reports are live contact, never an
-    -- account-wide cache that could leak between characters or groups.
-    self.burnedState = { value = value, peers = {} }
+    -- The account-wide server deadline survives reloads, relogs and group changes.
+    -- Within a session, monotonic time keeps server-clock corrections from changing
+    -- the five-minute interval. Peer reports remain live contact, never saved data.
+    self.burnedState = { value = value, peers = {},
+        changeAvailableAfter = deadline and GetTime() + deadline - now or nil }
     self:RegisterDataStatusProvider("burned", function()
         if Active(self) then return { burned = self:GetBurnedStatus() } end
     end, function(sender, fields, stamp, sequence, metadata)

@@ -68,10 +68,10 @@ local function OptionTooltip(page, widget, title, description)
     widget:HookScript("OnHide", function() HideTooltip(widget) end)
 end
 
-local function PreferenceLabel(page, checkbox, text, description)
+local function PreferenceLabel(page, checkbox, text, description, width)
     local button = CreateFrame("Button", nil, page)
     button:SetPoint("LEFT", checkbox, "RIGHT", 2, 0)
-    button:SetSize(360, 28)
+    button:SetSize(width or 360, 28)
     local label = UI:Label(page, text, 13)
     label:SetPoint("LEFT", button, "LEFT", 0, 0)
     button:SetScript("OnClick", function() if checkbox:IsEnabled() then checkbox:Click() end end)
@@ -180,6 +180,39 @@ local function BindPreference(panel, checkbox, getter, setter)
         if not success then button:SetChecked(getter()) end
         SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
     end)
+end
+
+local function CreateDataControls(panel, page)
+    panel.dataChannels = {}
+    local heading = UI:Label(page, "Data channels", 14, "heading")
+    heading:SetPoint("TOPLEFT", 16, -224)
+
+    local channels = {
+        { "party", "Party / raid", "Send and receive data with players in your current party or raid." },
+        { "guild", "Guild", "Send and receive data with players in your guild." },
+        { "global", "Global channel", "Send and receive data through the additional global channel using your configured group key." },
+    }
+    for index, entry in ipairs(channels) do
+        local channel = entry[1]
+        local checkbox = UI:Checkbox(page)
+        checkbox:SetPoint("TOPLEFT", 12 + (index - 1) * 220, -250)
+        checkbox:SetSize(28, 28)
+        panel.dataChannels[channel] = checkbox
+        BindPreference(panel, checkbox, function() return addon:GetDataChannelEnabled(channel) end,
+            function(_, enabled) return addon:SetDataChannelEnabled(channel, enabled) end)
+        PreferenceLabel(page, checkbox, entry[2], entry[3]
+            .. " Turning this off stops sending and receiving through this channel.\n\n"
+            .. "Changes apply immediately and save across reloads and characters.", 172)
+    end
+
+    panel.dataStatusHelp = CreateFrame("Frame", nil, page)
+    panel.dataStatusHelp:SetPoint("TOPLEFT", 16, -294)
+    panel.dataStatusHelp:SetSize(648, 72)
+    panel.dataStatusHelp:EnableMouse(true)
+    panel.dataStatus = UI:Label(page, "", 12, "muted")
+    panel.dataStatus:SetPoint("TOPLEFT", panel.dataStatusHelp, "TOPLEFT", 0, 0)
+    panel.dataStatus:SetSize(648, 72)
+    OptionTooltip(page, panel.dataStatusHelp, "Data status", function() return addon:GetDataStatusText() end)
 end
 
 local function GuideText(value)
@@ -514,91 +547,82 @@ local function CreateOptionsPanel()
     end)
     group:SetScript("OnHide", function() ClearGroupKeys(panel) end)
 
-    local chat = UI:Section(panel, 20, 116, 680, 414, "Shared chat")
-    panel.pages.chat = chat
-    local chatIntroduction = UI:Label(chat,
-        "Chat with your group in WoW. Use /lit chat to write.", 14)
-    chatIntroduction:SetPoint("TOPLEFT", 16, -50)
-    chatIntroduction:SetWidth(648)
+    local sharing = UI:Section(panel, 20, 116, 680, 414, "Sharing")
+    panel.pages.sharing = sharing
+    local chatHeading = UI:Label(sharing, "Shared chat", 14, "heading")
+    chatHeading:SetPoint("TOPLEFT", 16, -52)
 
-    panel.autoJoin = UI:Checkbox(chat)
-    panel.autoJoin:SetPoint("TOPLEFT", 12, -94)
+    panel.autoJoin = UI:Checkbox(sharing)
+    panel.autoJoin:SetPoint("TOPLEFT", 12, -78)
     panel.autoJoin:SetSize(28, 28)
     BindPreference(panel, panel.autoJoin, function() return addon.db.chat.autoJoin end, addon.SetChatAutoJoin)
-    PreferenceLabel(chat, panel.autoJoin, "Join automatically on login",
-        "Join your group's chat when you log in. Enabling this also connects now; disabling it keeps an existing chat connection.")
+    PreferenceLabel(sharing, panel.autoJoin, "Join automatically on login",
+        "Join your group's chat when you log in. Enabling this also connects now; disabling it keeps an existing chat connection.", 260)
 
-    panel.chatStatusHelp = CreateFrame("Frame", nil, chat)
-    panel.chatStatusHelp:SetPoint("TOPLEFT", 16, -142)
-    panel.chatStatusHelp:SetSize(648, 36)
+    panel.chatStatusHelp = CreateFrame("Frame", nil, sharing)
+    panel.chatStatusHelp:SetPoint("TOPLEFT", 16, -158)
+    panel.chatStatusHelp:SetSize(308, 48)
     panel.chatStatusHelp:EnableMouse(true)
-    panel.status = UI:Label(chat, "", 12, "muted")
+    panel.status = UI:Label(sharing, "", 12, "muted")
     panel.status:SetPoint("TOPLEFT", panel.chatStatusHelp, "TOPLEFT", 0, 0)
-    panel.status:SetWidth(648)
-    OptionTooltip(chat, panel.chatStatusHelp, "Chat status", function() return addon:GetChatStatusText() end)
+    panel.status:SetWidth(308)
+    OptionTooltip(sharing, panel.chatStatusHelp, "Chat status", function() return addon:GetChatStatusText() end)
 
-    panel.join = UI:Button(chat, "Join chat")
+    panel.join = UI:Button(sharing, "Join chat")
     panel.join:SetSize(96, 32)
-    panel.join:SetPoint("TOPLEFT", 16, -190)
+    panel.join:SetPoint("TOPLEFT", 16, -118)
     panel.join:SetScript("OnClick", function()
         SetFeedback(panel)
         addon:JoinChatChannel(true)
     end)
-    OptionTooltip(chat, panel.join, "Join chat",
+    OptionTooltip(sharing, panel.join, "Join chat",
         "Connect or retry your group's chat channel. Friends need the same group key, realm and faction. This does not change your login preference.")
 
-    panel.leave = UI:Button(chat, "Leave chat")
+    panel.leave = UI:Button(sharing, "Leave chat")
     panel.leave:SetSize(96, 32)
     panel.leave:SetPoint("LEFT", panel.join, "RIGHT", 8, 0)
     panel.leave:SetScript("OnClick", function()
         SetFeedback(panel)
         addon:LeaveChatChannel()
     end)
-    OptionTooltip(chat, panel.leave, "Leave chat",
+    OptionTooltip(sharing, panel.leave, "Leave chat",
         "Leave chat and pause reconnection for this session. Your group, position sharing and login preference stay unchanged.")
 
-    local position = UI:Section(panel, 20, 116, 680, 414, "Shared positions")
-    panel.pages.position = position
-    local positionIntroduction = UI:Label(position,
-        "Share locations with your group on the world map.", 14)
-    positionIntroduction:SetPoint("TOPLEFT", 16, -50)
-    positionIntroduction:SetWidth(648)
+    local positionHeading = UI:Label(sharing, "Shared positions", 14, "heading")
+    positionHeading:SetPoint("TOPLEFT", 356, -52)
 
-    panel.positionSharing = UI:Checkbox(position)
-    panel.positionSharing:SetPoint("TOPLEFT", 12, -94)
+    panel.positionSharing = UI:Checkbox(sharing)
+    panel.positionSharing:SetPoint("TOPLEFT", 352, -78)
     panel.positionSharing:SetSize(28, 28)
     BindPreference(panel, panel.positionSharing, function() return addon.db.position.sharing end,
         addon.SetPositionSharing)
-    PreferenceLabel(position, panel.positionSharing, "Enable position sharing",
+    PreferenceLabel(sharing, panel.positionSharing, "Enable position sharing",
         "Send and receive your group's locations. Turning this off hides player icons and stops position exchange.\n\n"
-            .. "Friends need the same group key, realm and faction. Shared chat can stay disconnected.")
+            .. "Friends need the same group key, realm and faction. Shared chat can stay disconnected.", 260)
 
-    panel.positionRetention = UI:Checkbox(position)
-    panel.positionRetention:SetPoint("TOPLEFT", 12, -130)
+    panel.positionRetention = UI:Checkbox(sharing)
+    panel.positionRetention:SetPoint("TOPLEFT", 352, -114)
     panel.positionRetention:SetSize(28, 28)
     BindPreference(panel, panel.positionRetention, function() return addon.db.position.keepLastKnown end,
         addon.SetPositionRetention)
-    PreferenceLabel(position, panel.positionRetention, "Keep last-known positions",
+    PreferenceLabel(sharing, panel.positionRetention, "Keep last-known positions",
         "Keep the last location across reloads and characters. Gray offline markers mean no position update for at least 60 seconds.\n\n"
-            .. "Turning this off removes stale locations and stops saving them.")
+            .. "Turning this off removes stale locations and stops saving them.", 260)
 
-    panel.positionStatusHelp = CreateFrame("Frame", nil, position)
-    panel.positionStatusHelp:SetPoint("TOPLEFT", 16, -178)
-    panel.positionStatusHelp:SetSize(648, 36)
+    panel.positionStatusHelp = CreateFrame("Frame", nil, sharing)
+    panel.positionStatusHelp:SetPoint("TOPLEFT", 356, -158)
+    panel.positionStatusHelp:SetSize(308, 48)
     panel.positionStatusHelp:EnableMouse(true)
-    panel.positionStatus = UI:Label(position, "", 12, "muted")
+    panel.positionStatus = UI:Label(sharing, "", 12, "muted")
     panel.positionStatus:SetPoint("TOPLEFT", panel.positionStatusHelp, "TOPLEFT", 0, 0)
-    panel.positionStatus:SetWidth(648)
-    OptionTooltip(position, panel.positionStatusHelp, "Position status", function()
+    panel.positionStatus:SetWidth(308)
+    OptionTooltip(sharing, panel.positionStatusHelp, "Position status", function()
         return addon:GetPositionStatusText() .. "\n\nTo hide player icons while sharing continues, use the world map's LockInTools filter."
     end)
+    CreateDataControls(panel, sharing)
 
     local ranking = UI:Section(panel, 20, 116, 680, 414, "Player ranking")
     panel.pages.ranking = ranking
-    panel.rankingInfo = UI:Button(ranking, "Ranking info")
-    panel.rankingInfo:SetPoint("TOPRIGHT", -16, -12)
-    panel.rankingInfo:SetSize(120, 28)
-    OptionTooltip(ranking, panel.rankingInfo, "Ranking values", function() return addon:GetRankingHelpText() end)
     local rankingIntroduction = UI:Label(ranking,
         "Compare your group's level and XP progress while you play.", 14)
     rankingIntroduction:SetPoint("TOPLEFT", 16, -50)
@@ -622,13 +646,6 @@ local function CreateOptionsPanel()
         "Add bright glow and animated flames to both burned meters at 70% and above. Turn this off to hide the effect.\n\n"
             .. "This preference saves across reloads and characters.")
 
-    local rankingHint = UI:Label(ranking,
-        "Use /lit ranking to show or hide it. Hold Shift and drag the title or a player row to move it.\n"
-            .. "See Content > Overview for all players.\n"
-            .. "Hover a player for XP and location; right-click for Invite or Request to join.", 12, "muted")
-    rankingHint:SetPoint("TOPLEFT", 16, -178)
-    rankingHint:SetSize(648, 60)
-
     CreateRestedXPPage(panel)
 
     for _, page in pairs(panel.pages) do
@@ -640,6 +657,8 @@ local function CreateOptionsPanel()
     end
 
     local function SelectTab(name)
+        -- Keep existing callers of the former pages opening the combined controls.
+        if name == "chat" or name == "position" or name == "data" then name = "sharing" end
         if not panel.pages[name] then return end
         if panel.selectedTab == name then return end
         if panel.selectedTab == "group" then
@@ -656,8 +675,8 @@ local function CreateOptionsPanel()
         addon:RefreshOptions()
     end
     panel.SelectTab = SelectTab
-    local categories = { { "group", "Group", 88 }, { "chat", "Shared chat", 128 },
-        { "position", "Shared positions", 148 }, { "ranking", "Ranking", 126 }, { "restedxp", "RestedXP", 110 } }
+    local categories = { { "group", "Group", 88 }, { "sharing", "Sharing", 104 },
+        { "ranking", "Ranking", 96 }, { "restedxp", "RestedXP", 110 } }
     local tabX = 20
     for _, category in ipairs(categories) do
         local name = category[1]
@@ -705,6 +724,7 @@ function addon:RefreshOptions()
     panel.newKeyLabel:SetText(hasGroup and "Use a different key" or "Join a group")
     panel.status:SetText("Status: " .. self:GetChatStatusText(true))
     panel.positionStatus:SetText("Sharing: " .. self:GetPositionStatusText(true))
+    panel.dataStatus:SetText(self:GetDataStatusText())
 
     local secret = panel.pages.group.showingKeys and self:GetGroupSecret() or ""
     if panel.ownSecret:GetText() ~= secret then panel.ownSecret:SetText(secret) end
@@ -720,6 +740,10 @@ function addon:RefreshOptions()
     panel.autoJoin:SetEnabled(editable)
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
+    for channel, checkbox in pairs(panel.dataChannels) do
+        checkbox:SetChecked(self:GetDataChannelEnabled(channel))
+        checkbox:SetEnabled(editable)
+    end
     local ranking = self:GetRankingSettings()
     panel.rankingEnabled:SetChecked(ranking.enabled and not self.rankingOverlayDismissed)
     panel.rankingEnabled:SetEnabled(editable)

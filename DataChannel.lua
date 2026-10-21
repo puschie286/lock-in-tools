@@ -1,11 +1,12 @@
 local _, addon = ...
 
--- Guild and party/raid data routes are always used when available; the custom
--- global channel is an additional route. CHANNEL remains realm/faction limited.
+-- Enabled guild and party/raid data routes run alongside the custom global
+-- channel. All default on; CHANNEL remains realm/faction limited.
 -- Packets have no group filter or authentication on the shared native routes.
 local RETRY_DELAYS = { 2, 4, 8, 8, 30 }
 local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
 local LEAVE_CACHE_CHECK_LIMIT = 5
+local CHANNEL_OPTIONS = { party = true, guild = true, global = true }
 local FAILURE_NOTICES = {
     WRONG_PASSWORD = "The data-channel password was rejected.",
     BANNED = "You are banned from the data channel.",
@@ -43,12 +44,38 @@ local function CanUseData(self)
         and not self:IsGroupSwitching() and not self.dataState.stopped
 end
 
+function addon:GetDataChannelEnabled(channel)
+    if IsSecret(channel) or type(channel) ~= "string" or not CHANNEL_OPTIONS[channel] then return false end
+    local database = self.savedDataReadOnly and type(LockInToolsDB) == "table" and LockInToolsDB or self.db
+    local settings = type(database) == "table" and database.data
+    local channels = type(settings) == "table" and settings.channels
+    return type(channels) ~= "table" or channels[channel] ~= false
+end
+
 local function Wanted(self)
     return CanUseData(self) and self.dataState.wanted
+        and (self:GetDataChannelEnabled("party") or self:GetDataChannelEnabled("guild")
+            or self:GetDataChannelEnabled("global"))
+end
+
+local function GlobalWanted(self)
+    return Wanted(self) and self:GetDataChannelEnabled("global")
 end
 
 local function Refresh(self)
     self:Notify("DATA_CHANGED")
+end
+
+local function DisableGlobalChannel(self)
+    local state = self.dataState
+    self:CancelDataTimer()
+    state.phase, state.detail = "disabled", nil
+    state.pending, state.failed, state.channelConnected = false, false, false
+    -- Preserve departure tracking when re-enabled before native caches drain.
+    state.awaitingLeave, state.leaveChecks, state.attempts = true, 0, 0
+    local name = self:GetGroupDataChannelName()
+    if name then self:LeaveGroupChannel(name) end
+    self:RefreshDataRoutes()
 end
 
 function addon:InitializeDataChannel()
@@ -85,10 +112,12 @@ function addon:RefreshDataRoutes()
     local state, routes = self.dataState, {}
     local channelLost = false
     if Wanted(self) and state.nativeStarted and state.nativeAvailable and state.prefixRegistered then
-        if NativeMembership(IsInRaid) then routes.RAID = true
-        elseif NativeMembership(IsInGroup) then routes.PARTY = true end
-        if NativeMembership(IsInGuild) then routes.GUILD = true end
-        if state.channelConnected then
+        if self:GetDataChannelEnabled("party") then
+            if NativeMembership(IsInRaid) then routes.RAID = true
+            elseif NativeMembership(IsInGroup) then routes.PARTY = true end
+        end
+        if self:GetDataChannelEnabled("guild") and NativeMembership(IsInGuild) then routes.GUILD = true end
+        if self:GetDataChannelEnabled("global") and state.channelConnected then
             local id = self:GetDataChannelID()
             if id then routes.CHANNEL = tostring(id)
             else
@@ -118,12 +147,37 @@ function addon:SetDataChannelConnected(connected)
     self:RefreshDataRoutes()
 end
 
+function addon:SetDataChannelEnabled(channel, enabled)
+    if not self.initialized or type(self.db) ~= "table" then return false, "Still loading. Please try again after login." end
+    if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
+    if IsSecret(channel) or type(channel) ~= "string" or not CHANNEL_OPTIONS[channel]
+        or IsSecret(enabled) or type(enabled) ~= "boolean" then return false, "Choose a data channel and on or off." end
+    local previous = self:GetDataChannelEnabled(channel)
+    if type(self.db.data) ~= "table" then self.db.data = {} end
+    if type(self.db.data.channels) ~= "table" then self.db.data.channels = {} end
+    self.db.data.channels[channel] = enabled
+    if previous == enabled then return true end
+
+    local state = self.dataState
+    if state and state.nativeStarted and CanUseData(self) then
+        if channel == "global" and not enabled then DisableGlobalChannel(self) end
+        self:RefreshDataRoutes()
+        if not Wanted(self) then self:CancelDataTimer()
+        elseif CanUseData(self) and (not state.prefixRegistered or (channel == "global" and enabled)) then
+            self:JoinDataChannel(false)
+        end
+    end
+    Refresh(self)
+    return true
+end
+
 function addon:OnDataLogin()
     local state = self.dataState
     self:NotifyDataConnection()
     state.nativeStarted = true
     -- Status discovery stays active with human chat or position sharing off.
     state.wanted = self:HasGroup()
+    if CanUseData(self) and not self:GetDataChannelEnabled("global") then DisableGlobalChannel(self) end
     if state.wanted then self:JoinDataChannel(false) end
 end
 
@@ -160,9 +214,10 @@ end
 function addon:ScheduleDataCheck(delay)
     self:CancelDataTimer()
     local state = self.dataState
+    if not Wanted(self) or (state.prefixRegistered and not GlobalWanted(self)) then return end
     state.timer = C_Timer.NewTimer(delay, function()
         state.timer = nil
-        if Wanted(self) then self:JoinDataChannel(false) end
+        if Wanted(self) and (not state.prefixRegistered or GlobalWanted(self)) then self:JoinDataChannel(false) end
     end)
 end
 
@@ -173,18 +228,21 @@ function addon:FailDataJoin(detail)
     state.failed, state.pending = true, false
     state.phase, state.detail = "error", detail
     self:SetDataChannelConnected(false)
-    if Wanted(self) and not state.timer then self:ScheduleDataCheck(FAILURE_RETRY_DELAY) end
+    if Wanted(self) and (not state.prefixRegistered or GlobalWanted(self)) and not state.timer then
+        self:ScheduleDataCheck(FAILURE_RETRY_DELAY)
+    end
     Refresh(self)
     return false
 end
 
 function addon:ConfirmDataMembership()
     local state = self.dataState
-    if not state.channelAvailable or not Wanted(self) or state.awaitingLeave then return false end
+    if not state.channelAvailable or not GlobalWanted(self) or state.awaitingLeave then return false end
     local name = self:GetGroupDataChannelName()
     if not state.prefixRegistered or not ChannelID(name) then return false end
     if state.channelConnected then
         self:RefreshDataRoutes()
+        if not GlobalWanted(self) or not state.channelConnected then return false end
         if not state.timer then self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL) end
         return true
     end
@@ -192,6 +250,8 @@ function addon:ConfirmDataMembership()
     state.attempts, state.pending, state.failed = 0, false, false
     state.phase, state.detail = "joined", nil
     self:SetDataChannelConnected(true)
+    -- Connection callbacks can disable this route before membership is returned.
+    if not GlobalWanted(self) or not state.channelConnected then return false end
     self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL)
     Refresh(self)
     return true
@@ -223,6 +283,12 @@ function addon:JoinDataChannel(manual)
     -- Connecting a native route invokes feature callbacks, which may switch or
     -- remove the configured group before its global-channel join begins.
     if not Wanted(self) then return false end
+    if not self:GetDataChannelEnabled("global") then
+        self:CancelDataTimer()
+        state.phase, state.detail = "disabled", nil
+        Refresh(self)
+        return true
+    end
     if not state.channelAvailable then return self:FailDataJoin("The global data-channel API is unavailable.") end
     local name = self:GetGroupDataChannelName()
     if state.awaitingLeave then
@@ -245,13 +311,16 @@ function addon:JoinDataChannel(manual)
     end
     state.failed = false
     if self:ConfirmDataMembership() then return true end
+    if not GlobalWanted(self) then return false end
     self:SetDataChannelConnected(false)
+    if not GlobalWanted(self) then return false end
     state.attempts = math.min(state.attempts + 1, #RETRY_DELAYS)
     state.pending, state.phase, state.detail = true, "joining", nil
     local ok = pcall(JoinTemporaryChannel, name, self:GetGroupDataChannelPassword())
     if not ok then return self:FailDataJoin("The data-channel join request failed.") end
-    if Wanted(self) and not state.failed and not self:ConfirmDataMembership() then
-        self:ScheduleDataCheck(RETRY_DELAYS[state.attempts])
+    if GlobalWanted(self) and not state.failed then
+        local confirmed = self:ConfirmDataMembership()
+        if not confirmed and GlobalWanted(self) then self:ScheduleDataCheck(RETRY_DELAYS[state.attempts]) end
     end
     Refresh(self)
     return not state.failed
@@ -266,11 +335,11 @@ function addon:LeaveDataChannel()
     state.wanted = self:HasGroup()
     state.pending, state.failed, state.awaitingLeave, state.attempts = false, false, true, 0
     state.leaveChecks = 0
-    state.phase, state.detail = "joining", nil
+    state.phase, state.detail = self:GetDataChannelEnabled("global") and "joining" or "disabled", nil
     self:SetDataChannelConnected(false)
     local name = self:GetGroupDataChannelName()
     if name then self:LeaveGroupChannel(name) end
-    if Wanted(self) then self:ScheduleDataCheck(1) end
+    if GlobalWanted(self) then self:ScheduleDataCheck(1) end
     Refresh(self)
     return true
 end
@@ -294,6 +363,7 @@ function addon:OnDataEvent(event, ...)
         if event == "CHANNEL_LEFT" then reason, noticeName = "YOU_LEFT", select(2, ...)
         else reason, noticeName = ..., select(9, ...) end
         if not SameChannel(noticeName, name) or IsSecret(reason) then return end
+        if not self:GetDataChannelEnabled("global") then return end
         if FAILURE_NOTICES[reason] then
             self:FailDataJoin(FAILURE_NOTICES[reason])
         elseif reason == "YOU_LEFT" then
@@ -313,18 +383,25 @@ function addon:OnDataEvent(event, ...)
         end
     elseif event == "CHANNEL_PASSWORD_REQUEST" then
         local requestedName = ...
-        if state.pending and SameChannel(requestedName, name) then
+        if self:GetDataChannelEnabled("global") and state.pending and SameChannel(requestedName, name) then
             self:FailDataJoin(FAILURE_NOTICES.WRONG_PASSWORD)
         end
     elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
         self:RefreshDataRoutes()
         Refresh(self)
     elseif event == "CHANNEL_UI_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
+        if not self:GetDataChannelEnabled("global") then
+            if ChannelID(name) then self:LeaveGroupChannel(name) end
+            self:RefreshDataRoutes()
+            return
+        end
         if not Wanted(self) then return end
         self:RefreshDataRoutes()
         if state.awaitingLeave or state.failed then return end
         if not self:ConfirmDataMembership() then
+            if not GlobalWanted(self) then return end
             self:SetDataChannelConnected(false)
+            if not GlobalWanted(self) then return end
             if state.phase == "joined" or not state.timer then
                 if state.phase == "joined" then state.attempts = 0 end
                 state.phase = "joining"
@@ -340,6 +417,8 @@ function addon:GetDataStatusText()
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
     if self:IsGroupSwitching() then return "Leaving the previous group before connecting." end
     if not self:HasGroup() then return "No group configured." end
+    if not self:GetDataChannelEnabled("party") and not self:GetDataChannelEnabled("guild")
+        and not self:GetDataChannelEnabled("global") then return "All data channels are disabled." end
     local state = self.dataState
     local name = self:GetGroupDataChannelName()
     local label = self.GetChannelDisplayName and self:GetChannelDisplayName(name) or "LockInTools Data"
@@ -349,6 +428,9 @@ function addon:GetDataStatusText()
     if state.routes.GUILD then routes[#routes + 1] = "guild" end
     if state.routes.CHANNEL then routes[#routes + 1] = label end
     local active = #routes > 0 and ("Data routes: " .. table.concat(routes, ", ") .. ". ") or ""
+    if not self:GetDataChannelEnabled("global") and state.phase ~= "error" then
+        return active .. (#routes > 0 and "Global channel is disabled." or "Waiting for an enabled party or guild channel.")
+    end
     if state.phase == "joined" then return active .. "Global channel broadcasts within this internal realm." end
     if active ~= "" then
         if state.phase == "error" then return active .. (state.detail or "Global channel unavailable.") .. " Retrying automatically." end

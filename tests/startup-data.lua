@@ -6,6 +6,86 @@ local contains = fixtures.contains
 local SECRET = fixtures.SECRET
 local OTHER_SECRET = fixtures.OTHER_SECRET
 
+-- Channel preferences default old or malformed profiles on without losing
+-- explicit opt-outs or unrelated saved fields.
+for _, seed in ipairs({
+    {}, { data = false }, { data = "invalid" },
+    { data = { channels = 12, future = "preserved" } },
+    { data = { channels = { party = false, guild = "false", global = false, future = "preserved" },
+        future = "preserved" } },
+}) do
+    local profile = settings("", false)
+    profile.data = seed.data
+    local channels = type(seed.data) == "table" and type(seed.data.channels) == "table" and seed.data.channels
+    local party, guild, global = not channels or channels.party ~= false,
+        not channels or channels.guild ~= false, not channels or channels.global ~= false
+    local current, _, _, event = loadAddon(profile, false)
+    event("ADDON_LOADED", "LockInTools")
+    assert(current:GetDataChannelEnabled("party") == party and current:GetDataChannelEnabled("guild") == guild
+        and current:GetDataChannelEnabled("global") == global
+        and profile.data.channels.party == party and profile.data.channels.guild == guild
+        and profile.data.channels.global == global,
+        "Channel defaults repair malformed values while retaining saved false values")
+    if type(seed.data) == "table" then
+        assert(profile.data.future == "preserved")
+        if channels then assert(profile.data.channels.future == "preserved") end
+    end
+    assert(profile.schemaVersion == 3, "Channel preferences do not require a saved-schema migration")
+end
+
+-- Saving channel preferences before login changes only account-wide settings;
+-- all-disabled profiles remain quiet across reloads despite native membership.
+do
+    local profile = settings(nil, false)
+    profile.data = { channels = { party = false, guild = false, global = false } }
+    local current, _, _, event, clock = loadAddon(profile, false)
+    clock.grouped, clock.guild = true, true
+    assert(not current:SetDataChannelEnabled("guild", true))
+    event("ADDON_LOADED", "LockInTools")
+    assert(current:SetDataChannelEnabled("party", true) and current:SetDataChannelEnabled("guild", true)
+        and current:SetDataChannelEnabled("global", true))
+    clock:advance(30)
+    assert(#clock.dataJoinCalls == 0 and #clock.statusSends == 0 and #clock.dataSends == 0,
+        "Enabling routes during loading cannot send or join before login")
+    assert(current:SetDataChannelEnabled("party", false) and current:SetDataChannelEnabled("guild", false)
+        and current:SetDataChannelEnabled("global", false))
+    assert(not current:SetDataChannelEnabled("raid", true)
+        and not current:SetDataChannelEnabled("guild", "true")
+        and not current:SetDataChannelEnabled(nil, false)
+        and not current:GetDataChannelEnabled("guild"),
+        "Invalid channel settings cannot accidentally enable a route")
+    local restored, _, _, _, restoredClock = loadAddon(profile, false)
+    restoredClock.grouped, restoredClock.guild = true, true
+    restoredClock:initialize()
+    restoredClock:advance(30)
+    assert(not restored:GetDataChannelEnabled("party") and not restored:GetDataChannelEnabled("guild")
+        and not restored:GetDataChannelEnabled("global") and not restored:IsDataConnected()
+        and #restoredClock.dataJoinCalls == 0 and #restoredClock.statusSends == 0
+        and #restoredClock.dataSends == 0,
+        "Saved opt-outs apply to both native and global routes after reload")
+end
+
+-- Newer-schema profiles remain untouched and cannot enable data routes.
+do
+    local profile = settings(nil, false)
+    profile.schemaVersion = 4
+    local channels = { party = false, guild = "future-value", global = true, future = "preserved" }
+    local data = { channels = channels, future = "preserved" }
+    profile.data = data
+    local current, environment, _, _, clock = loadAddon(profile, false)
+    clock.grouped, clock.guild = true, true
+    clock:initialize()
+    assert(not current:SetDataChannelEnabled("party", true)
+        and not current:SetDataChannelEnabled("global", false))
+    clock:advance(30)
+    assert(environment.LockInToolsDB == profile and profile.schemaVersion == 4
+        and profile.data == data and profile.data.channels == channels
+        and channels.party == false and channels.guild == "future-value" and channels.global == true
+        and channels.future == "preserved" and data.future == "preserved"
+        and not current:IsDataConnected() and #clock.dataJoinCalls == 0 and #clock.statusSends == 0,
+        "Read-only channel preferences never normalize the source profile or start traffic")
+end
+
 -- Saved roster and position identities merge before login without treating historical peers as live.
 do
     local seed, _, _, seedEvent = loadAddon(settings(nil, false), false)
@@ -313,6 +393,42 @@ do
         and switching:IsDataConnected(), "Late obsolete joins are still removed without interrupting the active group")
 end
 
+-- A disabled global route can receive a late join after a group switch reset
+-- its transport state. Re-enabling must wait for that membership to drain.
+do
+    local profile = settings(nil, false)
+    profile.data = { channels = { global = false } }
+    local current, _, _, event, clock = loadAddon(profile, false)
+    clock.guild = true
+    clock:initialize()
+    assert(current:SetGroupSecret(OTHER_SECRET))
+    clock:advance(0)
+    assert(not current:IsGroupSwitching() and current:IsDataConnected()
+        and current.dataState.routes.GUILD and #clock.dataJoinCalls == 0)
+    local name = current:GetGroupDataChannelName()
+    clock.holdLeaves = true
+    clock:completeJoin(name, 7)
+    assert(current.dataState.awaitingLeave and not current.dataState.routes.CHANNEL
+        and clock.channels[name:lower()], "Disabled late joins retain their pending native departure")
+    local joins = #clock.dataJoinCalls
+    assert(current:SetDataChannelEnabled("global", true) and current:IsDataConnected()
+        and current.dataState.awaitingLeave and not current.dataState.routes.CHANNEL
+        and #clock.dataJoinCalls == joins,
+        "Global re-enable cannot accept cached membership left by a disabled late join")
+    clock:advance(1)
+    assert(current.dataState.awaitingLeave and not current.dataState.routes.CHANNEL
+        and #clock.dataJoinCalls == joins)
+    clock.holdLeaves, clock.channels[name:lower()] = false, nil
+    event("CHANNEL_LEFT", 7, name)
+    clock:advance(1)
+    assert(#clock.dataJoinCalls == joins + 1 and clock.dataJoinCalls[joins + 1] == name
+        and not current.dataState.routes.CHANNEL)
+    clock:completeJoin(name, 12)
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD
+        and current.dataState.routes.CHANNEL == "12",
+        "A fresh global membership connects after the disabled late join has departed")
+end
+
 -- Saving position preferences preserves joins and recovery checks already in progress.
 do
     local pending, _, _, _, pendingWorld = loadAddon(settings(nil, false), false)
@@ -395,7 +511,10 @@ do
     for _, invalid in ipairs({ -1, 101, 0 / 0, math.huge, "50", false, {} }) do
         assert(not current:SetBurnedStatus(invalid) and current:GetBurnedStatus() == 65)
     end
-    assert(current:SetBurnedStatus(0) and current:SetBurnedStatus(100))
+    clock:advance(300)
+    assert(current:SetBurnedStatus(0))
+    clock:advance(300)
+    assert(current:SetBurnedStatus(100))
     event("PLAYER_LOGIN")
     clock:advance(30)
     assert(current.db.burned.status == 100 and #clock.dataJoinCalls == 0 and #clock.statusSends == 0
@@ -411,15 +530,112 @@ do
     assert(repaired:GetBurnedStatus() == 0 and malformed.burned.status == 0
         and malformed.burned.future == "preserved")
     local newer = settings()
-    newer.schemaVersion, newer.burned = 4, { status = 73, future = "untouched" }
+    newer.schemaVersion, newer.burned = 4,
+        { status = 73, changeAvailableAt = 2000009000, future = "untouched" }
     local future, _, _, _, futureClock = loadAddon(newer, false)
     futureClock:initialize()
     assert(future:GetBurnedStatus() == 73 and not future:SetBurnedStatus(25)
-        and newer.burned.status == 73 and newer.burned.future == "untouched"
+        and newer.burned.status == 73 and newer.burned.changeAvailableAt == 2000009000
+        and newer.burned.future == "untouched"
         and future:GetGroupBurnedStatus().average == nil and future:GetGroupBurnedStatus().count == 0)
     futureClock:advance(30)
     assert(#futureClock.statusSends == 0 and #futureClock.dataJoinCalls == 0,
         "Newer-schema status stays readable without modifying or transmitting the original preferences")
+end
+
+-- A successful personal edit starts one five-minute interval. Rejected edits,
+-- including subsecond boundary attempts, cannot change its value or deadline.
+do
+    local current, _, _, _, clock = loadAddon(settings("", false), false)
+    assert(current:GetBurnedStatusCooldown() == 0)
+    clock:initialize()
+    local changes, statusTicks = 0, 0
+    current:RegisterNotification("BURNED_CHANGED", function() changes = changes + 1 end)
+    current.DataStatusTick = function() statusTicks = statusTicks + 1 end
+    assert(current:SetBurnedStatus(0) and current:GetBurnedStatusCooldown() == 0
+        and current.db.burned.changeAvailableAt == nil and changes == 0 and statusTicks == 0,
+        "A no-op before the first edit must not start a cooldown or emit status")
+    for _, invalid in ipairs({ -1, 101, 0 / 0, math.huge, "50", false, {} }) do
+        assert(not current:SetBurnedStatus(invalid) and current:GetBurnedStatusCooldown() == 0)
+    end
+    assert(current:SetBurnedStatus(40) and current:GetBurnedStatusCooldown() == 300
+        and current.db.burned.changeAvailableAt == 2000000300 and changes == 1 and statusTicks == 1)
+    local deadline = current.db.burned.changeAvailableAt
+    clock:advance(60)
+    assert(current:SetBurnedStatus(40.4) and current:GetBurnedStatusCooldown() == 240
+        and current.db.burned.changeAvailableAt == deadline,
+        "A rounded no-op during cooldown succeeds without extending the interval")
+    clock:advance(239.9)
+    local accepted, reason = current:SetBurnedStatus(80)
+    assert(not accepted and reason:find("0:01", 1, true) and current:GetBurnedStatus() == 40
+        and current:GetBurnedStatusCooldown() == 1 and current.db.burned.changeAvailableAt == deadline
+        and changes == 1 and statusTicks == 1,
+        "At 299.9 seconds a changed value is rejected without notifications or status sends")
+    clock:advance(0.1)
+    assert(current:GetBurnedStatusCooldown() == 0 and current:SetBurnedStatus(80)
+        and current:GetBurnedStatusCooldown() == 300 and changes == 2 and statusTicks == 2,
+        "At exactly 300 seconds the next changed value is accepted and starts a fresh interval")
+end
+
+-- The saved account-wide deadline follows reloads and other characters. Group
+-- switches clear peers without letting a personal cooldown be bypassed.
+do
+    local profile = settings("", false)
+    profile.burned = { status = 20, future = "preserved" }
+    local current, _, _, _, clock = loadAddon(profile, false)
+    clock:initialize()
+    assert(current:GetBurnedStatusCooldown() == 0 and current:SetBurnedStatus(70),
+        "A legacy saved status without a deadline permits its first changed value")
+    clock:advance(120)
+    local deadline = profile.burned.changeAvailableAt
+    assert(current:SetGroupSecret("new-burned-cooldown-group") and current:LeaveGroup()
+        and current:GetBurnedStatus() == 70 and current:GetBurnedStatusCooldown() == 180
+        and profile.burned.changeAvailableAt == deadline and not current:SetBurnedStatus(10))
+    local restored, environment, _, _, reloadClock = loadAddon(profile, false)
+    environment.GetServerTime = function() return 2000000120 + math.floor(reloadClock.now) end
+    environment.UnitFullName = function() return "AnotherCharacter", "Test Realm" end
+    reloadClock:initialize()
+    assert(restored:GetBurnedStatus() == 70 and restored:GetBurnedStatusCooldown() == 180
+        and profile.burned.future == "preserved" and not restored:SetBurnedStatus(10),
+        "Reloading on another character retains the remaining account-wide interval")
+    reloadClock:advance(180)
+    assert(restored:GetBurnedStatusCooldown() == 0 and restored:SetBurnedStatus(10))
+end
+
+-- Restore only bounded, finite deadlines. Unknown fields and newer schemas
+-- remain intact; server-clock corrections cannot shorten an active interval.
+do
+    for _, invalid in ipairs({ -1, 0 / 0, math.huge, "2000000300", false, {}, 2000000200.5 }) do
+        local profile = settings("", false)
+        profile.burned = { status = 50, changeAvailableAt = invalid, future = "preserved" }
+        local current, _, _, _, clock = loadAddon(profile, false)
+        clock:initialize()
+        assert(current:GetBurnedStatusCooldown() == 0 and profile.burned.changeAvailableAt == nil
+            and profile.burned.future == "preserved" and current:SetBurnedStatus(60),
+            "Malformed saved deadlines cannot lock the control or damage unrelated preferences")
+    end
+    for _, deadline in ipairs({ 0, 1999999999, 2000000000 }) do
+        local profile = settings("", false)
+        profile.burned = { status = 50, changeAvailableAt = deadline }
+        local current, _, _, _, clock = loadAddon(profile, false)
+        clock:initialize()
+        assert(current:GetBurnedStatusCooldown() == 0 and profile.burned.changeAvailableAt == nil
+            and current:SetBurnedStatus(60), "Expired deadlines permit an immediate changed value")
+    end
+    local profile = settings("", false)
+    profile.burned = { status = 50, changeAvailableAt = 2000010000, future = "preserved" }
+    local current, environment, _, _, clock = loadAddon(profile, false)
+    clock:initialize()
+    assert(current:GetBurnedStatusCooldown() == 300 and profile.burned.changeAvailableAt == 2000000300
+        and profile.burned.future == "preserved", "An excessive deadline is clamped to five minutes")
+    clock:advance(100)
+    environment.GetServerTime = function() return 1000000000 end
+    assert(current:GetBurnedStatusCooldown() == 200 and not current:SetBurnedStatus(60))
+    environment.GetServerTime = function() return 3000000000 end
+    assert(current:GetBurnedStatusCooldown() == 200 and not current:SetBurnedStatus(60),
+        "Server clock corrections cannot shorten or extend a live monotonic interval")
+    clock:advance(200)
+    assert(current:GetBurnedStatusCooldown() == 0 and current:SetBurnedStatus(60))
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")

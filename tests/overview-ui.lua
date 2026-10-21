@@ -4,6 +4,14 @@ local loadAddon, settings = fixture.loadAddon, fixture.settings
 local SECRET, OTHER_SECRET, contains = fixture.SECRET, fixture.OTHER_SECRET, fixture.contains
 local loadOptions = dofile("tests/support/ui.lua")
 
+local function clickOutside(menu, mouseButton)
+    -- Programmatic Click dispatches directly in the harness; native mouse input
+    -- also needs an explicit registration on the full-screen dismissal button.
+    assert(contains(menu.clicks or {}, mouseButton .. "Up") or contains(menu.clicks or {}, "AnyUp"),
+        "outside dismissal must register native " .. mouseButton .. " input")
+    menu:Click(mouseButton)
+end
+
 -- Overview scrolls and sorts the Content roster, with guarded native actions in a dropdown.
 do
     local overview, api, _, _, overviewWorld = loadAddon(settings(SECRET, false), false)
@@ -74,6 +82,17 @@ do
             and page.actionMenu.anchor == row,
             "the actions dropdown is anchored to its selected player")
         return page.actionMenu
+    end
+    for _, mouseButton in ipairs({ "RightButton", "LeftButton" }) do
+        local menu = openMenu(2)
+        menu.invite.scripts.OnEnter(menu.invite)
+        assert(api.GameTooltip:IsShown() and overview.activePlayerActionMenu == menu,
+            "the open Overview dropdown owns its action tooltip and active menu")
+        clickOutside(menu, mouseButton)
+        assert(not menu:IsShown() and not menu.playerID and not menu.anchor
+            and not overview.activePlayerActionMenu and not api.GameTooltip:IsShown()
+            and #invites == 0 and #requests == 0,
+            "an outside " .. mouseButton .. " cancels Overview actions and tooltip without a party action")
     end
     local menu = openMenu(2)
     assert(menu.invite:IsEnabled() and not menu.request:IsEnabled(),
@@ -198,6 +217,13 @@ end
 -- Player actions also work on independent surfaces without opening Content.
 do
     local actions, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    local invites, requests = 0, 0
+    api.C_PartyInfo = {
+        CanInvite = function() return true end,
+        IsPartyFull = function() return false end,
+        InviteUnit = function() invites = invites + 1 end,
+        RequestInviteFromUnit = function() requests = requests + 1 end,
+    }
     api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
         tooltip:SetOwner(owner, "ANCHOR_CURSOR")
     end
@@ -220,6 +246,17 @@ do
     menu:Open("self-testrealm", anchor)
     assert(not menu:IsShown() and not menu.playerID and not actions.activePlayerActionMenu,
         "the shared menu rejects self targets before selecting or showing actions")
+    for _, mouseButton in ipairs({ "RightButton", "LeftButton" }) do
+        otherMenu:Open("alpha-testrealm", otherAnchor)
+        otherMenu.request.scripts.OnEnter(otherMenu.request)
+        assert(api.GameTooltip:IsShown() and actions.activePlayerActionMenu == otherMenu,
+            "an independent dropdown owns its action tooltip and active menu")
+        clickOutside(otherMenu, mouseButton)
+        assert(not otherMenu:IsShown() and not otherMenu.playerID and not otherMenu.anchor
+            and not actions.activePlayerActionMenu and not api.GameTooltip:IsShown()
+            and invites == 0 and requests == 0 and not actions.contentPanel,
+            "an outside " .. mouseButton .. " cancels independent actions without opening Content or a party action")
+    end
     menu:Open("alpha-testrealm", anchor)
     local tooltip = api.GameTooltip
     assert(not menu.request:IsEnabled(), "an unavailable action still exposes hover help")

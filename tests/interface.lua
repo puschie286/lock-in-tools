@@ -30,10 +30,22 @@ do
         "hidden Settings never retain keys or apply a pending switch")
     content.options:Click()
     assert(options:IsVisible() and not content:IsVisible() and options.ownSecret:GetText() == SECRET)
-    options.tabs.position:Click()
+    options.tabs.sharing:Click()
+    assert(options.autoJoin:IsVisible() and options.positionSharing:IsVisible()
+        and options.positionRetention:IsVisible()
+        and options.dataChannels.party:IsVisible() and options.dataChannels.guild:IsVisible()
+        and options.dataChannels.global:IsVisible(), "Sharing brings chat, positions and data settings together")
+    assert(not options.tabs.chat and not options.tabs.position and not options.tabs.data,
+        "chat, positions and data have one navigation entry")
     options.content:Click()
     content.options:Click()
-    assert(options.selectedTab == "position" and options.pages.position:IsVisible())
+    assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible())
+    for _, entry in ipairs({ "chat", "position", "data" }) do
+        addon:OpenOptions("group")
+        addon:OpenOptions(entry)
+        assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible(),
+            "existing sharing page links still open the combined settings")
+    end
     for _, entry in ipairs({ "", "content", "overview", "welcome" }) do
         command(entry)
         assert(content:IsVisible() and not options:IsVisible())

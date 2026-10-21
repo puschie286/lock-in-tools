@@ -6,6 +6,10 @@ local function DefaultChatSettings()
     return { autoJoin = true }
 end
 
+local function DefaultDataSettings()
+    return { channels = { party = true, guild = true, global = true } }
+end
+
 addon.name = addonName
 addon.version = C_AddOns.GetAddOnMetadata(addonName, "Version") or "development"
 addon.initialized = false
@@ -36,6 +40,7 @@ function addon:Initialize()
             schemaVersion = SCHEMA_VERSION,
             showWelcome = type(database.showWelcome) ~= "boolean" or database.showWelcome,
             chat = DefaultChatSettings(),
+            data = DefaultDataSettings(),
             group = { secret = "" },
         }
         self.savedDataReadOnly = true
@@ -53,6 +58,11 @@ function addon:Initialize()
         end
         if type(database.chat.autoJoin) ~= "boolean" then
             database.chat.autoJoin = true
+        end
+        if type(database.data) ~= "table" then database.data = DefaultDataSettings() end
+        if type(database.data.channels) ~= "table" then database.data.channels = {} end
+        for _, channel in ipairs({ "party", "guild", "global" }) do
+            if type(database.data.channels[channel]) ~= "boolean" then database.data.channels[channel] = true end
         end
         if type(database.group) ~= "table" then
             database.group = { secret = "" }

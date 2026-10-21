@@ -134,14 +134,13 @@ do
         self:Notify("BURNED_CHANGED")
         return true
     end
-    local anchors = {}
-    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
-        anchors[#anchors + 1] = owner
-        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
-    end
     assert(ranking:SetRankingEnabled(true))
     local panel, tooltip = ranking.rankingOverlay, api.GameTooltip
     local group, personal = panel.groupBurned, panel.personalBurned
+    local function selectPersonal(value)
+        personal:SetValue(value)
+        personal.scripts.OnMouseUp(personal, "LeftButton")
+    end
     local minimum, maximum = personal:GetMinMaxValues()
     assert(group and group:IsShown() and personal:IsShown()
         and personal.frameType == "Slider" and personal.orientation == "HORIZONTAL"
@@ -155,7 +154,7 @@ do
         and group.fill:GetWidth() == group.track:GetWidth() * 0.45
         and personal:GetValue() == 20 and personal.label:GetText():find("20%%") and #edits == 0,
         "opening ranking paints the average and saved personal value without sending a personal edit")
-    personal:SetValue(73.6)
+    selectPersonal(73.6)
     assert(#edits == 1 and edits[1] == 70 and personal:GetValue() == 70
         and personal.label:GetText():find("70%%"),
         "dragging snaps to the nearest ten percent and emits one personal edit despite its synchronous refresh event")
@@ -163,13 +162,13 @@ do
         { 14.9, 10 }, { 15, 20 }, { 94.9, 90 }, { 95, 100 } }) do
         local previous = #edits
         local expectedWrites = personalValue == sample[2] and 0 or 1
-        personal:SetValue(sample[1])
+        selectPersonal(sample[1])
         assert(#edits == previous + expectedWrites and edits[#edits] == sample[2]
             and personal:GetValue() == sample[2],
             "personal input snaps at five-percent boundaries and does not repeat a write in the same ten-percent bucket")
     end
     local sameBucketEdits = #edits
-    for _, value in ipairs({ 99.9, 96, 95.1 }) do personal:SetValue(value) end
+    for _, value in ipairs({ 99.9, 96, 95.1 }) do selectPersonal(value) end
     assert(#edits == sameBucketEdits and personal:GetValue() == 100,
         "dragging within a selected ten-percent bucket restores its fixed point without duplicate model writes")
     local previousEdits = #edits
@@ -191,21 +190,100 @@ do
     assert(group.value == 0 and group.label:GetText():find("0%%")
         and group.label:GetText() ~= unknownLabel and #edits == previousEdits,
         "a known zero average remains distinct from an unknown average")
-    group.scripts.OnEnter(group)
-    assert(tooltip:IsShown() and tooltip:IsOwned(group) and anchors[#anchors] == group
-        and tooltip.anchor == "ANCHOR_CURSOR", "the group meter uses native global tooltip positioning")
-    personal.scripts.OnEnter(personal)
-    group.scripts.OnLeave(group)
-    assert(tooltip:IsShown() and tooltip:IsOwned(personal) and anchors[#anchors] == personal,
-        "personal meter help uses native positioning and another meter cannot dismiss it")
+    assert(not group.scripts.OnEnter and not group.scripts.OnLeave
+        and not personal.scripts.OnEnter and not personal.scripts.OnLeave and not tooltip:IsShown(),
+        "group and personal burned meters attach no descriptive hover help")
     api.UIParent:Hide()
-    assert(not tooltip:IsShown(), "hiding the interface dismisses burned meter help")
+    assert(not panel:IsVisible(), "hiding the interface also hides the burned meters")
     api.UIParent:Show()
-    assert(#edits == previousEdits and personal:GetValue() == 19,
+    assert(panel:IsVisible() and #edits == previousEdits and personal:GetValue() == 19,
         "showing the interface restores burned meters without treating repaint as input")
-    personal.scripts.OnEnter(personal)
     panel.CloseButton:Click()
-    assert(not tooltip:IsShown() and not panel:IsShown(), "closing ranking clears personal meter help")
+    assert(not panel:IsShown(), "closing ranking hides both burned meters")
+end
+
+-- A drag commits once on release, then its personal meter counts down five minutes.
+do
+    local saved = settings(SECRET, false)
+    saved.burned = { status = 20 }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
+    loadOverlay(ranking, api)
+    assert(ranking:SetRankingEnabled(true))
+    local panel = ranking.rankingOverlay
+    local personal, group = panel.personalBurned, panel.groupBurned
+    local writes, setBurned = 0, ranking.SetBurnedStatus
+    ranking.SetBurnedStatus = function(self, value)
+        writes = writes + 1
+        return setBurned(self, value)
+    end
+    local function sends()
+        return #world.dataSends + #world.statusSends + #world.rosterSends + #world.guideSends
+    end
+    personal.scripts.OnMouseDown(personal, "LeftButton")
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(writes == 0 and ranking:GetBurnedStatusCooldown() == 0 and personal:IsEnabled(),
+        "releasing an unchanged personal selection neither writes the model nor starts a cooldown")
+
+    local beforeSends = sends()
+    personal:SetValue(36)
+    personal.scripts.OnMouseDown(personal, "LeftButton")
+    personal:SetValue(81)
+    assert(writes == 0 and personal:GetValue() == 80 and personal.label:GetText():find("80%%")
+        and ranking:GetBurnedStatus() == 20 and group.value == 20
+        and ranking:GetBurnedStatusCooldown() == 0 and personal:IsEnabled() and sends() == beforeSends,
+        "one drag can cross several fixed points and previews its last value without changing the shared status")
+    panel:AdvanceFrame(1)
+    ranking:Notify("DATA_CHANGED")
+    assert(writes == 0 and personal:GetValue() == 80 and personal.label:GetText():find("80%%")
+        and ranking:GetBurnedStatus() == 20 and group.value == 20 and sends() == beforeSends,
+        "periodic and data refreshes preserve the active personal draft without sharing it or changing the group average")
+    personal.scripts.OnMouseUp(personal, "RightButton")
+    assert(writes == 0 and ranking:GetBurnedStatus() == 20,
+        "an unrelated mouse button cannot commit the active personal drag")
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(writes == 1 and ranking:GetBurnedStatus() == 80 and personal:GetValue() == 80
+        and group.value == 80 and ranking:GetBurnedStatusCooldown() == 300 and not personal:IsEnabled()
+        and personal.label:GetText():find("80%%") and personal.label:GetText():find("5:00", 1, true),
+        "left release commits only the last drag value and locks its meter with a five-minute countdown")
+    local lockedSends = sends()
+    personal:SetValue(0)
+    personal.scripts.OnMouseDown(personal, "LeftButton")
+    personal:SetValue(40)
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(writes == 1 and ranking:GetBurnedStatus() == 80 and personal:GetValue() == 80
+        and ranking:GetBurnedStatusCooldown() == 300 and sends() == lockedSends,
+        "stale disabled-slider callbacks cannot edit, extend the cooldown or send group traffic")
+    world.now = world.now + 299
+    panel:AdvanceFrame(1)
+    assert(not personal:IsEnabled() and ranking:GetBurnedStatusCooldown() == 1
+        and personal.label:GetText():find("0:01", 1, true),
+        "the visible meter counts down and remains locked through the final cooldown second")
+    world.now = world.now + 1
+    panel:AdvanceFrame(1)
+    assert(personal:IsEnabled() and ranking:GetBurnedStatusCooldown() == 0
+        and personal:GetValue() == 80 and not personal.label:GetText():find("0:00", 1, true),
+        "the periodic overlay refresh reenables personal input at the exact five-minute boundary")
+    personal.scripts.OnMouseDown(personal, "LeftButton")
+    personal:SetValue(40)
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(writes == 2 and ranking:GetBurnedStatus() == 40 and personal:GetValue() == 40
+        and not personal:IsEnabled() and ranking:GetBurnedStatusCooldown() == 300,
+        "the next completed edit after expiry starts a fresh five-minute cooldown")
+    world.now = world.now + 300
+    panel:AdvanceFrame(1)
+    personal.scripts.OnMouseDown(personal, "LeftButton")
+    personal:SetValue(90)
+    assert(personal:GetValue() == 90 and ranking:GetBurnedStatus() == 40,
+        "a later drag still previews locally before committing")
+    local hideSends = sends()
+    api.UIParent:Hide()
+    api.UIParent:Show()
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(writes == 2 and personal:GetValue() == 40 and ranking:GetBurnedStatus() == 40
+        and ranking:GetBurnedStatusCooldown() == 0 and personal:IsEnabled() and sends() == hideSends,
+        "hiding the interface cancels its uncommitted personal draft and a stale release cannot publish it")
 end
 
 -- Burning is a local visual preference: high meters animate independently and stop when hidden.
@@ -264,6 +342,7 @@ do
     assert(active(group) and not personal.burningEffect and ranking:GetBurnedStatus() == 69 and modelWrites == 0,
         "the group effect begins at seventy percent independently of a personal value below the threshold")
     personal:SetValue(76)
+    personal.scripts.OnMouseUp(personal, "LeftButton")
     local groupEffect, personalEffect = group.burningEffect, personal.burningEffect
     assert(active(group) and active(personal) and modelWrites == 1 and ranking:GetBurnedStatus() == 80
         and personal:GetValue() == 80 and personal.valueStep == 10
@@ -325,10 +404,12 @@ do
     assert(stopped(group) and not group.fill:IsShown() and active(personal),
         "an unknown group average cannot burn while a known hot personal meter continues independently")
     groupState.average, groupState.count = 69.9, 2
+    world.now = world.now + 300
     assert(ranking:SetBurnedStatus(60))
     assert(stopped(group) and stopped(personal) and ordinaryFill(group, 69.9) and ordinaryFill(personal, 60),
         "dropping below seventy percent clears all burning regions and restores the ordinary fills")
     groupState.average = 100
+    world.now = world.now + 300
     assert(ranking:SetBurnedStatus(100))
     assert(active(group) and active(personal), "both fully burned meters resume their existing effects")
     api.UIParent:Hide()
@@ -386,17 +467,21 @@ do
         and personal:GetValue() == 19 and saved.burned.status == 19,
         "personal burned status remains editable without a group and opening preserves a saved value between fixed points")
     personal:SetValue(67)
+    personal.scripts.OnMouseUp(personal, "LeftButton")
     assert(ranking:GetBurnedStatus() == 70 and personal:GetValue() == 70 and saved.burned.status == 70,
         "the personal slider writes the selected ten-percent point through the production burned model without a group")
     local restored, restoredAPI, _, _, restoredWorld = loadAddon(saved, false)
     restoredWorld:initialize()
     loadOverlay(restored, restoredAPI)
     restored:RefreshRankingOverlay()
-    assert(restored:GetBurnedStatus() == 70 and restored.rankingOverlay.personalBurned:GetValue() == 70,
-        "the personal burned value and its meter survive reloading the addon")
+    local restoredPersonal = restored.rankingOverlay.personalBurned
+    assert(restored:GetBurnedStatus() == 70 and restoredPersonal:GetValue() == 70
+        and not restoredPersonal:IsEnabled() and restored:GetBurnedStatusCooldown() == 300
+        and restoredPersonal.label:GetText():find("5:00", 1, true),
+        "the personal burned value, cooldown and disabled meter survive reloading the addon")
 end
 
--- Disabled personal meters still explain why future-schema settings cannot be edited.
+-- Future-schema personal meters remain read-only without descriptive hover help.
 do
     local future = settings(SECRET, false)
     future.schemaVersion = 99
@@ -418,12 +503,10 @@ do
     assert(writes == 0 and personal:GetValue() == previous
         and future.burned == originalBurned and future.burned.status == 61 and future.burned.future == "keep",
         "disabled personal meter callbacks restore the current value without writing future saved data")
-    personal.scripts.OnEnter(personal)
-    local help = tooltip.text .. " " .. table.concat(tooltip.lines, " ")
-    assert(tooltip:IsShown() and tooltip:IsOwned(personal) and help:find("Update", 1, true),
-        "disabled personal meters retain hover help explaining that an addon update is required")
+    assert(not personal.scripts.OnEnter and not personal.scripts.OnLeave and not tooltip:IsShown(),
+        "disabled personal meters also attach no descriptive hover help")
     panel.CloseButton:Click()
-    assert(not tooltip:IsShown(), "closing read-only ranking dismisses its disabled meter help")
+    assert(not panel:IsShown(), "closing read-only ranking hides its disabled meter")
 end
 
 -- Settings controls apply overlay preferences immediately without changing the active view.

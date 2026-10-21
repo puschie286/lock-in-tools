@@ -254,11 +254,20 @@ function addon:IsObsoleteGroupChannel(name)
     if not normalized:match("^lit%x+$") and not normalized:match("^litdata%x+$") then return false end
     if self.groupSwitch and self.groupSwitch.started then return true end
     local chat, data = self:GetGroupChannelName(), self:GetGroupDataChannelName()
+    if data and normalized == data:lower() and self.GetDataChannelEnabled
+        and not self:GetDataChannelEnabled("global") then return true end
     return (not chat or normalized ~= chat:lower()) and (not data or normalized ~= data:lower())
 end
 
 function addon:LeaveGroupChannel(name)
     if IsSecret(name) or type(name) ~= "string" or name == "" then return end
+    local data = self:GetGroupDataChannelName()
+    if self.dataState and data and name:lower() == data:lower() and self.GetDataChannelEnabled
+        and not self:GetDataChannelEnabled("global") then
+        -- Late/restored membership may remain cached after a disabled-route
+        -- leave. Re-enabling must drain it before accepting a new connection.
+        self.dataState.awaitingLeave = true
+    end
     -- Leaving membership alone can retain saved chat-window subscriptions.
     ForEachChatFrame(function(frame)
         if type(frame.RemoveChannel) == "function" then pcall(frame.RemoveChannel, frame, name) end

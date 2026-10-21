@@ -125,6 +125,8 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     menu:SetAllPoints(UIParent)
     menu:SetFrameStrata("FULLSCREEN_DIALOG")
     menu:EnableMouse(true)
+    -- Buttons default to left clicks; either button should dismiss the backdrop.
+    menu:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     menu:EnableMouseWheel(true)
     menu.menu = UI:Section(menu, 0, 0, 170, 80, "")
     menu.menu:SetFrameLevel(menu:GetFrameLevel() + 1)

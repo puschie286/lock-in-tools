@@ -204,6 +204,15 @@ local function PaintMeter(meter, value, text)
     RefreshBurningEffect(meter, value)
 end
 
+local function CanEditBurned()
+    return addon.initialized and addon.ready and not addon.savedDataReadOnly
+        and addon:GetBurnedStatusCooldown() == 0
+end
+
+local function CancelBurnedEdit(meter)
+    meter.editingBurned, meter.pendingBurned = nil, nil
+end
+
 local function RefreshBurnedMeters(panel)
     local group = addon:GetGroupBurnedStatus()
     local text = "Group burned: "
@@ -216,14 +225,21 @@ local function RefreshBurnedMeters(panel)
     PaintMeter(panel.groupBurned, group.average, text)
 
     local personal = panel.personalBurned
-    local value = addon:GetBurnedStatus()
+    local cooldown = addon:GetBurnedStatusCooldown()
+    local editable = CanEditBurned()
+    if not editable then CancelBurnedEdit(personal) end
+    local value = personal.pendingBurned or addon:GetBurnedStatus()
     -- Native SetValue also fires OnValueChanged during a data refresh.
     personal.refreshing = true
     personal:SetValue(value)
     personal.refreshing = nil
-    personal:SetEnabled(not addon.savedDataReadOnly)
-    personal:SetAlpha(addon.savedDataReadOnly and 0.5 or 1)
-    PaintMeter(personal, value, "Your burned status: " .. value .. "%")
+    personal:SetEnabled(editable)
+    personal:SetAlpha(editable and 1 or 0.65)
+    local suffix = ""
+    if cooldown > 0 then
+        suffix = " (ready in " .. string.format("%d:%02d", math.floor(cooldown / 60), cooldown % 60) .. ")"
+    elseif personal.editingBurned then suffix = " (release to set)" end
+    PaintMeter(personal, value, "Your burned status: " .. value .. "%" .. suffix)
 end
 
 local function CreateBurnedMeter(panel, personal)
@@ -258,26 +274,32 @@ local function CreateBurnedMeter(panel, personal)
         meter:SetThumbTexture(thumb)
         meter:SetScript("OnValueChanged", function(_, value)
             if meter.refreshing then return end
-            if not addon.savedDataReadOnly and addon.initialized and addon.ready then
-                -- Snap user edits only; old saved reports and group averages
-                -- retain their precision when the overlay simply repaints.
-                value = math.max(0, math.min(100, math.floor(value / BURNED_STEP + 0.5) * BURNED_STEP))
-                if value ~= addon:GetBurnedStatus() then
-                    local success, message = addon:SetBurnedStatus(value)
-                    if not success and message then addon:Print(message) end
-                end
+            -- Native track clicks can report a value before OnMouseDown. Stage
+            -- all input and commit only on release so a drag locks its final
+            -- value, rather than the first 10% tick it crosses.
+            if CanEditBurned() and meter:IsVisible() then
+                meter.pendingBurned = math.max(0, math.min(100, math.floor(value / BURNED_STEP + 0.5) * BURNED_STEP))
+                meter.editingBurned = true
+            else CancelBurnedEdit(meter) end
+            addon:RefreshRankingOverlay()
+        end)
+        meter:SetScript("OnMouseDown", function(_, button)
+            if button ~= "LeftButton" or not CanEditBurned() or not meter:IsVisible() then return end
+            meter.pendingBurned = meter.pendingBurned or addon:GetBurnedStatus()
+            meter.editingBurned = true
+            addon:RefreshRankingOverlay()
+        end)
+        meter:SetScript("OnMouseUp", function(_, button)
+            if button ~= "LeftButton" then return end
+            local value = meter.pendingBurned
+            CancelBurnedEdit(meter)
+            if value ~= nil and CanEditBurned() and meter:IsVisible() and value ~= addon:GetBurnedStatus() then
+                local success, message = addon:SetBurnedStatus(value)
+                if not success and message then addon:Print(message) end
             end
             addon:RefreshRankingOverlay()
         end)
-        Tooltip(panel, meter, "Your burned status", function()
-            if addon.savedDataReadOnly then return "Update LockInTools before changing your saved burned status." end
-            return "Drag in 10% steps to set how burned you feel: 0% is fresh, 100% is fully burned. "
-                .. "Your status is saved and shared with your LockInTools group."
-        end)
-    else
-        Tooltip(panel, meter, "Group burned status", "Average burned status of connected group members "
-            .. "with current reports, including you. Members without a current report are left out. "
-            .. "0% is fresh; 100% is fully burned.")
+        meter:HookScript("OnHide", CancelBurnedEdit)
     end
     return meter
 end

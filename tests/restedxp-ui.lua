@@ -44,7 +44,7 @@ do
     assert(not addon:HasGroup() and not panel.restedxpImport:IsEnabled())
     panel.restedxpBattleTag:UserInput("  UnfinishedOwner#  ")
     assert(addon.db.restedxp.sourceBattleTag == "  UnfinishedOwner#  " and #calls == 0)
-    panel.tabs.chat:Click()
+    panel.tabs.sharing:Click()
     panel.tabs.restedxp:Click()
     assert(panel.restedxpBattleTag:GetText() == "  UnfinishedOwner#  " and Export(panel) == "")
     panel.restedxpBattleTag:UserInput("")
@@ -202,7 +202,7 @@ for _, closeWindow in ipairs({ false, true }) do
     panel.restedxpBattleTag:UserInput("SourceOwner#5678")
     edit:Paste("Abandoned|chunk\n")
     edit:AdvanceFrame(0.06)
-    if closeWindow then panel.parent.CloseButton:Click() else panel.tabs.chat:Click() end
+    if closeWindow then panel.parent.CloseButton:Click() else panel.tabs.sharing:Click() end
     assert(Export(panel) == "" and edit:GetText() == "" and not edit.focused and not edit:GetScript("OnUpdate"),
         "leaving the page cancels an in-flight paste")
     edit:AdvanceFrame(1)

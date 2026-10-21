@@ -25,7 +25,7 @@ do
         and panel.secret:GetText() == "" and not panel.applyGroup:IsEnabled()
         and #world.joinCalls == 0, "applying saves the identity independently of chat autojoin")
 
-    panel.tabs.chat:Click()
+    panel.tabs.sharing:Click()
     panel.join:Click()
     panel.tabs.group:Click()
     panel.secret:UserInput(OTHER_SECRET)
@@ -112,10 +112,60 @@ do
     for _, count in pairs(calls) do assert(count == 1) end
 end
 
+-- Data channels default on; checkbox and label actions save once and survive reloads.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    local calls, setter = { party = 0, guild = 0, global = 0 }, addon.SetDataChannelEnabled
+    addon.SetDataChannelEnabled = function(self, channel, enabled)
+        calls[channel] = calls[channel] + 1
+        return setter(self, channel, enabled)
+    end
+    loadOptions(addon, api)
+    addon:OpenOptions("data")
+    local panel = addon.optionsPanel
+    for _, checkbox in pairs(panel.dataChannels) do
+        assert(checkbox:GetChecked() and checkbox:IsEnabled(), "every data channel defaults on in Settings")
+        checkbox:SetChecked(false)
+    end
+    addon:Notify("DATA_CHANGED")
+    for channel, checkbox in pairs(panel.dataChannels) do
+        assert(checkbox:GetChecked() and calls[channel] == 0,
+            "data notifications refresh preferences without saving them")
+    end
+    local previousStatus = panel.dataStatus:GetText()
+    world.guild = true
+    world.fire("PLAYER_GUILD_UPDATE")
+    assert(panel.dataStatus:GetText() == addon:GetDataStatusText() and panel.dataStatus:GetText() ~= previousStatus,
+        "the Sharing page reflects live route availability")
+    for channel, checkbox in pairs(panel.dataChannels) do
+        checkbox:Click()
+        assert(not addon:GetDataChannelEnabled(channel) and not checkbox:GetChecked() and calls[channel] == 1)
+        checkbox.labelButton:Click()
+        assert(addon:GetDataChannelEnabled(channel) and checkbox:GetChecked() and calls[channel] == 2,
+            "clicking a data channel label uses the same preference action")
+        checkbox.labelButton:Click()
+        assert(not addon:GetDataChannelEnabled(channel) and calls[channel] == 3)
+    end
+    addon.mainPanel:Hide()
+    addon:OpenOptions("data")
+    for _, checkbox in pairs(panel.dataChannels) do assert(not checkbox:GetChecked()) end
+
+    local reloaded, reloadedAPI, _, _, reloadedWorld = loadAddon(api.LockInToolsDB, false)
+    reloadedWorld:initialize()
+    loadOptions(reloaded, reloadedAPI)
+    reloaded:OpenOptions("data")
+    for channel, checkbox in pairs(reloaded.optionsPanel.dataChannels) do
+        assert(not checkbox:GetChecked() and not reloaded:GetDataChannelEnabled(channel),
+            "data channel choices survive a saved-variable reload")
+    end
+end
+
 -- Future-schema profiles allow navigation while every editing path preserves saved data.
 do
     local saved = { schemaVersion = 4, showWelcome = false, important = "keep",
-        group = { secret = SECRET }, chat = { autoJoin = false } }
+        group = { secret = SECRET }, chat = { autoJoin = false },
+        data = { channels = { party = false, guild = true, global = false } } }
     local addon, api, _, _, world = loadAddon(saved, false)
     world:initialize()
     loadOptions(addon, api)
@@ -136,16 +186,28 @@ do
         assert(model[key] == previous and control:GetChecked() == previous,
             "even a directly invoked callback cannot write read-only preferences")
     end
-    panel.tabs.chat:Click()
+    panel.tabs.sharing:Click()
+    for channel, checkbox in pairs(panel.dataChannels) do
+        local previous = addon:GetDataChannelEnabled(channel)
+        assert(not checkbox:IsEnabled() and not checkbox.labelButton:IsEnabled())
+        checkbox.labelButton:Click()
+        assert(addon:GetDataChannelEnabled(channel) == previous)
+        checkbox:SetChecked(not previous)
+        checkbox.scripts.OnClick(checkbox)
+        assert(addon:GetDataChannelEnabled(channel) == previous and checkbox:GetChecked() == previous,
+            "direct data channel callbacks preserve read-only settings and reset their checkboxes")
+    end
+    panel.tabs.sharing:Click()
     panel.content:Click()
     for _, event in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RANKING_CHANGED" }) do
         addon:Notify(event)
     end
     assert(panel.secret:GetText() == "" and panel.ownSecret:GetText() == "")
     addon.contentPanel.options:Click()
-    assert(panel.selectedTab == "chat" and not panel.autoJoin:IsEnabled())
+    assert(panel.selectedTab == "sharing" and not panel.autoJoin:IsEnabled())
     assert(api.LockInToolsDB == saved and saved.schemaVersion == 4 and saved.important == "keep"
-        and saved.group.secret == SECRET and not saved.chat.autoJoin and saved.ranking == nil)
+        and saved.group.secret == SECRET and not saved.chat.autoJoin and saved.ranking == nil
+        and not saved.data.channels.party and saved.data.channels.guild and not saved.data.channels.global)
 end
 
 -- Every settings help path uses the global anchor and retains owner-based cleanup.
@@ -161,7 +223,7 @@ do
     panel.groupInfo.scripts.OnEnter(panel.groupInfo)
     assert(tooltip:IsShown() and tooltip:IsOwned(panel.groupInfo) and tooltip.anchor == "ANCHOR_CURSOR",
         "Settings help follows the global tooltip position")
-    panel.tabs.chat:Click()
+    panel.tabs.sharing:Click()
     assert(not tooltip:IsShown(), "switching settings pages dismisses globally positioned help")
     assert(not panel.join:IsEnabled(), "a groupless profile has a disabled Join control")
     for _, widget in ipairs({ panel.autoJoin, panel.autoJoin.labelButton, panel.join }) do
@@ -180,6 +242,14 @@ do
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())
     end
+    panel.tabs.sharing:Click()
+    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.guild.labelButton, panel.dataStatusHelp }) do
+        widget.scripts.OnEnter(widget)
+        assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
+            "data controls and status use the shared tooltip position")
+        widget.scripts.OnLeave(widget)
+        assert(not tooltip:IsShown())
+    end
     panel.tabs.restedxp:Click()
     panel.restedxpBattleTag.scripts.OnEnter(panel.restedxpBattleTag)
     assert(tooltip:IsOwned(panel.restedxpBattleTag) and tooltip.anchor == "ANCHOR_CURSOR",
@@ -195,4 +265,4 @@ do
         "closing Settings preserves a tooltip owned by another control")
 end
 
-print("PASS: Settings group lifecycle, preference callbacks, read-only settings and key privacy")
+print("PASS: Settings group lifecycle, data channel controls, preference callbacks, read-only settings and key privacy")
