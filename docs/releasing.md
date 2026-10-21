@@ -4,7 +4,7 @@ Update `## Version` in `LockInTools.toc` to a new `major.minor.patch` version, c
 
 The workflow compares the manifest before and after the entire push. Changes to other manifest fields do not publish a release. Feature branches and pull requests do not publish releases. If several versions are included in one push, only the final version is released.
 
-Before publishing, it installs the pinned local Lua 5.1 runtime and runs `tools/verify.ps1`. A failed check prevents publication. It then creates tag `v<version>` at the exact checked commit and a GitHub release with generated notes and `LockInTools-<version>.zip`. Versions such as `0.4.0-beta.1` publish as prereleases.
+The workflow packages the addon and creates tag `v<version>` at the exact source commit and a GitHub release with generated notes and `LockInTools-<version>.zip`. Versions such as `0.4.0-beta.1` publish as prereleases. Release automation does not install Lua or run tests.
 
 The ZIP extracts into one `LockInTools/` folder, ready to place in `Interface/AddOns/`. It includes the manifest, Lua/XML, media and all bundled library sources and notices. `git archive` packages committed files; root `.gitattributes` rules exclude development files. Keep new development-only paths excluded there, and preserve notices under `Libs/`.
 
@@ -14,4 +14,4 @@ GitHub Actions must be enabled for the repository, and repository or organizatio
 
 ## Verification
 
-Run `.\tools\verify.ps1` for offline addon verification. The packaging step also checks every manifest entry, every bundled library/media file, the addon folder layout and development-file exclusions before any upload. A successful local check does not validate GitHub's token policies or an actual hosted release; confirm the first hosted run and download its ZIP after the workflow reaches the default branch.
+Offline addon verification remains available separately through `.\tools\verify.ps1`; it is not part of the release workflow. After a workflow change, confirm the hosted run and download its ZIP. To use updated workflow code after a failure, start a new **Run workflow** on the default branch after pushing the fix; rerunning the old run uses its original commit.
