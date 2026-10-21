@@ -19,6 +19,7 @@ local function loadAddon(savedVariables, loggedIn)
         optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
         level = 12, xp = 0, xpMax = 1000, maxLevel = 60,
+        grouped = false, raid = false, guild = false,
     }
     local function channelByName(name)
         if type(name) == "string" then return world.channels[name:lower()] end
@@ -171,6 +172,9 @@ local function loadAddon(savedVariables, loggedIn)
         UnitXP = function(unit) assert(unit == "player"); return world.xp end,
         UnitXPMax = function(unit) assert(unit == "player"); return world.xpMax end,
         GetMaxPlayerLevel = function() return world.maxLevel end,
+        IsInGuild = function() return world.guild end,
+        IsInGroup = function() return world.grouped or world.raid end,
+        IsInRaid = function() return world.raid end,
         C_Map = {
             GetBestMapForUnit = function() return 37 end,
             GetPlayerMapPosition = function()
@@ -259,13 +263,14 @@ local function loadAddon(savedVariables, loggedIn)
                 return 0
             end,
             SendAddonMessage = function(prefix, message, distribution, target)
-                assert(distribution == "CHANNEL", "production data does not send whispers")
+                assert(distribution == "CHANNEL" or distribution == "PARTY" or distribution == "RAID"
+                    or distribution == "GUILD", "production data uses only eligible broadcast routes")
                 -- Keep feature assertions separate from independent presence and status traffic.
                 local sends = isStatusMessage(message) and world.statusSends
                     or isRosterMessage(message) and world.rosterSends
                     or message:match("^1|guides|") and world.guideSends or world.dataSends
                 sends[#sends + 1] = {
-                    prefix = prefix, message = message, target = target,
+                    prefix = prefix, message = message, distribution = distribution, target = target,
                 }
                 return 0
             end,

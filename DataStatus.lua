@@ -386,6 +386,15 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     return true
 end
 
+-- An added route needs discovery without resetting the current wire session or
+-- cached peers. Keep the normal scheduler's cadence instead of sending inline.
+function addon:RequestDataStatusSnapshot()
+    local status = self.dataState and self.dataState.status
+    if not status or not status.connected then return end
+    status.requestNeeded = true
+    ScheduleStatus(self)
+end
+
 function addon:DataStatusTick()
     local state = self.dataState
     local status = state and state.status

@@ -33,7 +33,8 @@ local function newAddon(saved, readOnly, withPositions, native)
     local world = {
         now = 0, epoch = 2000000000, timers = {}, sent = {}, messages = {}, frames = {},
         x = 0.25, y = 0.75, map = 37, joins = {}, leaves = {}, channels = {}, nativeSends = {}, prefixCalls = {},
-        sendResult = 0, sendCalls = 0,
+        sendResult = 0, sendCalls = 0, sendAttempts = {},
+        guild = native.guild == true, party = native.party == true, raid = native.raid == true,
     }
     world.sent = world.nativeSends
     local environment = setmetatable({
@@ -42,6 +43,9 @@ local function newAddon(saved, readOnly, withPositions, native)
         GetServerTime = function() return world.epoch + math.floor(world.now) end,
         GetChannelName = function() return 0, nil end,
         GetNormalizedRealmName = function() return "TestRealm" end,
+        IsInGuild = function() return world.guild end,
+        IsInGroup = function() return world.party or world.raid end,
+        IsInRaid = function() return world.raid end,
         UnitFullName = function(unit) assert(unit == "player"); return native.playerName or "Self", "Test Realm" end,
         CreateFrame = function(kind)
             assert(kind == "Frame")
@@ -99,11 +103,17 @@ local function newAddon(saved, readOnly, withPositions, native)
         end,
         SendAddonMessage = function(prefix, message, distribution, target)
             world.sendCalls = world.sendCalls + 1
-            assert(distribution == "CHANNEL", "Shared data uses one native channel broadcast, never whispers")
-            if world.sendThrows then error("Native send unavailable") end
-            world.nativeSends[#world.nativeSends + 1] = {
+            assert(distribution == "CHANNEL" or distribution == "GUILD" or distribution == "PARTY" or distribution == "RAID",
+                "Shared data broadcasts through eligible native routes, never whispers")
+            assert(distribution == "CHANNEL" or target == nil, "Only the additional global route has a target")
+            local packet = {
                 prefix = prefix, message = message, distribution = distribution, target = target, at = world.now,
             }
+            world.sendAttempts[#world.sendAttempts + 1] = packet
+            if world.sendThrows or (world.routeThrows and world.routeThrows[distribution]) then error("Native send unavailable") end
+            world.nativeSends[#world.nativeSends + 1] = packet
+            local result = world.routeResults and world.routeResults[distribution]
+            if result ~= nil then return result end
             return world.sendResult
         end,
         AreOutgoingAddonChatMessagesRestricted = function()
@@ -168,8 +178,8 @@ local function newAddon(saved, readOnly, withPositions, native)
         addon:LeaveDataChannel()
     end
     -- Test convenience only: every receive uses the actual native event path.
-    function addon:ReceiveData(sender, message)
-        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, "CHANNEL", sender)
+    function addon:ReceiveData(sender, message, distribution)
+        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, distribution or "CHANNEL", sender)
     end
     function world:activeTimers()
         local count = 0
@@ -536,7 +546,7 @@ do
     restore()
     missing:JoinDataChannel(true)
     clock:advance(90)
-    assert(not missing:IsDataConnected() and #clock.joins == 0 and #clock.prefixCalls == 0)
+    assert(not missing:IsDataConnected() and #clock.joins == 0 and #clock.prefixCalls == 1)
 end
 -- Removing the configured group cancels both retry and healthy membership timers.
 for _, connected in ipairs({ false, true }) do
@@ -1630,6 +1640,227 @@ do
     alice.world:advance(100)
     assert(alice.addon:GetGroupBurnedStatus().count == 0 and alice.world:activeTimers() == 0,
         "Logout cancels presence expiry and transport work")
+end
+
+-- Party/raid and guild are usable before the additional global channel joins.
+-- Losing or changing one route must preserve the other routes and request caches.
+do
+    local current, clock = newAddon(nil, false, false, { party = true, guild = true })
+    local notices = {}
+    assert(current:RegisterDataFeature("echo", function() end,
+        function(connected) notices[#notices + 1] = connected end))
+    assert(current:RegisterDataRequest("snapshot", function() return "own" end, function() end))
+    clock:login()
+    assert(current:IsDataConnected() and not current.dataState.channelConnected
+        and current.dataState.routes.PARTY and current.dataState.routes.GUILD
+        and not current.dataState.routes.CHANNEL and #clock.joins == 1,
+        "Native memberships connect without waiting for global-channel membership")
+    local _, id = current:RequestData("snapshot", "pending")
+    assert(id and current:ReceiveData("Friend", "1|Q|snapshot|peer|", "PARTY"))
+    local pending, replied = current.dataState.pendingRequests, current.dataState.repliedRequests
+    local noticeCount = #notices
+    clock:member(9)
+    assert(current:IsDataConnected() and current.dataState.channelConnected
+        and current.dataState.routes.CHANNEL == "9" and #notices == noticeCount,
+        "Adding global membership does not disconnect an existing native route")
+    clock:notice("WRONG_PASSWORD")
+    assert(current:IsDataConnected() and not current.dataState.channelConnected
+        and not current.dataState.routes.CHANNEL and #notices == noticeCount,
+        "Global-channel failures do not interrupt guild or party data")
+    clock.party, clock.raid = false, true
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(current.dataState.routes.RAID and not current.dataState.routes.PARTY
+        and current.dataState.routes.GUILD and #notices == noticeCount,
+        "A raid uses RAID in place of PARTY while guild delivery remains active")
+    assert(current.dataState.pendingRequests == pending and pending[id]
+        and current.dataState.repliedRequests == replied and next(replied),
+        "Route churn preserves request correlation and duplicate reply suppression")
+    clock.guild, clock.raid = false, false
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not current:IsDataConnected() and notices[#notices] == false
+        and next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil,
+        "Losing the final route disconnects and invalidates request caches")
+    clock.guild = true
+    clock:fire("PLAYER_ENTERING_WORLD")
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD,
+        "World entry rechecks native memberships even during global-channel recovery")
+    assert(current:SetGroupSecret("another-native-group") and current:IsGroupSwitching())
+    assert(not current:SendData("echo", "during switch")
+        and not current:ReceiveData("Friend", "1|echo|during switch", "GUILD"))
+    clock:advance(0)
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD,
+        "Native routes resume after the configured group switch completes")
+    clock:fire("PLAYER_LOGOUT")
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not current:IsDataConnected() and not current:SendData("echo", "after logout"))
+end
+
+-- Native startup callbacks may change configuration before any global join was
+-- sent; the abandoned group's custom channel must never be requested afterward.
+for _, action in ipairs({ "switch", "leave" }) do
+    local current, clock = newAddon(nil, false, false, { guild = true })
+    local changed = false
+    assert(current:RegisterDataFeature("startup_change", function() end, function(connected)
+        if connected and not changed then
+            changed = true
+            if action == "switch" then assert(current:SetGroupSecret("switch-on-native-startup"))
+            else assert(current:LeaveGroup()) end
+        end
+    end))
+    clock:login()
+    assert(changed and current:IsGroupSwitching() and not current:IsDataConnected()
+        and #clock.joins == 0 and #clock.sendAttempts == 0,
+        "A " .. action .. " requested by a native connection callback abandons the old global join")
+    assert(not current:SendData("startup_change", "abandoned")
+        and not current:ReceiveData("Friend", "1|startup_change|abandoned", "GUILD"))
+    clock:advance(0)
+    if action == "switch" then
+        assert(current:IsDataConnected() and #clock.joins == 1
+            and clock.joins[1].name == current:GetGroupDataChannelName(),
+            "Only the replacement group requests a global channel after native startup changes")
+    else
+        assert(not current:HasGroup() and not current:IsDataConnected() and #clock.joins == 0)
+    end
+    assert(#clock.sendAttempts == 0, "Startup configuration callbacks cannot send abandoned-group frames")
+end
+
+-- Missing or rejected global-channel APIs cannot disable native group/guild data.
+for _, missingAPI in ipairs({ "JoinTemporaryChannel", "GetChannelName" }) do
+    local current, clock = newAddon(nil, false, false, { guild = true, configure = function(environment)
+        environment[missingAPI] = false
+    end })
+    assert(current:RegisterDataFeature("echo", function() end))
+    clock:login()
+    assert(current:IsDataConnected() and #clock.prefixCalls == 1 and #clock.joins == 0)
+    assert(current:SendData("echo", missingAPI) and #clock.sent == 1
+        and clock.sent[1].distribution == "GUILD" and clock.sent[1].target == nil,
+        "Addon messaging remains available without " .. missingAPI)
+end
+do
+    local current, clock = newAddon(nil, false, false, { party = true, configure = function(_, world)
+        world.joinThrows = true
+    end })
+    assert(current:RegisterDataFeature("echo", function() end))
+    clock:login()
+    assert(current:IsDataConnected() and current:SendData("echo", "join rejected")
+        and clock.sent[1].distribution == "PARTY")
+end
+
+-- Native memberships retain the existing setup, startup and read-only gates.
+for _, profile in ipairs({
+    { saved = { schemaVersion = 3, group = { secret = "" } } },
+    { readOnly = true },
+}) do
+    local current, clock = newAddon(profile.saved, profile.readOnly, false, { guild = true, raid = true })
+    assert(current:RegisterDataFeature("echo", function() error("Inactive native receive") end))
+    assert(not current:SendData("echo", "before login"))
+    clock:login()
+    clock:fire("GROUP_ROSTER_UPDATE")
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not current:IsDataConnected() and #clock.sendAttempts == 0
+        and not current:ReceiveData("Friend", "1|echo|inactive", "GUILD"))
+end
+
+-- Each frame is serialized once and attempted on every route, even when another
+-- send rejects or throws. Acceptance by any one route makes the logical send succeed.
+do
+    local current, clock = newAddon(nil, false, false, { guild = true, party = true })
+    local receives, requests, responses = 0, 0, 0
+    assert(current:RegisterDataFeature("echo", function() receives = receives + 1 end))
+    assert(current:RegisterDataRequest("snapshot", function() requests = requests + 1; return "own" end,
+        function() responses = responses + 1 end))
+    clock:connect()
+    local cases = {
+        { results = { PARTY = 11, CHANNEL = 11 }, accepted = true },
+        { results = { GUILD = 11, CHANNEL = 11 }, throws = { PARTY = true }, accepted = false },
+        { throws = { PARTY = true, GUILD = true }, accepted = true },
+    }
+    for index, case in ipairs(cases) do
+        clock.routeResults, clock.routeThrows = case.results, case.throws
+        local before, found = #clock.sendAttempts, {}
+        assert(current:SendData("echo", "fanout-" .. index) == case.accepted)
+        assert(#clock.sendAttempts == before + 3, "A failed route must not prevent another route's attempt")
+        for packetIndex = before + 1, #clock.sendAttempts do
+            local packet = clock.sendAttempts[packetIndex]
+            assert(packet.message == "1|echo|fanout-" .. index and not found[packet.distribution])
+            found[packet.distribution] = true
+        end
+        assert(found.PARTY and found.GUILD and found.CHANNEL)
+    end
+    clock.routeResults, clock.routeThrows = nil, nil
+    local before = #clock.sendAttempts
+    local accepted, id = current:RequestData("snapshot", "same request")
+    assert(accepted and #clock.sendAttempts == before + 3)
+    for index = before + 1, #clock.sendAttempts do
+        assert(clock.sendAttempts[index].message == "1|Q|snapshot|" .. id .. "|same request",
+            "All routes reuse one request identifier and complete serialized envelope")
+    end
+    local first = true
+    for _, route in ipairs({ "PARTY", "GUILD", "CHANNEL" }) do
+        assert(current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer", route) == first)
+        first = false
+    end
+    assert(responses == 1, "Copies from different routes produce only one response callback per responder")
+    before = #clock.sendAttempts
+    first = true
+    for _, route in ipairs({ "GUILD", "CHANNEL", "PARTY" }) do
+        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-overlap|payload", route) == first)
+        assert(current:ReceiveData("Friend", "1|echo|feature duplicate", route))
+        first = false
+    end
+    assert(requests == 1 and #clock.sendAttempts == before + 3,
+        "A duplicate request triggers one logical reply broadcast across every route")
+    assert(receives == 3, "Generic features retain their existing receive semantics without a blanket duplicate cache")
+    before = #clock.sendAttempts
+    assert(not current:SendData("echo", string.rep("x", 256))
+        and not current:SendData("echo", "bad\000payload") and #clock.sendAttempts == before)
+end
+
+-- A newly available route requests discovery without resetting the existing
+-- status session, pending requests, or contact state on healthy routes.
+do
+    local current, clock = statusFixture({ level = 24 }, true, { guild = true })
+    local status = current.dataState.status
+    local session, pending = status.session, current.dataState.pendingRequests
+    local before = #clock.sent
+    clock.party = true
+    clock:fire("GROUP_ROSTER_UPDATE")
+    clock:advance(5)
+    assert(status.session == session and current.dataState.pendingRequests == pending,
+        "Adding a route must preserve the active status session and request cache")
+    assert(#clock.sent == before + 3, "A new route discovers its peers at the existing status cadence")
+    local request = clock.sent[before + 1].message
+    assert(request:match("^1|Q|status|"))
+    for index = before + 1, #clock.sent do assert(clock.sent[index].message == request) end
+end
+
+-- Existing feature duplicate guards apply across transports: status and burned
+-- reports are processed once, and delayed position copies cannot refresh a pin.
+do
+    local current, clock = newAddon(nil, false, true, { guild = true, party = true })
+    local samples = 0
+    loadModule("Burned.lua", current, clock.environment)
+    current:InitializeBurned()
+    assert(current:RegisterDataStatusProvider("player", function() return { level = 24 } end,
+        function() samples = samples + 1 end))
+    clock:connect()
+    local message = "1|status|" .. full("peer-overlap", 2000000000, 1, "1=25|12=20")
+    assert(current:ReceiveData("Friend", message, "PARTY"))
+    clock:advance(1)
+    assert(not current:ReceiveData("FRIEND-Test Realm", message, "GUILD")
+        and not current:ReceiveData("Friend", message, "CHANNEL") and samples == 1)
+    local mean = current:GetGroupBurnedStatus()
+    assert(mean.count == 2 and mean.average == 10, "Overlapping native routes do not double-count burned reports")
+    message = "1|position|2|P|2000000001|37|40000|60000"
+    assert(current:ReceiveData("Friend", message, "GUILD"))
+    local peer = current:GetSharedPositions()["friend-testrealm"]
+    local receivedAt = peer.lastReceived
+    clock:advance(1)
+    assert(not current:ReceiveData("Friend", message, "PARTY")
+        and not current:ReceiveData("Friend", message, "CHANNEL"))
+    assert(current:GetSharedPositions()["friend-testrealm"] == peer and peer.lastReceived == receivedAt
+        and peer.x == 0.4 and peer.y == 0.6,
+        "Duplicate positions preserve location and original contact time")
 end
 
 print("Data tests passed.")

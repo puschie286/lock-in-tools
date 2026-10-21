@@ -116,6 +116,139 @@ do
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 
+-- Native routes connect the complete addon before its additional global channel.
+-- Overlapping deliveries keep one roster entry, position and Burned report per player.
+do
+    local aliceProfile, bobProfile = settings(nil, false), settings(OTHER_SECRET, false)
+    aliceProfile.burned, bobProfile.burned = { status = 20 }, { status = 80 }
+    local alice, aliceEnvironment, _, aliceEvent, aliceWorld = loadAddon(aliceProfile, false)
+    local bob, bobEnvironment, _, bobEvent, bobWorld = loadAddon(bobProfile, false)
+    aliceEnvironment.UnitFullName = function() return "Alice", "Test Realm" end
+    bobEnvironment.UnitFullName = function() return "Bob", "Test Realm" end
+    aliceEnvironment.UnitClass = function() return "Mage", "MAGE" end
+    bobEnvironment.UnitClass = function() return "Hunter", "HUNTER" end
+    aliceWorld.grouped, aliceWorld.guild, aliceWorld.xp = true, true, 125
+    bobWorld.grouped, bobWorld.guild, bobWorld.xp = true, true, 750
+    aliceEvent("ADDON_LOADED", "LockInTools")
+    bobEvent("ADDON_LOADED", "LockInTools")
+    assert(not alice:IsDataConnected() and not bob:IsDataConnected()
+        and #aliceWorld.statusSends == 0 and #bobWorld.statusSends == 0)
+    aliceEvent("PLAYER_LOGIN")
+    bobEvent("PLAYER_LOGIN")
+    assert(alice:IsDataConnected() and bob:IsDataConnected()
+        and not alice.dataState.channelConnected and not bob.dataState.channelConnected
+        and #aliceWorld.dataJoinCalls == 1 and #bobWorld.dataJoinCalls == 1,
+        "Party and guild start all status providers without waiting for global membership")
+    assert(alice:GetGroupFingerprint() ~= bob:GetGroupFingerprint(),
+        "Native routes deliberately have no LockInTools group identification")
+    local function deliver(sends, first, last, receive, sender)
+        for index = first, last do
+            local sent = assert(sends[index])
+            receive("CHAT_MSG_ADDON", sent.prefix, sent.message, sent.distribution, sender)
+        end
+    end
+    local function player(current, id)
+        local found, count = nil, 0
+        for _, row in ipairs(current:GetOverviewPlayers()) do
+            count = count + 1
+            if row.id == id then found = row end
+        end
+        return found, count
+    end
+    assert(#aliceWorld.statusSends == 2 and #bobWorld.statusSends == 2
+        and aliceWorld.statusSends[1].distribution == "PARTY"
+        and aliceWorld.statusSends[2].distribution == "GUILD"
+        and aliceWorld.statusSends[1].message == aliceWorld.statusSends[2].message,
+        "Every native route carries the same initial request ID and snapshot")
+    deliver(aliceWorld.statusSends, 1, 2, bobEvent, "Alice")
+    deliver(bobWorld.statusSends, 1, 2, aliceEvent, "Bob")
+    assert(#aliceWorld.statusSends == 4 and #bobWorld.statusSends == 4,
+        "A request arriving on party and guild produces one reply fanned out over both routes")
+    deliver(aliceWorld.statusSends, 3, 4, bobEvent, "Alice")
+    deliver(bobWorld.statusSends, 3, 4, aliceEvent, "Bob")
+    local bobRow, aliceCount = player(alice, "bob-testrealm")
+    local aliceRow, bobCount = player(bob, "alice-testrealm")
+    assert(aliceCount == 2 and bobCount == 2 and bobRow.online and aliceRow.online
+        and bobRow.xp == 750 and aliceRow.xp == 125
+        and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 50
+        and bob:GetGroupBurnedStatus().count == 2 and bob:GetGroupBurnedStatus().average == 50
+        and alice:GetSharedPositions()["bob-testrealm"].class == "HUNTER",
+        "Different keys still exchange XP, class, positions and Burned without double-counting")
+
+    local rosterChanges, burnedChanges, positionChanges = 0, 0, 0
+    alice:RegisterNotification("ROSTER_CHANGED", function() rosterChanges = rosterChanges + 1 end)
+    alice:RegisterNotification("BURNED_CHANGED", function() burnedChanges = burnedChanges + 1 end)
+    alice:RegisterNotification("POSITIONS_CHANGED", function() positionChanges = positionChanges + 1 end)
+    bobWorld.xp = 925
+    assert(bob:SetBurnedStatus(90))
+    bobWorld:advance(5)
+    deliver(bobWorld.statusSends, 5, 6, aliceEvent, "Bob")
+    bobRow, aliceCount = player(alice, "bob-testrealm")
+    assert(bobRow.xp == 925 and aliceCount == 2
+        and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 55
+        and rosterChanges == 1 and burnedChanges == 1 and positionChanges == 1,
+        "Duplicate broadcasts update the complete status and its embedded position once")
+    bobEnvironment.C_Map.GetPlayerMapPosition = function()
+        return { GetXY = function() return 0.6, 0.2 end }
+    end
+    bobWorld:advance(1)
+    assert(#bobWorld.dataSends == 2 and bobWorld.dataSends[1].message == bobWorld.dataSends[2].message)
+    deliver(bobWorld.dataSends, 1, 2, aliceEvent, "Bob")
+    assert(alice:GetSharedPositions()["bob-testrealm"].x == 0.6 and positionChanges == 2
+        and alice:GetGroupBurnedStatus().count == 2,
+        "Duplicate movement reports retain one position and do not affect status counts")
+
+    assert(alice:RegisterDataRequest("probe", function() return "own" end, function() end))
+    local accepted, requestID = alice:RequestData("probe", "pending")
+    assert(accepted)
+    local state = alice.dataState
+    local session, received, pending = state.status.session, state.status.received, state.pendingRequests[requestID]
+    local peer, position = alice.burnedState.peers["bob-testrealm"], alice:GetSharedPositions()["bob-testrealm"]
+    aliceWorld:completeJoin(alice:GetGroupDataChannelName(), 7)
+    assert(alice:IsDataConnected() and state.routes.CHANNEL == "7"
+        and state.status.session == session and state.status.received == received
+        and state.pendingRequests[requestID] == pending and alice.burnedState.peers["bob-testrealm"] == peer
+        and alice:GetSharedPositions()["bob-testrealm"] == position,
+        "Adding global membership preserves live providers, wire ordering and pending requests")
+    aliceWorld:notice("WRONG_PASSWORD", alice:GetGroupDataChannelName())
+    assert(alice:IsDataConnected() and not state.routes.CHANNEL and state.phase == "error"
+        and state.status.session == session and state.status.received == received
+        and state.pendingRequests[requestID] == pending and alice.burnedState.peers["bob-testrealm"] == peer
+        and alice:GetGroupBurnedStatus().average == 55,
+        "A global-channel failure leaves native delivery, pending requests and live Burned intact")
+
+    aliceWorld.grouped, aliceWorld.raid = false, true
+    bobWorld.grouped, bobWorld.raid = false, true
+    aliceEvent("GROUP_ROSTER_UPDATE")
+    bobEvent("GROUP_ROSTER_UPDATE")
+    assert(state.routes.RAID and state.routes.GUILD and not state.routes.PARTY
+        and state.status.session == session and state.pendingRequests[requestID] == pending)
+    bobWorld.xp = 975
+    local firstRaid = #bobWorld.statusSends + 1
+    bobWorld:advance(4)
+    assert(bobWorld.statusSends[firstRaid].distribution == "RAID")
+    deliver(bobWorld.statusSends, firstRaid, #bobWorld.statusSends, aliceEvent, "Bob")
+    assert(player(alice, "bob-testrealm").xp == 975 and alice:GetGroupBurnedStatus().count == 2,
+        "Party-to-raid changes send and receive status without resetting other routes")
+    aliceWorld.guild = false
+    aliceEvent("PLAYER_GUILD_UPDATE", "player")
+    assert(state.routes.RAID and not state.routes.GUILD and alice:IsDataConnected())
+    aliceWorld.raid = false
+    aliceEvent("GROUP_ROSTER_UPDATE")
+    assert(not alice:IsDataConnected() and next(state.pendingRequests) == nil
+        and alice:GetGroupBurnedStatus().count == 0,
+        "Losing every native route during global failure disconnects and retires live state")
+    aliceWorld.guild = true
+    aliceEvent("PLAYER_GUILD_UPDATE", "player")
+    assert(alice:IsDataConnected() and state.routes.GUILD and not state.routes.RAID
+        and state.status.session ~= session and alice:GetGroupBurnedStatus().count == 1)
+    local fresh = bobWorld.statusSends[firstRaid]
+    aliceEvent("CHAT_MSG_ADDON", fresh.prefix, fresh.message, "GUILD", "Bob")
+    assert(player(alice, "bob-testrealm").xp == 975 and alice:GetGroupBurnedStatus().count == 2,
+        "Guild membership restores full native status reception while global recovery continues")
+    assert(#aliceWorld.notificationErrors == 0 and #bobWorld.notificationErrors == 0)
+end
+
 -- A normal switch waits for both native channels and clears old feature/request state.
 do
     local switching, _, _, event, clock = loadAddon(settings(), false)

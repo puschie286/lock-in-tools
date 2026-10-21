@@ -83,13 +83,21 @@ local function SendFrame(self, message)
     if #message > MAX_MESSAGE_BYTES or message:find("\000", 1, true) then
         return false, "Data message exceeds the supported format."
     end
-    local id = self:GetDataChannelID()
-    if not id then return false, "Group data is disconnected." end
+    local routes = self:RefreshDataRoutes()
+    if not self:IsDataConnected() then return false, "Group data is disconnected." end
     -- No queue or automatic retry: each feature decides when its data is current.
-    local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, "CHANNEL", tostring(id))
-    if not ok or IsSecret(result) or result ~= Enum.SendAddonMessageResult.Success then
-        return false, "Data message was not accepted."
+    -- Reuse the exact frame (including request IDs) so existing protocol guards
+    -- suppress overlapping deliveries. Every route gets a chance, even on failure.
+    local accepted = false
+    for _, distribution in ipairs({ "PARTY", "RAID", "GUILD", "CHANNEL" }) do
+        local route = routes[distribution]
+        if route then
+            local target = distribution == "CHANNEL" and route or nil
+            local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, distribution, target)
+            if ok and not IsSecret(result) and result == Enum.SendAddonMessageResult.Success then accepted = true end
+        end
     end
+    if not accepted then return false, "Data message was not accepted." end
     return true
 end
 
@@ -206,7 +214,7 @@ local function ReceiveResponse(self, sender, body)
 end
 
 -- Native events supply ordinary bounded strings. Only the addon protocol needs
--- decoding; all receives enter through the connected native-channel event.
+-- decoding; all receives enter through an eligible native addon-message route.
 function addon:OnDataMessage(sender, message)
     local kind, body = message:match("^1|([^|]+)|(.*)$")
     if not kind then return false end
