@@ -1,7 +1,13 @@
 local _, addon = ...
 local UI = addon.Theme
-local WIDTH, ROW_WIDTH, ROW_HEIGHT, ROW_TOP = 326, 302, 34, 34
+local WIDTH, ROW_WIDTH, ROW_HEIGHT = 326, 302, 34
+local HEADER_HEIGHT, METER_HEIGHT = 34, 44
+local ROW_TOP = HEADER_HEIGHT + METER_HEIGHT
 local VISIBLE_ROWS = 5
+local BURNED_STEP = 10
+local BURNING_THRESHOLD, BURNING_FRAME_TIME = 70, 1 / 30
+local GLOW_TEXTURE = "Interface\\AddOns\\LockInTools\\Media\\BurningGlow.tga"
+local FLAME_TEXTURE = "Interface\\AddOns\\LockInTools\\Media\\BurningFlame.tga"
 
 local function HideTooltip(widget)
     if GameTooltip and GameTooltip:IsOwned(widget) then GameTooltip:Hide() end
@@ -72,6 +78,208 @@ local function Label(parent, text, x, y, width, size, role)
     label:SetSize(width, 16)
     if label.SetWordWrap then label:SetWordWrap(false) end
     return label
+end
+
+local function StopBurningEffect(meter)
+    local effect = meter.burningEffect
+    if not effect then return end
+    effect:SetScript("OnUpdate", nil)
+    effect.elapsed = 0
+    for _, texture in ipairs(effect.textures) do texture:Hide() end
+    effect:Hide()
+end
+
+local function PaintBurningEffect(effect)
+    local pulse = 0.89 - 0.11 * math.cos(effect.phase * math.pi * 2 / 1.8)
+    local strength = effect.strength * pulse
+    effect.glow:SetAlpha(0.9 * strength)
+    effect.innerGlow:SetAlpha(0.8 * strength)
+    effect.edgeGlow:SetAlpha(strength)
+    effect.edge:SetAlpha(0.85 + 0.15 * pulse)
+    for index, flame in ipairs(effect.flames) do
+        local wave = (math.sin(effect.phase * (4.5 + index % 5) + index * 1.7) + 1) / 2
+        flame:SetHeight((5 + ((index - 1) * 7 % 6)) * (0.65 + 0.35 * wave))
+        flame:SetAlpha((0.8 + 0.2 * wave) * strength)
+    end
+end
+
+local function AnimateBurningEffect(effect, elapsed)
+    effect.elapsed = effect.elapsed + elapsed
+    if effect.elapsed < BURNING_FRAME_TIME then return end
+    -- Keep animation work bounded after a long frame. This never polls player
+    -- data, allocates textures, or drives the group's status scheduler.
+    effect.phase = (effect.phase + math.min(effect.elapsed, 0.1)) % (math.pi * 40)
+    effect.elapsed = 0
+    PaintBurningEffect(effect)
+end
+
+local function CreateBurningEffect(meter)
+    local effect = CreateFrame("Frame", nil, meter)
+    effect:SetAllPoints(meter)
+    effect:EnableMouse(false)
+    effect:Hide()
+    effect.textures, effect.bands, effect.flames = {}, {}, {}
+    effect.elapsed, effect.phase = 0, 0
+    -- Own regions on the meter so its OVERLAY labels/thumb/ticks always remain
+    -- above the fire. The child frame only runs the visible animation driver.
+    local function Texture(layer, sublevel, path, red, green, blue)
+        local texture = meter:CreateTexture(nil, layer, nil, sublevel)
+        if path then
+            texture:SetTexture(path)
+            texture:SetVertexColor(red, green, blue)
+            texture:SetBlendMode("ADD")
+        else texture:SetColorTexture(red, green, blue, 1) end
+        effect.textures[#effect.textures + 1] = texture
+        return texture
+    end
+    effect.glow = Texture("ARTWORK", -2, GLOW_TEXTURE, 1, 0.25, 0.015)
+    effect.innerGlow = Texture("ARTWORK", -1, GLOW_TEXTURE, 1, 0.55, 0.06)
+    for index, color in ipairs({ { 1, 0.69, 0.12 }, { 1, 0.94, 0.60 }, { 1, 0.75, 0.18 },
+        { 1, 0.54, 0.04 }, { 1, 0.34, 0.02 }, { 0.82, 0.18, 0.02 } }) do
+        local band = Texture("ARTWORK", 1, nil, unpack(color))
+        band:SetPoint("TOPLEFT", meter, "TOPLEFT", 0, -(index - 1) * 2)
+        band:SetHeight(2)
+        effect.bands[index] = band
+    end
+    for index = 1, 18 do
+        local flame = Texture("ARTWORK", 2, FLAME_TEXTURE, 1, 0.82, 0.35)
+        flame:SetWidth(12)
+        effect.flames[index] = flame
+    end
+    effect.edgeGlow = Texture("ARTWORK", 2, GLOW_TEXTURE, 1, 0.48, 0.06)
+    effect.edge = Texture("ARTWORK", 3, nil, 1, 0.96, 0.70)
+    effect.edge:SetSize(2, 12)
+    effect:SetScript("OnHide", function()
+        effect:SetScript("OnUpdate", nil)
+        effect.elapsed = 0
+        for _, texture in ipairs(effect.textures) do texture:Hide() end
+    end)
+    effect:SetScript("OnShow", function()
+        if effect:IsVisible() then effect:SetScript("OnUpdate", AnimateBurningEffect) end
+    end)
+    meter.burningEffect = effect
+    return effect
+end
+
+local function RefreshBurningEffect(meter, value)
+    if not UIParent:IsVisible() or not addon:GetRankingSettings().burningEffect
+        or not value or value < BURNING_THRESHOLD then
+        StopBurningEffect(meter)
+        return
+    end
+    local effect = meter.burningEffect or CreateBurningEffect(meter)
+    local width = ROW_WIDTH * value / 100
+    effect.strength = 0.72 + 0.28 * (value - BURNING_THRESHOLD) / (100 - BURNING_THRESHOLD)
+    effect.glow:ClearAllPoints()
+    effect.glow:SetPoint("TOPLEFT", meter, "TOPLEFT", -12, 7)
+    effect.glow:SetSize(width + 24, 26)
+    effect.innerGlow:ClearAllPoints()
+    effect.innerGlow:SetPoint("TOPLEFT", meter, "TOPLEFT", -6, 3)
+    effect.innerGlow:SetSize(width + 12, 18)
+    for _, band in ipairs(effect.bands) do band:SetWidth(width) end
+    for index, flame in ipairs(effect.flames) do
+        flame:ClearAllPoints()
+        flame:SetPoint("BOTTOMLEFT", meter, "TOPLEFT", (index - 1) * (width - 12) / 17, -5)
+    end
+    effect.edgeGlow:ClearAllPoints()
+    effect.edgeGlow:SetPoint("TOPLEFT", meter, "TOPLEFT", width - 10, 5)
+    effect.edgeGlow:SetSize(20, 22)
+    effect.edge:ClearAllPoints()
+    effect.edge:SetPoint("TOPLEFT", meter, "TOPLEFT", width - 2, 0)
+    PaintBurningEffect(effect)
+    for _, texture in ipairs(effect.textures) do texture:Show() end
+    effect:Show()
+    if effect:IsVisible() then effect:SetScript("OnUpdate", AnimateBurningEffect) end
+end
+
+local function PaintMeter(meter, value, text)
+    meter.value = value
+    meter.label:SetText(text)
+    if value and value > 0 then
+        local fraction = value / 100
+        meter.fill:SetColorTexture(0.30 + 0.65 * fraction, 0.75 - 0.40 * fraction, 0.30, 1)
+        meter.fill:SetWidth(ROW_WIDTH * fraction)
+        meter.fill:Show()
+    else meter.fill:Hide() end
+    RefreshBurningEffect(meter, value)
+end
+
+local function RefreshBurnedMeters(panel)
+    local group = addon:GetGroupBurnedStatus()
+    local text = "Group burned: "
+    if group.average ~= nil then
+        text = text .. string.format("%.0f%%", group.average) .. " (" .. group.count .. " reporting)"
+    elseif addon:IsGroupSwitching() then text = text .. "switching groups"
+    elseif not addon:HasGroup() then text = text .. "no group"
+    elseif not addon:IsDataConnected() then text = text .. "disconnected"
+    else text = text .. "awaiting reports" end
+    PaintMeter(panel.groupBurned, group.average, text)
+
+    local personal = panel.personalBurned
+    local value = addon:GetBurnedStatus()
+    -- Native SetValue also fires OnValueChanged during a data refresh.
+    personal.refreshing = true
+    personal:SetValue(value)
+    personal.refreshing = nil
+    personal:SetEnabled(not addon.savedDataReadOnly)
+    personal:SetAlpha(addon.savedDataReadOnly and 0.5 or 1)
+    PaintMeter(personal, value, "Your burned status: " .. value .. "%")
+end
+
+local function CreateBurnedMeter(panel, personal)
+    local meter = CreateFrame(personal and "Slider" or "Frame", nil, panel)
+    meter:SetSize(ROW_WIDTH, 12)
+    meter:EnableMouse(true)
+    meter.label = UI:Label(meter, "", 11, "muted")
+    meter.label:SetPoint("BOTTOMLEFT", meter, "TOPLEFT", 0, 5)
+    meter.label:SetSize(ROW_WIDTH, 16)
+    if meter.label.SetWordWrap then meter.label:SetWordWrap(false) end
+    meter.track = meter:CreateTexture(nil, "BACKGROUND")
+    meter.track:SetAllPoints(meter)
+    meter.track:SetColorTexture(0.12, 0.16, 0.20, 1)
+    meter.fill = meter:CreateTexture(nil, "ARTWORK")
+    meter.fill:SetPoint("TOPLEFT", meter, "TOPLEFT")
+    meter.fill:SetHeight(12)
+    if personal then
+        meter:SetOrientation("HORIZONTAL")
+        meter:SetMinMaxValues(0, 100)
+        meter:SetValueStep(BURNED_STEP)
+        meter.ticks = {}
+        for index = 0, 100 / BURNED_STEP do
+            local tick = meter:CreateTexture(nil, "OVERLAY")
+            tick:SetColorTexture(0.60, 0.67, 0.76, 0.7)
+            tick:SetSize(1, 3)
+            tick:SetPoint("TOPLEFT", meter, "BOTTOMLEFT", (ROW_WIDTH - 1) * index * BURNED_STEP / 100, -2)
+            meter.ticks[index] = tick
+        end
+        local thumb = meter:CreateTexture(nil, "OVERLAY")
+        thumb:SetColorTexture(0.91, 0.94, 0.98, 1)
+        thumb:SetSize(5, 18)
+        meter:SetThumbTexture(thumb)
+        meter:SetScript("OnValueChanged", function(_, value)
+            if meter.refreshing then return end
+            if not addon.savedDataReadOnly and addon.initialized and addon.ready then
+                -- Snap user edits only; old saved reports and group averages
+                -- retain their precision when the overlay simply repaints.
+                value = math.max(0, math.min(100, math.floor(value / BURNED_STEP + 0.5) * BURNED_STEP))
+                if value ~= addon:GetBurnedStatus() then
+                    local success, message = addon:SetBurnedStatus(value)
+                    if not success and message then addon:Print(message) end
+                end
+            end
+            addon:RefreshRankingOverlay()
+        end)
+        Tooltip(panel, meter, "Your burned status", function()
+            if addon.savedDataReadOnly then return "Update LockInTools before changing your saved burned status." end
+            return "Drag in 10% steps to set how burned you feel: 0% is fresh, 100% is fully burned. "
+                .. "Your status is saved and shared with your LockInTools group."
+        end)
+    else
+        Tooltip(panel, meter, "Group burned status", "Average burned status of connected group members "
+            .. "with current reports, including you. Members without a current report are left out. "
+            .. "0% is fresh; 100% is fully burned.")
+    end
+    return meter
 end
 
 local function CreateRow(panel)
@@ -253,7 +461,7 @@ local function CreateOverlay()
 
     panel.header = CreateFrame("Button", nil, panel)
     panel.header:SetPoint("TOPLEFT", 1, -1)
-    panel.header:SetSize(WIDTH - 38, ROW_TOP - 1)
+    panel.header:SetSize(WIDTH - 38, HEADER_HEIGHT - 1)
     MakeDraggable(panel, panel.header)
     panel.header:RegisterForClicks("LeftButtonUp")
     panel.header:SetScript("OnDoubleClick", function(_, button)
@@ -263,6 +471,9 @@ local function CreateOverlay()
         if panel.actionMenu then panel.actionMenu:Hide() end
         addon:OpenOverview()
     end)
+    panel.groupBurned = CreateBurnedMeter(panel, false)
+    panel.groupBurned:SetPoint("TOPLEFT", 12, -HEADER_HEIGHT - 23)
+    panel.personalBurned = CreateBurnedMeter(panel, true)
     panel.rows = {}
     for index = 1, VISIBLE_ROWS do
         local row = CreateRow(panel)
@@ -290,6 +501,8 @@ local function CreateOverlay()
         HideTooltips(panel)
         if panel.actionMenu then panel.actionMenu:Hide() end
         panel:SetScript("OnUpdate", nil)
+        StopBurningEffect(panel.groupBurned)
+        StopBurningEffect(panel.personalBurned)
         if panel.moving then addon:SaveRankingPosition() end
     end)
     return panel
@@ -358,7 +571,10 @@ function addon:RefreshRankingOverlay()
         panel.empty:Show()
         bottom = bottom + ROW_HEIGHT
     end
-    panel:SetHeight(bottom + 12)
+    panel.personalBurned:ClearAllPoints()
+    panel.personalBurned:SetPoint("TOPLEFT", 12, -bottom - 25)
+    RefreshBurnedMeters(panel)
+    panel:SetHeight(bottom + METER_HEIGHT + 8)
     UI:Fit(panel)
     panel:Show()
     if panel.actionMenu and panel.actionMenu:IsShown() then panel.actionMenu:Refresh() end
@@ -369,7 +585,7 @@ function addon:OnRankingLogin()
 end
 
 for _, notification in ipairs({ "GROUP_CHANGED", "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED",
-    "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED" }) do
+    "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED", "BURNED_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshRankingOverlay() end)
 end
 

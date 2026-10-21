@@ -75,7 +75,7 @@ do
     local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world:initialize()
     local calls = {}
-    for _, name in ipairs({ "SetChatAutoJoin", "SetPositionSharing", "SetPositionRetention" }) do
+    for _, name in ipairs({ "SetChatAutoJoin", "SetPositionSharing", "SetPositionRetention", "SetRankingBurningEffect" }) do
         local setter, name = addon[name], name
         calls[name] = 0
         addon[name] = function(self, ...)
@@ -89,19 +89,24 @@ do
     panel.autoJoin:SetChecked(true)
     panel.positionSharing:SetChecked(true)
     panel.positionRetention:SetChecked(false)
+    panel.rankingBurningEffect:SetChecked(false)
     addon:RefreshOptions()
-    assert(not addon.db.chat.autoJoin and not addon.db.position.sharing and addon.db.position.keepLastKnown)
+    assert(not addon.db.chat.autoJoin and not addon.db.position.sharing and addon.db.position.keepLastKnown
+        and addon:GetRankingSettings().burningEffect and panel.rankingBurningEffect:GetChecked())
     for _, count in pairs(calls) do assert(count == 0) end
     addon.mainPanel:Hide()
     addon:OpenOptions()
     panel.autoJoin:Click()
     panel.positionSharing:Click()
     panel.positionRetention:Click()
+    panel.rankingBurningEffect:Click()
     addon.mainPanel:Hide()
     addon:OpenOptions()
     assert(panel.autoJoin:GetChecked() and panel.positionSharing:GetChecked()
-        and not panel.positionRetention:GetChecked())
+        and not panel.positionRetention:GetChecked() and not panel.rankingBurningEffect:GetChecked())
     assert(addon.db.chat.autoJoin and addon.db.position.sharing and not addon.db.position.keepLastKnown)
+    assert(not addon.db.ranking.enabled and not addon.db.ranking.burningEffect,
+        "The effect preference stays editable and persists independently of overlay visibility")
     for _, count in pairs(calls) do assert(count == 1) end
 end
 
@@ -115,12 +120,13 @@ do
     addon:OpenOptions()
     local panel = addon.optionsPanel
     for _, control in ipairs({ panel.secret, panel.applyGroup, panel.createGroup,
-        panel.autoJoin, panel.positionSharing, panel.positionRetention }) do
+        panel.autoJoin, panel.positionSharing, panel.positionRetention, panel.rankingBurningEffect }) do
         assert(not control:IsEnabled())
     end
     for _, preference in ipairs({ { panel.autoJoin, addon.db.chat, "autoJoin" },
         { panel.positionSharing, addon.db.position, "sharing" },
-        { panel.positionRetention, addon.db.position, "keepLastKnown" } }) do
+        { panel.positionRetention, addon.db.position, "keepLastKnown" },
+        { panel.rankingBurningEffect, addon:GetRankingSettings(), "burningEffect" } }) do
         local control, model, key = unpack(preference)
         local previous = model[key]
         control:SetChecked(not previous)
@@ -130,14 +136,14 @@ do
     end
     panel.tabs.chat:Click()
     panel.content:Click()
-    for _, event in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED" }) do
+    for _, event in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RANKING_CHANGED" }) do
         addon:Notify(event)
     end
     assert(panel.secret:GetText() == "" and panel.ownSecret:GetText() == "")
     addon.contentPanel.options:Click()
     assert(panel.selectedTab == "chat" and not panel.autoJoin:IsEnabled())
     assert(api.LockInToolsDB == saved and saved.schemaVersion == 4 and saved.important == "keep"
-        and saved.group.secret == SECRET and not saved.chat.autoJoin)
+        and saved.group.secret == SECRET and not saved.chat.autoJoin and saved.ranking == nil)
 end
 
 -- Every settings help path uses the global anchor and retains owner-based cleanup.
@@ -162,6 +168,15 @@ do
             "checkboxes, labels and disabled control help share global tooltip positioning")
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown(), "leaving each control dismisses its own help")
+    end
+    panel.tabs.ranking:Click()
+    for _, widget in ipairs({ panel.rankingBurningEffect, panel.rankingBurningEffect.labelButton }) do
+        widget.scripts.OnEnter(widget)
+        assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR"
+            and tooltip.lines[1]:find("70%%") and tooltip.lines[1]:find("both burned meters"),
+            "Burning effect help explains its threshold and both meters using the shared tooltip")
+        widget.scripts.OnLeave(widget)
+        assert(not tooltip:IsShown())
     end
     panel.tabs.restedxp:Click()
     panel.restedxpBattleTag.scripts.OnEnter(panel.restedxpBattleTag)

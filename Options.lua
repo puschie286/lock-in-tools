@@ -613,11 +613,20 @@ local function CreateOptionsPanel()
         "Show the top five characters, plus your own rank when outside the top five. Chat and position sharing can stay off.\n\n"
             .. "This preference saves across reloads and characters.")
 
+    panel.rankingBurningEffect = UI:Checkbox(ranking)
+    panel.rankingBurningEffect:SetPoint("TOPLEFT", 12, -134)
+    panel.rankingBurningEffect:SetSize(28, 28)
+    BindPreference(panel, panel.rankingBurningEffect, function() return addon:GetRankingSettings().burningEffect end,
+        addon.SetRankingBurningEffect)
+    PreferenceLabel(ranking, panel.rankingBurningEffect, "Enable burning effect",
+        "Add bright glow and animated flames to both burned meters at 70% and above. Turn this off to hide the effect.\n\n"
+            .. "This preference saves across reloads and characters.")
+
     local rankingHint = UI:Label(ranking,
         "Use /lit ranking to show or hide it. Hold Shift and drag the title or a player row to move it.\n"
             .. "See Content > Overview for all players.\n"
             .. "Hover a player for XP and location; right-click for Invite or Request to join.", 12, "muted")
-    rankingHint:SetPoint("TOPLEFT", 16, -138)
+    rankingHint:SetPoint("TOPLEFT", 16, -178)
     rankingHint:SetSize(648, 60)
 
     CreateRestedXPPage(panel)
@@ -714,6 +723,8 @@ function addon:RefreshOptions()
     local ranking = self:GetRankingSettings()
     panel.rankingEnabled:SetChecked(ranking.enabled and not self.rankingOverlayDismissed)
     panel.rankingEnabled:SetEnabled(editable)
+    panel.rankingBurningEffect:SetChecked(ranking.burningEffect)
+    panel.rankingBurningEffect:SetEnabled(editable)
     panel.join:SetEnabled(self.ready and hasGroup and not switching)
     panel.leave:SetEnabled(self.ready and hasGroup and not switching)
     RefreshRestedXP(panel)

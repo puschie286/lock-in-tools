@@ -66,6 +66,7 @@ local function loadOptions(uiAddon, uiEnvironment)
         if self.parent then self.parent.texturePaints = (self.parent.texturePaints or 0) + 1 end
     end
     function methods:SetVertexColor(...) self.vertexColor = { ... } end
+    function methods:SetBlendMode(mode) self.blendMode = mode end
     function methods:SetTexture(texture) self.texture = texture end
     function methods:SetParent(parent)
         if self.parent then
@@ -174,8 +175,9 @@ local function loadOptions(uiAddon, uiEnvironment)
         fontString:SetParent(self)
         return fontString
     end
-    function methods:CreateTexture()
+    function methods:CreateTexture(name, layer, template, sublevel)
         local texture = makeWidget()
+        texture.name, texture.layer, texture.template, texture.sublevel = name, layer, template, sublevel
         texture:SetParent(self)
         return texture
     end

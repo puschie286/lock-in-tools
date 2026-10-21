@@ -1185,13 +1185,13 @@ do
         assert(received.sequence == revision and equal(received.fields, expected))
         assert(contacts[#contacts].metadata.synchronized)
     end
-    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|12=future|65535=edge")))
+    assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|13=future|65535=edge")))
     sample(1, { level = "25" })
-    assert(receive(current, "Friend", full("peer", 2000000001, 5, "1=25|12=changed|13=|65535=edge")))
+    assert(receive(current, "Friend", full("peer", 2000000001, 5, "1=25|13=changed|14=|65535=edge")))
     sample(5, { level = "25" })
-    assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25|12=conflict|13=|65535=edge")))
+    assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25|13=conflict|14=|65535=edge")))
     assert(not receive(current, "Friend", full("peer", 2000000002, 5, "1=25")))
-    assert(receive(current, "Friend", full("peer", 2000000002, 5, "1=25|12=changed|13=|65535=edge")))
+    assert(receive(current, "Friend", full("peer", 2000000002, 5, "1=25|13=changed|14=|65535=edge")))
     sample(5, { level = "25" })
     assert(receive(current, "Friend", full("peer", 2000000003, 8, "1=25|2=10")))
     sample(8, { level = "25", xp = "10" })
@@ -1561,6 +1561,75 @@ do
         "Reconnect keeps the last reported XP stale until the shared status response arrives")
     bus:pump()
     assert(player(alice, "Bob").xp == 200 and not player(alice, "Bob").xpStale)
+end
+
+-- Burned reports ride the shared snapshots, include the local value exactly
+-- once, and never interpret an older client's omitted field as a zero.
+do
+    local bus = newRequestBus(false, function(client)
+        loadModule("Burned.lua", client.addon, client.world.environment)
+        client.addon:InitializeBurned()
+        assert(client.addon:SetBurnedStatus(({ Alice = 30, Bob = 60, Carol = 90 })[client.name]))
+    end)
+    bus:pump()
+    local alice, bob = bus.clients[1], bus.clients[2]
+    for _, client in ipairs(bus.clients) do
+        local mean = client.addon:GetGroupBurnedStatus()
+        assert(mean.count == 3 and mean.average == 60,
+            "Native request/reply echoes must not double-count the local character")
+        for _, packet in ipairs(client.world.nativeSends) do
+            assert(#packet.message <= 255 and packet.message:find("|12=", 1, true),
+                "Burned status uses field 12 within ordinary bounded player snapshots")
+        end
+    end
+    local changes = 0
+    alice.addon:RegisterNotification("BURNED_CHANGED", function() changes = changes + 1 end)
+    local sends = #alice.world.nativeSends
+    assert(alice.addon:SetBurnedStatus(31.4) and alice.addon:SetBurnedStatus(80))
+    assert(alice.addon:GetGroupBurnedStatus().average == 230 / 3)
+    alice.world:advance(4); bus:pump()
+    assert(#alice.world.nativeSends == sends and bob.addon:GetGroupBurnedStatus().average == 60)
+    alice.world:advance(1); bus:pump()
+    assert(#alice.world.nativeSends == sends + 1 and bob.addon:GetGroupBurnedStatus().average == 230 / 3,
+        "Dragging sends the newest integer through the existing five-second status cadence")
+    alice.world:advance(84.9)
+    assert(alice.addon:GetGroupBurnedStatus().count == 3)
+    local beforeExpiry = changes
+    alice.world:advance(0.1)
+    local mean = alice.addon:GetGroupBurnedStatus()
+    assert(mean.count == 1 and mean.average == 80 and changes > beforeExpiry,
+        "Unrefreshed peers expire after 90 seconds and notify the meter without new packets")
+    assert(receive(alice.addon, "Friend", full("friend", 2000000090, 1, "12=20")))
+    assert(alice.addon:GetGroupBurnedStatus().average == 50)
+    local revision = 1
+    for _, body in ipairs({ "1=24", "12=101", "12=-1", "12=1.5", "12=nan", "12=" }) do
+        revision = revision + 1
+        assert(receive(alice.addon, "Friend", full("friend", 2000000090, revision, body)))
+        assert(alice.addon:GetGroupBurnedStatus().count == 1,
+            "Missing and invalid values must withdraw a peer's old contribution")
+        revision = revision + 1
+        assert(receive(alice.addon, "Friend", full("friend", 2000000090, revision, "12=20")))
+    end
+    assert(not receive(alice.addon, "Friend", full("friend", 2000000090, 1, "12=100")))
+    assert(alice.addon:GetGroupBurnedStatus().average == 50,
+        "An old status revision cannot overwrite a current burned report")
+    alice.world:disconnect()
+    assert(alice.addon:GetGroupBurnedStatus().average == nil
+        and alice.addon:GetGroupBurnedStatus().count == 0 and next(alice.addon.burnedState.peers) == nil)
+    alice.world:connect()
+    assert(alice.addon:GetGroupBurnedStatus().average == 80 and alice.addon:GetGroupBurnedStatus().count == 1,
+        "Reconnect waits for fresh remote values while retaining the personal setting")
+    assert(receive(alice.addon, "Friend", full("friend-new", 2000000090, 1, "12=20")))
+    assert(alice.addon:SetGroupSecret("new-burned-group"))
+    assert(alice.addon:GetGroupBurnedStatus().count == 0 and next(alice.addon.burnedState.peers) == nil,
+        "Group switching hides and discards old reports immediately")
+    alice.world:advance(0)
+    alice.world:member(12)
+    assert(alice.addon:GetGroupBurnedStatus().count == 1 and alice.addon:GetBurnedStatus() == 80)
+    alice.world:fire("PLAYER_LOGOUT")
+    alice.world:advance(100)
+    assert(alice.addon:GetGroupBurnedStatus().count == 0 and alice.world:activeTimers() == 0,
+        "Logout cancels presence expiry and transport work")
 end
 
 print("Data tests passed.")

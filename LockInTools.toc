@@ -19,6 +19,7 @@ Chat.lua
 DataChannel.lua
 Data.lua
 DataStatus.lua
+Burned.lua
 Position.lua
 Roster.lua
 Ranking.lua

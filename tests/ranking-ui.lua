@@ -63,6 +63,7 @@ do
     ranking:Notify("ROSTER_CHANGED")
     ranking:Notify("DATA_CHANGED")
     ranking:Notify("GROUP_CHANGED")
+    ranking:Notify("BURNED_CHANGED")
     ranking:RefreshRankingOverlay()
     assert(not panel:IsShown() and not panel.scripts.OnUpdate,
         "status, connection and group events cannot reopen a dismissed overlay")
@@ -117,6 +118,312 @@ do
     header.scripts.OnDoubleClick(header, "LeftButton")
     assert(content:IsVisible() and not ranking.optionsPanel:IsVisible() and panel:IsVisible(),
         "double clicks return from Settings to Overview and keep an already open Overview visible")
+end
+
+-- Burned meters distinguish an unknown average from zero; repainting never sends edits.
+do
+    local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local personalValue, groupState, edits = 20, { average = 45, count = 2 }, {}
+    ranking.GetBurnedStatus = function() return personalValue end
+    ranking.GetGroupBurnedStatus = function() return groupState end
+    ranking.SetBurnedStatus = function(self, value)
+        edits[#edits + 1] = value
+        personalValue = value
+        self:Notify("BURNED_CHANGED")
+        return true
+    end
+    local anchors = {}
+    api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
+        anchors[#anchors + 1] = owner
+        tooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    end
+    assert(ranking:SetRankingEnabled(true))
+    local panel, tooltip = ranking.rankingOverlay, api.GameTooltip
+    local group, personal = panel.groupBurned, panel.personalBurned
+    local minimum, maximum = personal:GetMinMaxValues()
+    assert(group and group:IsShown() and personal:IsShown()
+        and personal.frameType == "Slider" and personal.orientation == "HORIZONTAL"
+        and minimum == 0 and maximum == 100 and personal.valueStep == 10 and personal:IsEnabled(),
+        "ranking exposes the group meter and a native horizontal 0-100 personal slider in ten-percent steps")
+    for index = 0, 10 do
+        assert(personal.ticks[index] and personal.ticks[index]:IsShown(),
+            "the personal slider marks each selectable ten-percent point, including its endpoints")
+    end
+    assert(group.value == 45 and group.fill:IsShown()
+        and group.fill:GetWidth() == group.track:GetWidth() * 0.45
+        and personal:GetValue() == 20 and personal.label:GetText():find("20%%") and #edits == 0,
+        "opening ranking paints the average and saved personal value without sending a personal edit")
+    personal:SetValue(73.6)
+    assert(#edits == 1 and edits[1] == 70 and personal:GetValue() == 70
+        and personal.label:GetText():find("70%%"),
+        "dragging snaps to the nearest ten percent and emits one personal edit despite its synchronous refresh event")
+    for _, sample in ipairs({ { 0, 0 }, { 100, 100 }, { 4.9, 0 }, { 5, 10 },
+        { 14.9, 10 }, { 15, 20 }, { 94.9, 90 }, { 95, 100 } }) do
+        local previous = #edits
+        local expectedWrites = personalValue == sample[2] and 0 or 1
+        personal:SetValue(sample[1])
+        assert(#edits == previous + expectedWrites and edits[#edits] == sample[2]
+            and personal:GetValue() == sample[2],
+            "personal input snaps at five-percent boundaries and does not repeat a write in the same ten-percent bucket")
+    end
+    local sameBucketEdits = #edits
+    for _, value in ipairs({ 99.9, 96, 95.1 }) do personal:SetValue(value) end
+    assert(#edits == sameBucketEdits and personal:GetValue() == 100,
+        "dragging within a selected ten-percent bucket restores its fixed point without duplicate model writes")
+    local previousEdits = #edits
+    personalValue, groupState.average = 19, 33.3
+    ranking:Notify("DATA_CHANGED")
+    assert(personal:GetValue() == 19 and group.value == 33.3 and #edits == previousEdits,
+        "data refresh updates both meters without writing the model")
+    groupState.average, groupState.count = 60, 3
+    ranking:Notify("BURNED_CHANGED")
+    assert(group.value == 60 and group.fill:GetWidth() == group.track:GetWidth() * 0.6
+        and #edits == previousEdits, "burned notifications immediately repaint the group average without local writes")
+    groupState.average, groupState.count = nil, 0
+    ranking:Notify("ROSTER_CHANGED")
+    local unknownLabel = group.label:GetText()
+    assert(group.value == nil and not group.fill:IsShown() and unknownLabel ~= "",
+        "no reports leave an explained unknown average instead of an invented zero")
+    groupState.average, groupState.count = 0, 1
+    ranking:Notify("BURNED_CHANGED")
+    assert(group.value == 0 and group.label:GetText():find("0%%")
+        and group.label:GetText() ~= unknownLabel and #edits == previousEdits,
+        "a known zero average remains distinct from an unknown average")
+    group.scripts.OnEnter(group)
+    assert(tooltip:IsShown() and tooltip:IsOwned(group) and anchors[#anchors] == group
+        and tooltip.anchor == "ANCHOR_CURSOR", "the group meter uses native global tooltip positioning")
+    personal.scripts.OnEnter(personal)
+    group.scripts.OnLeave(group)
+    assert(tooltip:IsShown() and tooltip:IsOwned(personal) and anchors[#anchors] == personal,
+        "personal meter help uses native positioning and another meter cannot dismiss it")
+    api.UIParent:Hide()
+    assert(not tooltip:IsShown(), "hiding the interface dismisses burned meter help")
+    api.UIParent:Show()
+    assert(#edits == previousEdits and personal:GetValue() == 19,
+        "showing the interface restores burned meters without treating repaint as input")
+    personal.scripts.OnEnter(personal)
+    panel.CloseButton:Click()
+    assert(not tooltip:IsShown() and not panel:IsShown(), "closing ranking clears personal meter help")
+end
+
+-- Burning is a local visual preference: high meters animate independently and stop when hidden.
+do
+    local saved = settings(SECRET, false)
+    saved.burned = { status = 69 }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
+    loadOverlay(ranking, api)
+    local groupState = { average = 69.9, count = 2 }
+    ranking.GetGroupBurnedStatus = function() return groupState end
+    local modelWrites, setBurned = 0, ranking.SetBurnedStatus
+    ranking.SetBurnedStatus = function(self, value)
+        modelWrites = modelWrites + 1
+        return setBurned(self, value)
+    end
+    assert(ranking:SetRankingEnabled(true))
+    local panel = ranking.rankingOverlay
+    local group, personal = panel.groupBurned, panel.personalBurned
+    assert(ranking:GetRankingSettings().burningEffect and not group.burningEffect and not personal.burningEffect,
+        "the default-on burning preference allocates no effect regions while both meters are below seventy percent")
+
+    local function active(meter)
+        local effect = meter.burningEffect
+        return effect and effect:IsShown() and effect:IsVisible() and effect.scripts.OnUpdate ~= nil
+    end
+    local function stopped(meter)
+        local effect = meter.burningEffect
+        if not effect then return true end
+        if effect:IsShown() or effect.scripts.OnUpdate then return false end
+        for _, texture in ipairs(effect.textures) do
+            if texture:IsShown() then return false end
+        end
+        return true
+    end
+    local function descendants(widget)
+        local count = 0
+        for _, child in ipairs(widget.children) do count = count + 1 + descendants(child) end
+        return count
+    end
+    local function ordinaryFill(meter, value)
+        local fraction, color = value / 100, meter.fill.textureColor
+        return meter.fill:IsShown() and color
+            and math.abs(color[1] - (0.30 + 0.65 * fraction)) < 0.000001
+            and math.abs(color[2] - (0.75 - 0.40 * fraction)) < 0.000001
+            and color[3] == 0.30 and color[4] == 1
+            and meter.fill:GetWidth() == meter:GetWidth() * fraction
+    end
+    local function sends()
+        return #world.dataSends + #world.statusSends + #world.rosterSends + #world.guideSends
+    end
+
+    groupState.average = 70
+    ranking:Notify("BURNED_CHANGED")
+    assert(active(group) and not personal.burningEffect and ranking:GetBurnedStatus() == 69 and modelWrites == 0,
+        "the group effect begins at seventy percent independently of a personal value below the threshold")
+    personal:SetValue(76)
+    local groupEffect, personalEffect = group.burningEffect, personal.burningEffect
+    assert(active(group) and active(personal) and modelWrites == 1 and ranking:GetBurnedStatus() == 80
+        and personal:GetValue() == 80 and personal.valueStep == 10
+        and groupEffect.mouseEnabled ~= true and personalEffect.mouseEnabled ~= true,
+        "a hot personal edit still snaps to ten percent and activates a visual that does not capture slider input")
+    for index = 0, 10 do
+        assert(personal.ticks[index]:IsShown(), "burning leaves every personal fixed-point tick visible")
+    end
+
+    ranking:OpenOptions("ranking")
+    local options = ranking.optionsPanel
+    assert(options.rankingBurningEffect:GetChecked(), "Ranking Settings exposes the enabled burning preference")
+    local timerCalls, timerAfter, timerNew = 0, api.C_Timer.After, api.C_Timer.NewTimer
+    api.C_Timer.After = function(...)
+        timerCalls = timerCalls + 1
+        return timerAfter(...)
+    end
+    api.C_Timer.NewTimer = function(...)
+        timerCalls = timerCalls + 1
+        return timerNew(...)
+    end
+    local beforeSends, beforeWrites = sends(), modelWrites
+    local groupLabel, personalLabel = group.label:GetText(), personal.label:GetText()
+    options.rankingBurningEffect:Click()
+    assert(not saved.ranking.burningEffect and not options.rankingBurningEffect:GetChecked()
+        and stopped(group) and stopped(personal) and ordinaryFill(group, 70) and ordinaryFill(personal, 80)
+        and panel:IsVisible() and saved.ranking.enabled and options:IsVisible() and options.selectedTab == "ranking"
+        and ranking:GetBurnedStatus() == 80 and group.label:GetText() == groupLabel
+        and personal.label:GetText() == personalLabel and modelWrites == beforeWrites and sends() == beforeSends,
+        "disabling burning immediately clears both effects and retains plain meters, visibility, status and group traffic")
+    options.rankingBurningEffect:Click()
+    assert(saved.ranking.burningEffect and options.rankingBurningEffect:GetChecked()
+        and active(group) and active(personal) and group.burningEffect == groupEffect
+        and personal.burningEffect == personalEffect and modelWrites == beforeWrites and sends() == beforeSends,
+        "reenabling burning immediately reuses the hot meters' effects without changing or broadcasting status")
+
+    local regions = descendants(panel)
+    for _ = 1, 20 do ranking:RefreshRankingOverlay() end
+    local flame, heightChanges = personalEffect.flames[1], 0
+    local setHeight = flame.SetHeight
+    flame.SetHeight = function(self, value)
+        heightChanges = heightChanges + 1
+        return setHeight(self, value)
+    end
+    for _ = 1, 3 do personalEffect:AdvanceFrame(1 / 120) end
+    assert(heightChanges == 0, "burning skips texture work between its thirty-frame-per-second drawing intervals")
+    personalEffect:AdvanceFrame(0.01)
+    assert(heightChanges == 1, "burning updates its flame geometry once when the drawing interval elapses")
+    personalEffect:AdvanceFrame(1)
+    groupEffect:AdvanceFrame(1)
+    assert(heightChanges == 2 and descendants(panel) == regions and group.burningEffect == groupEffect
+        and personal.burningEffect == personalEffect and timerCalls == 0
+        and modelWrites == beforeWrites and sends() == beforeSends,
+        "redraws and animation reuse existing regions, bound long-frame work and never schedule timers or send status")
+
+    groupState.average = nil
+    groupState.count = 0
+    ranking:Notify("ROSTER_CHANGED")
+    assert(stopped(group) and not group.fill:IsShown() and active(personal),
+        "an unknown group average cannot burn while a known hot personal meter continues independently")
+    groupState.average, groupState.count = 69.9, 2
+    assert(ranking:SetBurnedStatus(60))
+    assert(stopped(group) and stopped(personal) and ordinaryFill(group, 69.9) and ordinaryFill(personal, 60),
+        "dropping below seventy percent clears all burning regions and restores the ordinary fills")
+    groupState.average = 100
+    assert(ranking:SetBurnedStatus(100))
+    assert(active(group) and active(personal), "both fully burned meters resume their existing effects")
+    api.UIParent:Hide()
+    assert(not panel:IsVisible() and stopped(group) and stopped(personal),
+        "hiding the native interface clears both burning visuals and removes their update callbacks")
+    ranking:Notify("BURNED_CHANGED")
+    assert(stopped(group) and stopped(personal), "refresh notifications cannot restart burning while the interface is hidden")
+    api.UIParent:Show()
+    assert(panel:IsVisible() and active(group) and active(personal),
+        "restoring the native interface resumes burning for current hot values")
+    panel:Hide()
+    assert(stopped(group) and stopped(personal), "directly hiding the overlay also stops its burning work")
+    ranking:RefreshRankingOverlay()
+    assert(active(group) and active(personal), "showing the enabled overlay restores its current burning visuals")
+    panel.CloseButton:Click()
+    assert(not saved.ranking.enabled and stopped(group) and stopped(personal),
+        "closing ranking clears all burning textures and removes their update callbacks")
+    ranking:Notify("BURNED_CHANGED")
+    assert(not panel:IsShown() and stopped(group) and stopped(personal),
+        "later burned updates cannot restart effects on a dismissed ranking overlay")
+    assert(ranking:SetRankingEnabled(true))
+    assert(active(group) and active(personal) and descendants(panel) == regions,
+        "reopening ranking reuses the same burning textures and resumes animation for hot meters")
+end
+
+-- Disabled burning stays lazy even when both meters start at their maximum.
+do
+    local saved = settings(SECRET, false)
+    saved.ranking = { enabled = true, burningEffect = false }
+    saved.burned = { status = 100 }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    ranking.GetGroupBurnedStatus = function() return { average = 100, count = 2 } end
+    loadOverlay(ranking, api)
+    world:initialize()
+    local panel = ranking.rankingOverlay
+    assert(panel:IsVisible() and not panel.groupBurned.burningEffect and not panel.personalBurned.burningEffect
+        and panel.groupBurned.fill:IsShown() and panel.personalBurned.fill:IsShown(),
+        "a saved disabled burning preference shows plain maximum meters without allocating effect regions")
+    assert(ranking:SetRankingBurningEffect(true))
+    assert(panel.groupBurned.burningEffect:IsShown() and panel.personalBurned.burningEffect:IsShown(),
+        "enabling a saved disabled preference creates and starts both currently hot effects immediately")
+end
+
+-- A personal burned edit works before joining a group and survives another addon load.
+do
+    local saved = settings(SECRET, false)
+    saved.group = {}
+    saved.burned = { status = 19 }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    assert(ranking:SetRankingEnabled(true))
+    local personal = ranking.rankingOverlay.personalBurned
+    assert(not ranking:HasGroup() and personal:IsEnabled()
+        and personal:GetValue() == 19 and saved.burned.status == 19,
+        "personal burned status remains editable without a group and opening preserves a saved value between fixed points")
+    personal:SetValue(67)
+    assert(ranking:GetBurnedStatus() == 70 and personal:GetValue() == 70 and saved.burned.status == 70,
+        "the personal slider writes the selected ten-percent point through the production burned model without a group")
+    local restored, restoredAPI, _, _, restoredWorld = loadAddon(saved, false)
+    restoredWorld:initialize()
+    loadOverlay(restored, restoredAPI)
+    restored:RefreshRankingOverlay()
+    assert(restored:GetBurnedStatus() == 70 and restored.rankingOverlay.personalBurned:GetValue() == 70,
+        "the personal burned value and its meter survive reloading the addon")
+end
+
+-- Disabled personal meters still explain why future-schema settings cannot be edited.
+do
+    local future = settings(SECRET, false)
+    future.schemaVersion = 99
+    future.ranking = { enabled = true }
+    future.burned = { status = 61, future = "keep" }
+    local originalBurned = future.burned
+    local ranking, api, _, _, world = loadAddon(future, false)
+    loadOverlay(ranking, api)
+    world:initialize()
+    local panel, tooltip = ranking.rankingOverlay, api.GameTooltip
+    local personal, writes = panel.personalBurned, 0
+    local previous = ranking:GetBurnedStatus()
+    ranking.SetBurnedStatus = function() writes = writes + 1 end
+    assert(ranking.savedDataReadOnly and not personal:IsEnabled()
+        and personal:GetValue() == 61 and future.burned.status == 61,
+        "future-schema profiles expose a disabled personal burned meter without snapping the saved value")
+    -- A stale native callback must retain the same write guard as ordinary input.
+    personal:SetValue(previous == 100 and 0 or 100)
+    assert(writes == 0 and personal:GetValue() == previous
+        and future.burned == originalBurned and future.burned.status == 61 and future.burned.future == "keep",
+        "disabled personal meter callbacks restore the current value without writing future saved data")
+    personal.scripts.OnEnter(personal)
+    local help = tooltip.text .. " " .. table.concat(tooltip.lines, " ")
+    assert(tooltip:IsShown() and tooltip:IsOwned(personal) and help:find("Update", 1, true),
+        "disabled personal meters retain hover help explaining that an addon update is required")
+    panel.CloseButton:Click()
+    assert(not tooltip:IsShown(), "closing read-only ranking dismisses its disabled meter help")
 end
 
 -- Settings controls apply overlay preferences immediately without changing the active view.
@@ -592,8 +899,9 @@ do
     assert(not readonlyMenu.invite:IsEnabled() and not readonlyMenu.request:IsEnabled(),
         "read-only ranking party actions remain unavailable")
     readonly:OpenOptions("ranking")
-    assert(not readonly.optionsPanel.rankingEnabled:IsEnabled(),
-        "future-schema Ranking Settings cannot change saved visibility")
+    assert(not readonly.optionsPanel.rankingEnabled:IsEnabled()
+        and not readonly.optionsPanel.rankingBurningEffect:IsEnabled(),
+        "future-schema Ranking Settings cannot change saved visibility or burning effects")
     readonlyPanel.header.scripts.OnDragStart(readonlyPanel.header, "LeftButton")
     assert(readonlyPanel.moving, "Shift movement remains available for a read-only profile")
     readonlyPanel:SetPoint("CENTER", readonlyAPI.UIParent, "CENTER", 20, 30)
@@ -621,4 +929,4 @@ do
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep ranking test environments isolated")
-print("PASS: Player ranking overlay visibility, rendering, hover details, actions, updates and placement")
+print("PASS: Player ranking overlay visibility, rendering, burned meters, burning effects, hover details, actions, updates and placement")

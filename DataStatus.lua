@@ -45,6 +45,7 @@ local STATUS_FIELD_REGISTRY = {
     { 10, "partyFlags", flags = { { "inParty", 1 }, { "canInvite", 2 }, { "partyFull", 4 } } },
     { 11, "class", enum = { [0] = "unknown", [1] = "WARRIOR", [2] = "PALADIN", [3] = "HUNTER",
         [4] = "ROGUE", [5] = "PRIEST", [6] = "SHAMAN", [7] = "MAGE", [8] = "WARLOCK", [9] = "DRUID" } },
+    { 12, "burned" },
 }
 local STATUS_FIELDS, STATUS_FIELD_IDS, STATUS_FIELD_ORDER = {}, {}, {}
 local statusNames = {}

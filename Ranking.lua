@@ -23,6 +23,7 @@ function addon:InitializeRanking()
     local saved = type(database.ranking) == "table" and database.ranking or {}
     local settings = self.savedDataReadOnly and {} or saved
     settings.enabled, settings.locked = saved.enabled == true, saved.locked ~= false
+    settings.burningEffect = saved.burningEffect ~= false
     local savedPosition = saved.position
     settings.position = Position(savedPosition)
     if settings.position then
@@ -131,6 +132,14 @@ function addon:SetRankingLocked(locked)
     local success, message = Editable(self, locked)
     if not success then return false, message end
     self.rankingSettings.locked = locked
+    self:Notify("RANKING_CHANGED")
+    return true
+end
+
+function addon:SetRankingBurningEffect(enabled)
+    local success, message = Editable(self, enabled)
+    if not success then return false, message end
+    self.rankingSettings.burningEffect = enabled
     self:Notify("RANKING_CHANGED")
     return true
 end

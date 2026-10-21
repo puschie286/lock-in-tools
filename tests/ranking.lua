@@ -261,21 +261,28 @@ do
     assert(#ranking.players == 0 and ranking.own == nil)
 end
 
--- Preferences default off and locked, persist account-wide, and reject invalid values.
+-- Visibility defaults off, locking and the burning effect on; preferences persist account-wide.
 do
-    local saved = { schemaVersion = 3, group = { secret = "preserved" }, futureField = "keep" }
+    local saved = { schemaVersion = 3, group = { secret = "preserved" }, futureField = "keep",
+        ranking = { futureField = { preserved = true } } }
     local addon = newAddon(saved)
     local settings = addon:GetRankingSettings()
-    assert(settings.enabled == false and settings.locked == true and settings.position == nil)
-    assert(addon:SetRankingEnabled(true) and addon:SetRankingLocked(false))
+    assert(settings.enabled == false and settings.locked == true and settings.position == nil
+        and settings.burningEffect == true)
+    assert(addon:SetRankingEnabled(true) and addon:SetRankingLocked(false) and addon:SetRankingBurningEffect(false))
     local position = { point = "TOPRIGHT", relativePoint = "TOPRIGHT", x = -80, y = -160 }
     assert(addon:SetRankingPosition(position))
-    assert(saved.ranking.enabled == true and saved.ranking.locked == false
+    assert(saved.ranking.enabled == true and saved.ranking.locked == false and saved.ranking.burningEffect == false
         and equal(saved.ranking.position, position))
-    assert(saved.group.secret == "preserved" and saved.futureField == "keep")
-    assert(not addon:SetRankingEnabled("true") and not addon:SetRankingLocked("true"),
+    assert(saved.group.secret == "preserved" and saved.futureField == "keep" and saved.ranking.futureField.preserved)
+    assert(not addon:SetRankingEnabled("true") and not addon:SetRankingLocked("true")
+        and not addon:SetRankingBurningEffect("true"),
         "Saved overlay preferences accept booleans only")
-    assert(not addon:SetRankingEnabled(nil) and not addon:SetRankingLocked(nil))
+    assert(not addon:SetRankingEnabled(nil) and not addon:SetRankingLocked(nil) and not addon:SetRankingBurningEffect(nil))
+    for _, invalid in ipairs({ 0, 1, {}, function() end }) do
+        assert(not addon:SetRankingBurningEffect(invalid) and saved.ranking.burningEffect == false,
+            "Invalid effect values must leave the last preference intact")
+    end
     for _, invalid in ipairs({
         {},
         { point = "INVALID", relativePoint = "CENTER", x = 0, y = 0 },
@@ -289,34 +296,55 @@ do
     end
     local reloaded = newAddon(saved)
     settings = reloaded:GetRankingSettings()
-    assert(settings.enabled and not settings.locked and equal(settings.position, position),
-        "Visibility, locking and position must survive reload and character changes")
+    assert(settings.enabled and not settings.locked and not settings.burningEffect and equal(settings.position, position),
+        "Visibility, locking, burning effect and position must survive reload and character changes")
+end
+
+-- Changing the visual effect is independent of overlay visibility and status sharing.
+do
+    local addon, world = newAddon()
+    local changes = 0
+    addon:RegisterNotification("RANKING_CHANGED", function() changes = changes + 1 end)
+    addon.rankingOverlayDismissed = true
+    assert(addon:SetRankingBurningEffect(false))
+    assert(not addon:GetRankingSettings().enabled and addon.rankingOverlayDismissed == true and changes == 1,
+        "Disabling the effect must notify the UI without showing or reactivating the overlay")
+    assert(addon:SetRankingBurningEffect(true))
+    assert(addon:GetRankingSettings().burningEffect and not addon:GetRankingSettings().enabled
+        and addon.rankingOverlayDismissed == true and changes == 2 and world.reads == 0,
+        "Effect changes must not read player status or require a network transport")
 end
 
 -- Damaged settings fall back safely while preserving unrelated saved data.
 do
     for _, invalid in ipairs({ false,
-        { enabled = "yes", locked = 0, position = { point = "INVALID", x = 1, y = 2 } } }) do
+        { enabled = "yes", locked = 0, burningEffect = "no", position = { point = "INVALID", x = 1, y = 2 } } }) do
         local saved = { schemaVersion = 3, ranking = invalid, group = { secret = "preserved" } }
         local addon = newAddon(saved)
         local settings = addon:GetRankingSettings()
-        assert(settings.enabled == false and settings.locked == true and settings.position == nil)
+        assert(settings.enabled == false and settings.locked == true and settings.position == nil and settings.burningEffect)
         assert(saved.group.secret == "preserved")
+    end
+    for _, invalid in ipairs({ 0, 1, "false", {}, function() end }) do
+        local saved = { schemaVersion = 3, ranking = { burningEffect = invalid, futureField = "keep" } }
+        local addon = newAddon(saved)
+        assert(addon:GetRankingSettings().burningEffect == true and saved.ranking.burningEffect == true
+            and saved.ranking.futureField == "keep", "Only an explicit false disables the saved effect")
     end
 end
 
 -- Newer-schema profiles reject preference changes and keep all saved data untouched while moving temporarily.
 do
     local position = { point = "TOPLEFT", relativePoint = "TOPLEFT", x = 40, y = -60 }
-    local saved = { schemaVersion = 999, ranking = { enabled = true, locked = false,
+    local saved = { schemaVersion = 999, ranking = { enabled = true, locked = false, burningEffect = false,
         position = position, futureField = "keep" }, group = { secret = "preserved" } }
     local before = copy(saved)
     local addon = newAddon(saved, true)
-    assert(not addon:SetRankingEnabled(false) and not addon:SetRankingLocked(true))
+    assert(not addon:SetRankingEnabled(false) and not addon:SetRankingLocked(true) and not addon:SetRankingBurningEffect(true))
     local moved = { point = "BOTTOMRIGHT", relativePoint = "BOTTOMRIGHT", x = -90, y = 120 }
     assert(addon:SetRankingPosition(moved), "Read-only profiles still permit temporary overlay movement")
     local settings = addon:GetRankingSettings()
-    assert(settings.enabled and not settings.locked and equal(settings.position, moved))
+    assert(settings.enabled and not settings.locked and not settings.burningEffect and equal(settings.position, moved))
     assert(equal(saved, before), "Temporary placement must never write into newer-schema saved settings")
     moved.x = 999
     assert(addon:GetRankingSettings().position.x == -90, "Temporary placement must detach caller-owned values")
@@ -325,8 +353,14 @@ do
     local malformed = { schemaVersion = 999, ranking = "future-format", group = { secret = "preserved" } }
     local malformedBefore = copy(malformed)
     local future = newAddon(malformed, true)
-    assert(future:GetRankingSettings().enabled == false and future:GetRankingSettings().locked == true)
+    assert(future:GetRankingSettings().enabled == false and future:GetRankingSettings().locked == true
+        and future:GetRankingSettings().burningEffect == true)
     assert(equal(malformed, malformedBefore), "Read-only initialization must not normalize unknown settings")
+    local invalid = { schemaVersion = 999, ranking = { burningEffect = "future-value", futureField = "keep" } }
+    local invalidBefore = copy(invalid)
+    local invalidAddon = newAddon(invalid, true)
+    assert(invalidAddon:GetRankingSettings().burningEffect == true and equal(invalid, invalidBefore),
+        "Read-only normalization uses detached effect settings and leaves future values untouched")
 end
 
 -- Before initialization no operation may create or change saved preferences.
@@ -334,9 +368,12 @@ do
     local saved = { schemaVersion = 3 }
     local addon = newAddon(saved, false, true)
     addon.initialized = false
-    assert(not addon:SetRankingEnabled(true) and not addon:SetRankingLocked(false))
+    assert(not addon:SetRankingEnabled(true) and not addon:SetRankingLocked(false) and not addon:SetRankingBurningEffect(false))
     assert(not addon:SetRankingPosition({ point = "CENTER", relativePoint = "CENTER", x = 20, y = -20 }))
     assert(saved.ranking == nil)
+    addon.initialized = true
+    assert(not addon:SetRankingBurningEffect(false) and saved.ranking == nil,
+        "Effect changes must wait for ranking initialization as well as addon initialization")
 end
 
 print("Ranking model checks passed")

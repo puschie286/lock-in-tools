@@ -245,5 +245,47 @@ do
 end
 
 
+-- Burned status is account-wide, editable without a connection, and protected
+-- by the same newer-schema rules as the other saved preferences.
+do
+    local current, _, _, event, clock = loadAddon(settings("", false), false)
+    assert(current:GetBurnedStatus() == 0 and not current:SetBurnedStatus(20))
+    event("ADDON_LOADED", "LockInTools")
+    local changes = 0
+    current:RegisterNotification("BURNED_CHANGED", function() changes = changes + 1 end)
+    assert(current:GetBurnedStatus() == 0 and current.db.burned.status == 0)
+    assert(current:SetBurnedStatus(64.6) and current:GetBurnedStatus() == 65)
+    assert(current:SetBurnedStatus(65) and changes == 1,
+        "Rounding a drag to the saved integer must not cause duplicate updates")
+    for _, invalid in ipairs({ -1, 101, 0 / 0, math.huge, "50", false, {} }) do
+        assert(not current:SetBurnedStatus(invalid) and current:GetBurnedStatus() == 65)
+    end
+    assert(current:SetBurnedStatus(0) and current:SetBurnedStatus(100))
+    event("PLAYER_LOGIN")
+    clock:advance(30)
+    assert(current.db.burned.status == 100 and #clock.dataJoinCalls == 0 and #clock.statusSends == 0
+        and current:GetGroupBurnedStatus().count == 0,
+        "A personal preference without a group must not initiate traffic or invent a group average")
+    local reloaded, _, _, _, reloadClock = loadAddon(current.db, false)
+    reloadClock:initialize()
+    assert(reloaded:GetBurnedStatus() == 100, "The personal burned status survives account-wide reloads")
+    local malformed = settings("", false)
+    malformed.burned = { status = 150, future = "preserved" }
+    local repaired, _, _, _, repairClock = loadAddon(malformed, false)
+    repairClock:initialize()
+    assert(repaired:GetBurnedStatus() == 0 and malformed.burned.status == 0
+        and malformed.burned.future == "preserved")
+    local newer = settings()
+    newer.schemaVersion, newer.burned = 4, { status = 73, future = "untouched" }
+    local future, _, _, _, futureClock = loadAddon(newer, false)
+    futureClock:initialize()
+    assert(future:GetBurnedStatus() == 73 and not future:SetBurnedStatus(25)
+        and newer.burned.status == 73 and newer.burned.future == "untouched"
+        and future:GetGroupBurnedStatus().average == nil and future:GetGroupBurnedStatus().count == 0)
+    futureClock:advance(30)
+    assert(#futureClock.statusSends == 0 and #futureClock.dataJoinCalls == 0,
+        "Newer-schema status stays readable without modifying or transmitting the original preferences")
+end
+
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
 print("PASS: production data startup, preferences, routing and recovery")

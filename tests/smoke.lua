@@ -9,6 +9,7 @@ manifestFile:close()
 local channelEntry = manifest:find("\nDataChannel.lua\n", 1, true)
 local dataEntry = manifest:find("\nData.lua\n", 1, true)
 local statusEntry = manifest:find("\nDataStatus.lua\n", 1, true)
+local burnedEntry = manifest:find("\nBurned.lua\n", 1, true)
 local positionEntry = manifest:find("\nPosition.lua\n", 1, true)
 local rosterEntry = manifest:find("\nRoster.lua\n", 1, true)
 local rankingEntry = manifest:find("\nRanking.lua\n", 1, true)
@@ -20,10 +21,32 @@ assert(channelEntry and dataEntry and channelEntry < dataEntry,
 assert(dataEntry and statusEntry and positionEntry and rosterEntry
     and dataEntry < statusEntry and statusEntry < positionEntry and statusEntry < rosterEntry,
     "the native addon manifest must load status synchronization after transport and before its consumers")
+assert(burnedEntry and statusEntry < burnedEntry and burnedEntry < overlayEntry,
+    "the native manifest must load burned status after synchronization and before the ranking overlay")
 assert(rankingEntry and themeEntry and overlayEntry and optionsEntry
     and rosterEntry < rankingEntry and rankingEntry < themeEntry
     and themeEntry < overlayEntry and overlayEntry < optionsEntry,
     "the native manifest must load the ranking model after its data and the overlay after its theme")
+
+-- Fire primitives must load natively and keep soft edges. Integer overloads in
+-- the texture generator once turned every alpha into a hard zero or 255.
+for _, asset in ipairs({ { "BurningGlow.tga", 64, 64 }, { "BurningFlame.tga", 32, 64 } }) do
+    local file = assert(io.open("Media/" .. asset[1], "rb"))
+    local data = file:read("*a")
+    file:close()
+    assert(data:byte(3) == 2 and data:byte(17) == 32 and data:byte(18) == 40
+        and data:byte(13) + data:byte(14) * 256 == asset[2]
+        and data:byte(15) + data:byte(16) * 256 == asset[3]
+        and #data == 18 + asset[2] * asset[3] * 4,
+        "Burning textures use complete, uncompressed RGBA TGA images")
+    local transparent, soft = false, false
+    for offset = 22, #data, 4 do
+        local alpha = data:byte(offset)
+        if alpha == 0 then transparent = true end
+        if alpha > 0 and alpha < 255 then soft = true end
+    end
+    assert(transparent and soft, "Burning textures retain transparent backgrounds and smooth alpha edges")
+end
 
 -- Startup, migration, commands, reload and saved-variable preservation.
 local addon, environment, messages, fire, world = loadAddon(nil, false)
