@@ -137,8 +137,9 @@ do
     page:SetOffset(3)
     assert(page.rows[8].playerID == "bravo-testrealm", "unknown levels remain last when sorting descending")
     page.headers.region:Click()
-    assert(page.rows[1].playerID == "alpha-testrealm" and page.rows[2].playerID == "charlie-testrealm",
-        "region sorting uses shared map names before missing regions")
+    assert(page.rows[1].playerID == "alpha-testrealm" and page.rows[2].playerID == "self-testrealm"
+        and page.rows[3].playerID == "charlie-testrealm",
+        "region sorting includes the default shared local location before missing regions")
     overview.rosterState.peers["alpha-testrealm"].seenAt = now - 20
     overview.rosterState.peers["bravo-testrealm"].seenAt = now - 10
     page.headers.seen:Click()

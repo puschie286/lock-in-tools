@@ -84,7 +84,7 @@ function addon:OnDataLogin()
     local state = self.dataState
     self:NotifyDataConnection()
     state.nativeStarted = true
-    -- Status discovery stays active with human chat off; positions remain opt-in.
+    -- Status discovery stays active with human chat or position sharing off.
     state.wanted = self:HasGroup()
     if state.wanted then self:JoinDataChannel(false) end
 end

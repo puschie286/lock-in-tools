@@ -197,11 +197,11 @@ local function fields(payload)
     return result
 end
 
--- Existing profiles gain disabled sharing, retention and visible icons without changing group/schema data.
+-- Missing preferences enable sharing, retention and icons without changing group/schema data.
 local addon, world = newAddon()
 local fingerprint = addon:GetGroupFingerprint()
 assert(addon.db.schemaVersion == 3 and addon.db.group.secret == "otter-4827")
-assert(addon.db.position.sharing == false and addon.db.position.keepLastKnown == true)
+assert(addon.db.position.sharing == true and addon.db.position.keepLastKnown == true)
 assert(addon:GetShowPlayerIcons() == true and addon.db.position.showPlayerIcons == true)
 assert(addon.db.position.showTrails == nil and addon.db.position.trailLength == nil,
     "New profiles do not create retired movement-trail preferences")
@@ -210,21 +210,32 @@ world:connect()
 world:advance(10)
 assert(world.samples == 0 and #world.sent == 0, "Initialization must not start position sampling")
 world:login()
-world:advance(10)
-assert(world.samples == 0 and #world.sent == 0, "Sharing starts only when explicitly enabled")
-addon:SetPositionSharing(true)
 world:advance(1)
 assert(#world.sent == 0)
 world:advance(1)
-assert(#world.sent == 1 and world.samples == 1)
+assert(#world.sent == 1 and world.samples == 1, "Default sharing starts automatically after login")
 local packet = fields(world.sent[1].payload)
 assert(#packet == 6 and packet[1] == "2" and packet[2] == "P"
-    and tonumber(packet[3]) == world.epoch + 22 and tonumber(packet[4]) == 37
+    and tonumber(packet[3]) == world.epoch + 12 and tonumber(packet[4]) == 37
     and packet[5] == "25000" and packet[6] == "75000")
 world.x = 0.5
 world:advance(2)
 assert(#world.sent == 2 and world.sent[2].at - world.sent[1].at == 2)
 assert(fields(world.sent[2].payload)[5] == "50000")
+
+-- Saved opt-outs survive reload and do not sample or send; re-enabling also persists.
+do
+    local disabled = newAddon()
+    assert(disabled:SetPositionSharing(false))
+    local restored, clock = newAddon(copy(disabled.db))
+    assert(restored.db.position.sharing == false)
+    clock:connect()
+    clock:login()
+    clock:advance(4)
+    assert(clock.samples == 0 and #clock.sent == 0, "Saved opt-outs remain inactive after login")
+    assert(restored:SetPositionSharing(true))
+    assert(newAddon(copy(restored.db)).db.position.sharing == true)
+end
 
 -- Icon visibility persists independently and rejects invalid or read-only preference changes.
 do
@@ -603,9 +614,10 @@ do
     clock:advance(2)
     assert(#clock.sent == 2, "Changing visibility must not resend stationary coordinates")
 end
--- Class collection stays independent of coordinate opt-in and rejects unavailable/secret native values.
+-- Class collection stays independent of coordinate sharing and rejects unavailable/secret native values.
 do
     local classes, clock = newAddon()
+    classes:SetPositionSharing(false)
     clock.environment.UnitClass = function() return "Localized mage", "MAGE" end
     assert(clock.classProvider.collect().class == "MAGE" and clock.samples == 0
         and not classes.db.position.sharing)
@@ -698,6 +710,7 @@ end
 -- Status and movement share one fresh sample per timestamp; only an accepted public snapshot suppresses movement.
 do
     local shared, clock = newAddon()
+    shared:SetPositionSharing(false)
     clock:login()
     clock:connect()
     assert(shared:GetPositionSnapshot() == nil and clock.samples == 0)
@@ -754,7 +767,7 @@ do
     end
 end
 
--- Compact status positions use the existing movement ordering, availability and opt-in rules.
+-- Compact status positions use the existing movement ordering, availability and sharing rules.
 do
     local shared, clock = newAddon()
     clock:login()
@@ -789,7 +802,7 @@ do
     shared:SetPositionSharing(false)
     assert(not shared:ReceivePositionSnapshot("Friend", "P,37,30000,70000", clock.epoch + 4)
         and shared.positionState.peers["friend-testrealm"] == peer,
-        "Status attachments cannot bypass opt-in reception")
+        "Status attachments cannot bypass disabled sharing")
     shared:SetPositionSharing(true)
     shared.savedDataReadOnly = true
     assert(shared:GetPositionSnapshot() == nil

@@ -267,7 +267,9 @@ do
         "manual data leave removes its native window entries too")
 end
 
-local _, _, _, _, unanswered = loadAddon(settings(), false)
+local retryProfile = settings()
+retryProfile.position = { sharing = false }
+local _, _, _, _, unanswered = loadAddon(retryProfile, false)
 unanswered:initialize()
 unanswered:advance(300)
 assert(#unanswered.joinCalls > 1 and #unanswered.joinCalls <= 10)

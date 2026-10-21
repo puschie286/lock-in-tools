@@ -40,8 +40,10 @@ do
 end
 -- Production startup connects shared data independently of human chat and position preferences.
 do
+    local profile = settings(nil, false)
+    profile.position = { sharing = false }
     local connected, connectedEnvironment, connectedMessages, connectedEvent, connectedWorld =
-        loadAddon(settings(nil, false), false)
+        loadAddon(profile, false)
     connectedEnvironment.UnitClass = function(unit)
         assert(unit == "player")
         return "Mage", "MAGE"

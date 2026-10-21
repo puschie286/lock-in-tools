@@ -87,11 +87,13 @@ do
     addon:OpenOptions("position")
     local panel = addon.optionsPanel
     panel.autoJoin:SetChecked(true)
-    panel.positionSharing:SetChecked(true)
+    assert(panel.positionSharing:GetChecked(), "Position sharing defaults on in Settings")
+    panel.positionSharing:SetChecked(false)
     panel.positionRetention:SetChecked(false)
     panel.rankingBurningEffect:SetChecked(false)
     addon:RefreshOptions()
-    assert(not addon.db.chat.autoJoin and not addon.db.position.sharing and addon.db.position.keepLastKnown
+    assert(not addon.db.chat.autoJoin and addon.db.position.sharing
+        and addon.db.position.keepLastKnown
         and addon:GetRankingSettings().burningEffect and panel.rankingBurningEffect:GetChecked())
     for _, count in pairs(calls) do assert(count == 0) end
     addon.mainPanel:Hide()
@@ -102,9 +104,9 @@ do
     panel.rankingBurningEffect:Click()
     addon.mainPanel:Hide()
     addon:OpenOptions()
-    assert(panel.autoJoin:GetChecked() and panel.positionSharing:GetChecked()
+    assert(panel.autoJoin:GetChecked() and not panel.positionSharing:GetChecked()
         and not panel.positionRetention:GetChecked() and not panel.rankingBurningEffect:GetChecked())
-    assert(addon.db.chat.autoJoin and addon.db.position.sharing and not addon.db.position.keepLastKnown)
+    assert(addon.db.chat.autoJoin and not addon.db.position.sharing and not addon.db.position.keepLastKnown)
     assert(not addon.db.ranking.enabled and not addon.db.ranking.burningEffect,
         "The effect preference stays editable and persists independently of overlay visibility")
     for _, count in pairs(calls) do assert(count == 1) end

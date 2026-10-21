@@ -102,7 +102,7 @@ end
 function addon:InitializePositions()
     local settings = self.db.position
     if type(settings) ~= "table" then settings = {}; self.db.position = settings end
-    if type(settings.sharing) ~= "boolean" then settings.sharing = false end
+    if type(settings.sharing) ~= "boolean" then settings.sharing = true end
     if type(settings.keepLastKnown) ~= "boolean" then settings.keepLastKnown = true end
     if type(settings.showPlayerIcons) ~= "boolean" then settings.showPlayerIcons = true end
     if type(settings.peers) ~= "table" then settings.peers = {} end
@@ -137,7 +137,7 @@ function addon:InitializePositions()
         class = ClassToken(class)
         if class then return { class = class } end
     end, function(sender, fields)
-        -- Class is group metadata, independent of the coordinate-sharing opt-in.
+        -- Class is group metadata, independent of the coordinate-sharing preference.
         -- Status already orders snapshots; class needs no separate timestamp.
         local class = ClassToken(fields.class)
         if not class then return end
