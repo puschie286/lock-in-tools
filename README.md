@@ -48,3 +48,5 @@ From the repository root, install the local native Lua 5.1 runtime once, then ru
 The runtime lives in ignored `tools/lua/`. Verification checks addon, bundled-library and test syntax and runs every offline suite without downloading anything. Both scripts resolve repository paths themselves, so they also work when invoked by full path from another directory.
 
 See [the verification process](tests/testing.md) for offline coverage and [in-game checks](tests/testing.md#in-game-verification).
+
+For version bumps and automatic GitHub ZIP releases, see [the release process](docs/releasing.md).

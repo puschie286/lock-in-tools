@@ -1,0 +1,177 @@
+name: Release addon
+
+on:
+  push:
+    paths:
+      - LockInTools.toc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize retries of the same commit without discarding other version bumps.
+concurrency:
+  group: addon-release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect version change
+        id: version
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Read-Version([string]$Manifest) {
+            $versionLines = [regex]::Matches($Manifest, '(?m)^##[ \t]*Version:[ \t]*([^\r\n]*)')
+            if ($versionLines.Count -ne 1) {
+              throw 'LockInTools.toc must contain exactly one ## Version field.'
+            }
+            return $versionLines[0].Groups[1].Value.Trim()
+          }
+
+          $version = Read-Version (Get-Content -LiteralPath LockInTools.toc -Raw)
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
+            throw 'Use a version such as 0.4.0 or 0.4.0-beta.1 in LockInTools.toc.'
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $changed = $true
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $event.before -notmatch '^0+$') {
+            # Compare the entire push, since a version bump may precede its final commit.
+            git cat-file -e "$($event.before)^{commit}" 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              git fetch --no-tags origin $event.before
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the commit preceding this push.' }
+            }
+            $previousPath = git ls-tree --name-only $event.before -- LockInTools.toc
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the previous manifest.' }
+            if ($previousPath) {
+              $previousManifest = git show "$($event.before):LockInTools.toc"
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot read the previous manifest.' }
+              $changed = $version -cne (Read-Version ($previousManifest -join "`n"))
+            }
+          }
+
+          "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if (-not $changed) { Write-Host "Version $version is unchanged; no release needed." }
+
+      - name: Set up Lua 5.1
+        if: steps.version.outputs.changed == 'true'
+        run: .\tools\setup-lua.ps1
+
+      - name: Verify addon
+        if: steps.version.outputs.changed == 'true'
+        run: .\tools\verify.ps1
+
+      - name: Package installable ZIP
+        if: steps.version.outputs.changed == 'true'
+        env:
+          ADDON_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path .release -Force | Out-Null
+          $zipPath = ".release/LockInTools-$env:ADDON_VERSION.zip"
+          git archive --format=zip --prefix=LockInTools/ "--output=$zipPath" $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot create the release ZIP.' }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead((Join-Path $PWD $zipPath))
+          try {
+            $files = @($archive.Entries | Where-Object { -not $_.FullName.EndsWith('/') } | ForEach-Object FullName)
+            if ($files.Count -eq 0 -or @($files | Where-Object { -not $_.StartsWith('LockInTools/') }).Count -gt 0) {
+              throw 'The ZIP must contain a single LockInTools addon folder.'
+            }
+            foreach ($line in (Get-Content -LiteralPath LockInTools.toc)) {
+              $path = $line.Trim()
+              if ($path -and -not $path.StartsWith('#') -and $files -cnotcontains ('LockInTools/' + $path.Replace('\', '/'))) {
+                throw "Manifest file missing from ZIP: $path"
+              }
+            }
+            # Media is referenced dynamically; library directories also contain required notices.
+            foreach ($file in (Get-ChildItem -LiteralPath Libs, Media -File -Recurse)) {
+              $path = $file.FullName.Substring($PWD.Path.Length + 1).Replace('\', '/')
+              if ($files -cnotcontains "LockInTools/$path") { throw "Bundled file missing from ZIP: $path" }
+            }
+            if (@($files | Where-Object { $_ -match '^LockInTools/(?:\.[^/]+|AGENTS\.md$|README\.md$|docs/|tests/|tools/)' }).Count -gt 0) {
+              throw 'Development files must be excluded through .gitattributes.'
+            }
+          }
+          finally { $archive.Dispose() }
+
+      - name: Publish GitHub release
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ADDON_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          $zipPath = ".release/LockInTools-$env:ADDON_VERSION.zip"
+          $assetName = Split-Path -Leaf $zipPath
+          # Reserve the tag atomically and check GitHub, since checkout's tags may be stale.
+          $tagJson = gh api "repos/$env:GH_REPO/git/ref/tags/$tag" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $tagJson = gh api --method POST "repos/$env:GH_REPO/git/refs" `
+              --raw-field "ref=refs/tags/$tag" --raw-field "sha=$env:GITHUB_SHA"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot reserve the version tag. Retry the run if it was created concurrently.' }
+          }
+          $tagObject = ($tagJson | ConvertFrom-Json).object
+          while ($tagObject.type -eq 'tag') {
+            $tagJson = gh api "repos/$env:GH_REPO/git/tags/$($tagObject.sha)"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the annotated version tag.' }
+            $tagObject = ($tagJson | ConvertFrom-Json).object
+          }
+          if ($tagObject.type -ne 'commit' -or $tagObject.sha -ne $env:GITHUB_SHA) {
+            throw "Tag $tag already belongs to another commit. Bump the manifest version instead of reusing it."
+          }
+
+          $releaseJson = gh release view $tag --json isDraft,assets 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $releaseJson | ConvertFrom-Json
+            $assets = @($release.assets | Where-Object { $_.name -eq $assetName })
+            if ($assets.Count -gt 0 -and ($assets[0].state -ne 'uploaded' -or $assets[0].size -ne (Get-Item -LiteralPath $zipPath).Length)) {
+              # Failed uploads can leave an empty starter asset; only discard those in drafts.
+              if ($release.isDraft -and $assets[0].state -eq 'starter') {
+                gh release delete-asset $tag $assetName --yes
+                if ($LASTEXITCODE -ne 0) { throw 'Cannot remove the unfinished draft upload.' }
+                $assets = @()
+              }
+              else { throw 'The existing ZIP is incomplete or has a different size; it was preserved.' }
+            }
+            if ($assets.Count -eq 0) {
+              gh release upload $tag $zipPath
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot upload the missing ZIP; existing assets were preserved.' }
+            }
+            if ($release.isDraft) {
+              gh release edit $tag --draft=false "--prerelease=$env:IS_PRERELEASE"
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot publish the existing draft release.' }
+            }
+          }
+          else {
+            $releaseArguments = @('release', 'create', $tag, $zipPath, '--target', $env:GITHUB_SHA,
+              '--verify-tag', '--title', "LockInTools $env:ADDON_VERSION", '--generate-notes')
+            if ($env:IS_PRERELEASE -eq 'true') { $releaseArguments += '--prerelease' }
+            gh @releaseArguments
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot create the GitHub release.' }
+          }
+          "Released **$tag** with **$assetName**." >> $env:GITHUB_STEP_SUMMARY

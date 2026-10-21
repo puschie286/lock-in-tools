@@ -1,0 +1,9 @@
+# git archive builds installable releases; keep bundled library notices in Libs/.
+/.gitattributes export-ignore
+/.github export-ignore
+/.gitignore export-ignore
+/AGENTS.md export-ignore
+/README.md export-ignore
+/docs export-ignore
+/tests export-ignore
+/tools export-ignore
