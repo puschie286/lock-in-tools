@@ -42,8 +42,28 @@ end
 local function PlayerTooltip(row)
     local player = row.player
     if not player then return end
+    if not player.isSelf then
+        local position = addon:GetSharedPositions()[player.id]
+        if position or addon.db.position.keepLastKnown == false then
+            local current = {}
+            for key, value in pairs(player) do current[key] = value end
+            current.map, current.x, current.y = position and position.map, position and position.x, position and position.y
+            current.positionStamp = position and position.positionStamp
+            current.positionAvailable = position and position.positionAvailable
+            player = current
+        end
+    end
     -- Use native anchoring on hover and live refresh so global tooltip hooks apply.
     addon:ShowCompactPlayerTooltip(row, { { player = player } })
+end
+
+local function RefreshPositionTooltips()
+    local panel = addon.rankingOverlay
+    if not panel or not panel:IsVisible() or not GameTooltip or not GameTooltip:IsShown() then return end
+    for _, row in ipairs(panel.rows) do
+        if GameTooltip:IsOwned(row) then PlayerTooltip(row); return end
+    end
+    if GameTooltip:IsOwned(panel.ownRow) then PlayerTooltip(panel.ownRow) end
 end
 
 local function ClearRowInteractions(row)
@@ -606,10 +626,20 @@ function addon:OnRankingLogin()
     self:RefreshRankingOverlay()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED",
-    "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED", "BURNED_CHANGED" }) do
+for _, notification in ipairs({ "GROUP_CHANGED", "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshRankingOverlay() end)
 end
+
+-- Coordinates change tooltips, not XP standings or row layout. The visible
+-- one-second tick still refreshes contact expiry and the local player's map.
+for _, notification in ipairs({ "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED" }) do
+    addon:RegisterNotification(notification, RefreshPositionTooltips)
+end
+
+addon:RegisterNotification("BURNED_CHANGED", function()
+    local panel = addon.rankingOverlay
+    if panel and panel:IsVisible() then RefreshBurnedMeters(panel) end
+end)
 
 addon:RegisterGameEvents({ "PLAYER_LOGOUT", "UI_SCALE_CHANGED", "DISPLAY_SIZE_CHANGED" }, function(self, event)
     if event == "PLAYER_LOGOUT" then self:SaveRankingPosition()

@@ -25,10 +25,11 @@ local function LoadMap()
         db = { position = { showPlayerIcons = true, sharing = true } },
     }
     local world = {
-        frames = {}, added = 0, created = 0, released = 0, rectangles = {},
+        frames = {}, added = 0, created = 0, acquired = 0, released = 0, rectangles = {},
         bounds = {}, secretValues = {}, worldConversions = 0, now = 0,
         menuModifiers = {}, menuRegistrations = 0, serverNow = 1000,
-        overviewPlayers = {}, rankingPlayers = {}, mapNames = { [101] = "Elwynn Forest" },
+        overviewPlayers = {}, rankingPlayers = {}, overviewReads = 0, rankingReads = 0,
+        mapNames = { [101] = "Elwynn Forest" },
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
@@ -105,8 +106,14 @@ local function LoadMap()
     addon.initialized = true
     world.libraryFrames = #world.frames
     function addon:GetSharedPositions() return self.positions end
-    function addon:GetOverviewPlayers() return world.overviewPlayers end
-    function addon:GetPlayerRanking() return { players = world.rankingPlayers } end
+    function addon:GetOverviewPlayers()
+        world.overviewReads = world.overviewReads + 1
+        return world.overviewPlayers
+    end
+    function addon:GetPlayerRanking()
+        world.rankingReads = world.rankingReads + 1
+        return { players = world.rankingPlayers }
+    end
     -- Simulate a virtual template retaining its mixin table before map load.
     world.templateMixin = assert(environment.LockInToolsPositionPinMixin)
 
@@ -134,19 +141,23 @@ local function LoadMap()
             self.provider = provider
             provider:OnAdded(self)
         end
+        function map:RemovePin(pin)
+            for index, candidate in ipairs(self.pins) do
+                if candidate == pin then table.remove(self.pins, index); break end
+            end
+            pin:OnReleased()
+            assert(pin.playerName == nil and pin.online == nil and pin.provider == nil and not pin.hovered,
+                "release clears player state before returning the pin to the native pool")
+            assert(pin:GetScript("OnUpdate") == nil, "released pins stop their animation callbacks")
+            self.pool[#self.pool + 1] = pin
+        end
         function map:RemoveAllPinsByTemplate(template)
             assert(template == "LockInToolsPositionPinTemplate", "remove only LockInTools pins")
-            for _, pin in ipairs(self.pins) do
-                pin:OnReleased()
-                assert(pin.playerName == nil and pin.online == nil and pin.provider == nil and not pin.hovered,
-                    "release clears player state before returning the pin to the native pool")
-                assert(pin:GetScript("OnUpdate") == nil, "released pins stop their animation callbacks")
-                self.pool[#self.pool + 1] = pin
-            end
-            self.pins = {}
+            while #self.pins > 0 do self:RemovePin(self.pins[#self.pins]) end
         end
         function map:AcquirePin(template, ...)
             assert(template == "LockInToolsPositionPinTemplate")
+            world.acquired = world.acquired + 1
             -- Native AcquirePin expects every mixin method before it calls OnLoad.
             assert(environment.LockInToolsPositionPinMixin == world.templateMixin)
             local pin = table.remove(self.pool)
@@ -291,16 +302,17 @@ assert(#world.map.pins == 1, "omit unrelated maps while projecting a child map o
 Near(world.map.pins[1].x, 0.2)
 Near(world.map.pins[1].y, 0.4)
 Near(addon.positions.alice.x, 0.25)
-assert(world.released == 1 and world.map.unrelatedPin, "release old pins through the native base without changing other providers")
+assert(world.released == 0 and world.map.pins[1] == pin and world.map.unrelatedPin,
+    "map changes reproject existing pins without releasing them or affecting other providers")
 
 world.rectangles["102:100"] = { 0.9, 1.3, 0.1, 0.2 }
 addon.positions.outside = { name = "Outside-Realm", map = 102, x = 1, y = 0.5 }
 addon.positions.invalid = { name = "Invalid-Realm", map = 100, x = 0 / 0, y = 0.5 }
 addon.positions.alice.x = 0.75
 addon:RefreshPositionPins()
-assert(#world.map.pins == 1, "new data replaces existing pins and omits off-map or invalid coordinates")
+assert(#world.map.pins == 1, "new data updates existing pins and omits off-map or invalid coordinates")
 Near(world.map.pins[1].x, 0.4)
-assert(world.map.pins[1] == pin, "native pool reuses the released pin")
+assert(world.map.pins[1] == pin and world.acquired == 1, "movement retains the existing native pin")
 
 addon.positions = {}
 addon:RefreshPositionPins()
@@ -513,25 +525,30 @@ local function CheckCompactPlayerDetails()
     assert(tooltip:IsOwned(pin), "compact player details keep native pin ownership")
 
     player.xp, ranked.xp = 421, 421
+    compact:Notify("ROSTER_CHANGED")
     compactWorld:advance(0.11)
     CheckTooltip(tooltip, { "#7 - Alice", "Lv 30 - 57.9% (579 XP)", "Elwynn Forest" },
         "hover refresh reads new XP without requiring another position sample")
     player.online, ranked.online, player.xpStale, ranked.xpStale = false, false, true, true
+    compact:Notify("ROSTER_CHANGED")
     compactWorld:advance(0.11)
     CheckTooltip(tooltip, { "#7 - Alice", "Lv 30 - 57.9% (579 XP)", "Elwynn Forest - 2m ago" },
         "offline players retain saved XP and show contact age rather than the older position timestamp")
 
     player.level, ranked.level, player.xpState, ranked.xpState, ranked.rank = 60, 60, "max", "max", 1
+    compact:Notify("ROSTER_CHANGED")
     compactWorld:advance(0.11)
     CheckTooltip(tooltip, { "#1 - Alice", "Elwynn Forest - 2m ago" },
         "confirmed maximum-level players omit the level and missing-XP line")
     player.level, player.xpState, player.xp, player.xpMax = 30, "unknown", nil, nil
     compactWorld.rankingPlayers = {}
+    compact:Notify("ROSTER_CHANGED")
     compactWorld:advance(0.11)
     CheckTooltip(tooltip, { "#? - Alice", "Lv 30 - Awaiting XP", "Elwynn Forest - 2m ago" },
         "missing progress uses the same compact awaiting-XP fallback as the ranking overlay")
 
     player.sharing = false
+    compact:Notify("ROSTER_CHANGED")
     compactWorld:advance(0.11)
     CheckTooltip(tooltip, { "#? - Alice", "Lv 30 - Awaiting XP", "Not sharing - 2m ago" },
         "a peer who stopped sharing does not expose a cached location")
@@ -546,6 +563,7 @@ local function CheckCompactPlayerDetails()
         "missing native map names fall back safely without showing online contact ages")
 
     compactWorld.overviewPlayers = {}
+    compact:Notify("ROSTER_CHANGED")
     peer.online = false
     compact:RefreshPositionPins()
     compactWorld:advance(0.01)
@@ -576,14 +594,14 @@ local function CheckTooltipLifecycle()
         "live overlap refresh preserves the globally positioned tooltip")
     peer.online = false
     lifecycle:RefreshPositionPins()
-    assert(not tooltip:IsShown(), "rebuilding releases the previous owned tooltip before native layout")
+    assert(tooltip:IsShown() and tooltip:IsOwned(hovered), "updating a retained pin preserves its owned tooltip")
     lifecycleWorld:advance(0.01)
     hovered = FindPin(lifecycleWorld, peer.name)
     assert(tooltip:IsShown() and tooltip:IsOwned(hovered), "hover survives an offline refresh after layout")
     CheckTooltip(tooltip, { "#? - Alice", "Lv ? - Awaiting XP", "Elwynn Forest - age unknown" },
         "restored offline hover keeps the same compact format")
-    assert(#anchorOwners == 2 and anchorOwners[2] == hovered and tooltip.anchor == "ANCHOR_CURSOR",
-        "deferred hover restoration reapplies global tooltip positioning to its current owner")
+    assert(#anchorOwners == 1 and tooltip.anchor == "ANCHOR_CURSOR",
+        "incremental updates preserve the global anchor without dismissing or repositioning hover")
     peer.online = true
     lifecycle:RefreshPositionPins()
     lifecycleWorld:advance(0.01)
@@ -602,10 +620,10 @@ local function CheckTooltipLifecycle()
     local beforeAnchor = #anchorOwners
     lifecycleWorld:advance(0.01)
     assert(tooltip:IsOwned(foreignOwner) and tooltip.title == "Unrelated tooltip" and tooltip.hideCount == beforeHide,
-        "a deferred hover restoration preserves tooltips opened during native layout")
-    assert(#anchorOwners == beforeAnchor, "cancelled restoration cannot reposition another control's tooltip")
+        "an existing hover loop preserves tooltips opened by another control")
+    assert(#anchorOwners == beforeAnchor, "losing hover ownership cannot reposition another control's tooltip")
     hovered = FindPin(lifecycleWorld, peer.name)
-    assert(hovered:GetScript("OnUpdate") == nil, "a cancelled deferred restoration leaves no idle update")
+    assert(hovered:GetScript("OnUpdate") == nil, "losing hover ownership leaves no idle update")
     tooltip:Hide()
 
     lifecycleWorld:hover(hovered)
@@ -748,7 +766,7 @@ for stage, result in pairs({ source = { 1, secret }, origin = { 1, Vector(0 / 0,
         end
         return toWorld(mapID, position)
     end
-    projection:RefreshPositionPins()
+    projection.positionMapProvider:RefreshAllData()
     assert(#projectionWorld.map.pins == 0, "invalid world geometry remains hidden at " .. stage)
 end
 api.GetWorldPosFromMapPos = toWorld
@@ -860,5 +878,80 @@ Near(projectedMoving.x, 0.29)
 Near(projectedMoving.y, 0.56)
 assert(projectedMoving.map == 101 and projectedPin:GetScript("OnUpdate") == nil,
     "projected movement ends at native map coordinates without changing the shared source data")
+
+local function CheckIncrementalPins()
+    local incremental, clock = LoadMap()
+    clock.bounds[1456] = { 1000, 1400, 4000, 4600, continent = 1 }
+    clock.bounds[1412] = { 500, 2500, 2000, 6000, continent = 1 }
+    clock:loadNativeMap(true)
+    clock.map.id = 1412
+    for index = 1, 39 do
+        incremental.positions[index] = { name = "Player" .. index .. "-Realm", map = 1456,
+            x = 0.25, y = 0.5, online = true, class = "MAGE" }
+    end
+    incremental:InitializePositionMap()
+    local retained = {}
+    for index = 1, 39 do retained[index] = FindPin(clock, "Player" .. index .. "-Realm") end
+    clock:hover(retained[1])
+    local acquired, released, conversions = clock.acquired, clock.released, clock.worldConversions
+    for index = 1, 39 do
+        incremental.positions[index].x = 0.3
+        incremental:Notify("POSITIONS_CHANGED")
+    end
+    assert(clock.acquired == acquired and clock.released == released,
+        "a round of 39 moving peers updates native pins without pool churn")
+    assert(clock.worldConversions - conversions == 39 * 3,
+        "movement reprojects only changed peers instead of every visible pin on each report")
+    for index = 1, 39 do
+        assert(FindPin(clock, "Player" .. index .. "-Realm") == retained[index],
+            "unrelated peer updates preserve each sender's native pin")
+    end
+    assert(clock.tooltip:IsOwned(retained[1]) and clock.tooltip:IsShown(),
+        "overlapping hover survives movement of every peer")
+    local previousMotion = retained[1].motion
+    local replacement = { name = "Player1-Realm", map = 1456, x = 0.3, y = 0.5,
+        online = true, class = "MAGE", stamp = 1001, positionStamp = 1001 }
+    incremental.positions[1] = replacement
+    conversions = clock.worldConversions
+    incremental:Notify("POSITIONS_CHANGED")
+    assert(retained[1].positionPeer == replacement and retained[1].motion == previousMotion
+        and clock.worldConversions == conversions,
+        "stationary heartbeats replace contact data without projection work or restarting interpolation")
+    incremental.positions[2] = nil
+    incremental:Notify("POSITIONS_CHANGED")
+    assert(clock.released == released + 1 and clock.acquired == acquired
+        and FindPin(clock, "Player1-Realm") == retained[1] and #clock.map.pins == 38,
+        "removing one peer releases only its native pin")
+    replacement.class = "WARRIOR"
+    incremental:Notify("POSITIONS_CHANGED")
+    CheckDot(retained[1], { 0.78, 0.61, 0.43 }, true)
+    assert(clock.worldConversions == conversions, "class changes repaint without reprojecting coordinates")
+    clock.bounds[1412] = { 0, 2000, 2000, 6000, continent = 1 }
+    clock.map:changeMap(1412)
+    Near(retained[1].x, 0.56)
+    assert(not retained[1].motion.started,
+        "native map-art changes reproject and snap retained pins even for an unchanged map ID")
+end
+CheckIncrementalPins()
+
+local function CheckTooltipSnapshotReuse()
+    local cached, clock = LoadMap()
+    clock:loadNativeMap(true)
+    cached.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, online = true }
+    cached:InitializePositionMap()
+    clock:hover(FindPin(clock, "Alice-Realm"))
+    local overviewReads, rankingReads = clock.overviewReads, clock.rankingReads
+    for index = 1, 8 do clock:advance(0.11) end
+    assert(clock.overviewReads == overviewReads and clock.rankingReads == rankingReads,
+        "overlap animation and tooltip refreshes reuse one roster/ranking snapshot within a second")
+    clock:advance(0.22)
+    assert(clock.overviewReads == overviewReads + 1 and clock.rankingReads == rankingReads + 1,
+        "tooltip metadata refreshes periodically so silent peers can expire without another report")
+    cached:Notify("ROSTER_CHANGED")
+    clock:advance(0.11)
+    assert(clock.overviewReads == overviewReads + 2 and clock.rankingReads == rankingReads + 2,
+        "roster updates invalidate the tooltip snapshot before its periodic refresh")
+end
+CheckTooltipSnapshotReuse()
 
 print("PASS: map attachment/filter, compact player details, tooltip ownership, projection, movement and pooled lifecycle")

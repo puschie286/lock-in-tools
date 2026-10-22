@@ -666,6 +666,68 @@ do
         "explicitly closing removes the visible-only timer")
 end
 
+-- Position receives update only the owned tooltip. XP, expiry and local map
+-- changes still reach the visible overlay through their existing refresh paths.
+do
+    local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world.level = 24
+    world:initialize()
+    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
+    api.C_Map.GetMapInfo = function(map)
+        return { name = map == 37 and "Elwynn Forest" or "Westfall" }
+    end
+    loadOverlay(ranking, api)
+    assert(ranking:ReceivePlayerStatus("Friend-TestRealm", {
+        level = 24, xp = 400, xpMax = 1000, xpState = "known",
+    }, api.GetServerTime(), 1))
+    assert(ranking:ReceivePosition("Friend-TestRealm", "2|P|" .. api.GetServerTime() .. "|37|30000|70000"))
+    assert(ranking:SetRankingEnabled(true))
+    local panel, tooltip = ranking.rankingOverlay, api.GameTooltip
+    local first = panel.rows[1]
+    first.scripts.OnEnter(first)
+    assert(tooltip.lines[2] == "Elwynn Forest")
+    local rankingReads, overviewReads, paints = 0, 0, 0
+    local getRanking, getOverview, setRank = ranking.GetPlayerRanking, ranking.GetOverviewPlayers, first.rank.SetText
+    ranking.GetPlayerRanking = function(self, ...)
+        rankingReads = rankingReads + 1
+        return getRanking(self, ...)
+    end
+    ranking.GetOverviewPlayers = function(self, ...)
+        overviewReads = overviewReads + 1
+        return getOverview(self, ...)
+    end
+    first.rank.SetText = function(self, ...)
+        paints = paints + 1
+        return setRank(self, ...)
+    end
+    for _ = 1, 20 do
+        world.now = world.now + 1
+        assert(ranking:ReceivePosition("Friend-TestRealm", "2|P|" .. api.GetServerTime() .. "|38|40000|60000"))
+    end
+    ranking:Notify("POSITION_CONTACT_CHANGED")
+    assert(tooltip.lines[2] == "Westfall" and rankingReads == 0 and overviewReads == 0 and paints == 0,
+        "Movement refreshes the owned location without rebuilding standings or repainting XP rows")
+    assert(ranking:SetPositionSharing(false))
+    assert(tooltip.lines[2] == "Position sharing is off" and rankingReads == 0,
+        "The fast tooltip path must immediately respect the local sharing opt-out")
+    assert(ranking:SetPositionSharing(true))
+    assert(tooltip.lines[2] == "Westfall")
+    assert(ranking:SetPositionRetention(false))
+    world.now = world.now + 61
+    ranking:PositionTick()
+    assert(tooltip.lines[2] == "Unknown location" and rankingReads == 0,
+        "Expiring a live-only peer must clear its hovered location without rebuilding XP standings")
+    world.map = 38
+    api.C_Map.GetBestMapForUnit = function() return world.map end
+    panel.scripts.OnUpdate(panel, 1)
+    assert(rankingReads == 1 and overviewReads == 1 and panel.rows[2].player.map == 38,
+        "The visible tick still refreshes the local map and current contact metadata")
+    world.xp = 500
+    world.fire("PLAYER_XP_UPDATE", "player")
+    assert(panel.rows[1].player.isSelf and panel.rows[1].progress:GetText() == "50%",
+        "XP changes still rerank and repaint immediately after position-only updates")
+end
+
 -- Compact hover details show missing XP, location and offline-only contact age;
 -- refreshed pooled rows retain their original privacy guards.
 do

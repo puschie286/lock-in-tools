@@ -193,14 +193,21 @@ local function Copy(player)
     return row
 end
 
-function addon:GetPlayerRanking()
+local function SameProgress(player, previous)
+    return previous and player.level == previous.level and player.xpState == previous.xpState
+        and player.xp == previous.xp and player.xpMax == previous.xpMax
+end
+
+function addon:GetPlayerRanking(overviewPlayers)
     local result = { players = {}, awaiting = 0, stale = 0, inactive = 0,
         connected = false, grouped = false, switching = false }
     if not self.initialized or not self.ready then return result end
     result.grouped, result.switching = self:HasGroup(), self:IsGroupSwitching()
     result.connected = self:IsDataConnected()
     if not result.grouped or result.switching then return result end
-    for _, player in ipairs(self:GetOverviewPlayers()) do
+    local cached, ranked = self.rankingOrderCache, {}
+    local changed = cached == nil
+    for _, player in ipairs(overviewPlayers or self:GetOverviewPlayers()) do
         local row = Copy(player)
         row.stale = not player.isSelf and (not result.connected or not player.online
             or player.xpStale == true or player.statusSynchronized == false)
@@ -210,18 +217,55 @@ function addon:GetPlayerRanking()
         if not Complete(player) then result.awaiting = result.awaiting + 1
         else
             result.players[#result.players + 1] = row
+            ranked[row.id] = row
+            if not cached or not SameProgress(row, cached.progress[row.id]) then changed = true end
             if row.stale then result.stale = result.stale + 1 end
         end
     end
-    table.sort(result.players, function(left, right)
-        local order = CompareProgress(left, right)
-        if order ~= 0 then return order > 0 end
-        return left.id < right.id
-    end)
-    local rank = 0
-    for index, player in ipairs(result.players) do
-        if index == 1 or CompareProgress(player, result.players[index - 1]) ~= 0 then rank = index end
-        player.rank = rank
+    if cached and #result.players ~= #cached.order then changed = true end
+    if changed then
+        table.sort(result.players, function(left, right)
+            local order = CompareProgress(left, right)
+            if order ~= 0 then return order > 0 end
+            return left.id < right.id
+        end)
+        local rank, order, progress = 0, {}, {}
+        for index, player in ipairs(result.players) do
+            if index == 1 or CompareProgress(player, result.players[index - 1]) ~= 0 then rank = index end
+            player.rank = rank
+            order[index] = { id = player.id, rank = rank }
+            progress[player.id] = { level = player.level, xpState = player.xpState,
+                xp = player.xp, xpMax = player.xpMax }
+        end
+        -- Keep only immutable progress and rank values. Returned display rows may
+        -- be annotated by a view and must never own the next call's ordering.
+        self.rankingOrderCache = { progress = progress, order = order }
+    else
+        for index, entry in ipairs(cached.order) do
+            local player = ranked[entry.id]
+            player.rank, result.players[index] = entry.rank, player
+        end
     end
     return result
+end
+
+function addon:GetPlayerTooltipPlayers()
+    local now = GetTime()
+    local cached = self.rankingTooltipCache
+    if cached and now >= cached.at and now - cached.at < 1 then return cached.players end
+    -- One coherent Overview read supplies unranked discovery and every rank.
+    -- Pin/overlay callers apply their current position separately; movement must
+    -- not rebuild all progress metadata on every receive or hover frame.
+    local overview = self:GetOverviewPlayers()
+    local ranking = self:GetPlayerRanking(overview)
+    local players = {}
+    for _, player in ipairs(overview) do players[player.id] = player end
+    for _, player in ipairs(ranking.players) do players[player.id] = player end
+    if ranking.own then players[ranking.own.id] = ranking.own end
+    self.rankingTooltipCache = { at = now, players = players }
+    return players
+end
+
+for _, notification in ipairs({ "GROUP_CHANGED", "ROSTER_CHANGED", "DATA_CHANGED" }) do
+    addon:RegisterNotification(notification, function() addon.rankingTooltipCache = nil end)
 end

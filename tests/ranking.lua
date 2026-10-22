@@ -212,6 +212,79 @@ do
         "Leaving the group must clear every ranking row")
 end
 
+-- Coordinates/contact changes keep the exact progress order; returned rows stay
+-- detached and fresh even when the input order or unranked discovery changes.
+do
+    local addon, world = newAddon()
+    local sorts = 0
+    world.environment.table = setmetatable({ sort = function(...)
+        sorts = sorts + 1
+        return table.sort(...)
+    end }, { __index = table })
+    local first, own = player("friend", 30, 50, 100), player("self", 29, 25, 100, true)
+    world.players = { first, own }
+    local initial = addon:GetPlayerRanking(world.players)
+    assert(world.reads == 0 and sorts == 1, "A supplied Overview snapshot must not be collected twice")
+    initial.players[1].rank, initial.players[1].level = 99, 1
+    first.map, first.online, first.xpStale, first.seenAt = 38, false, true, 2000000010
+    local discovery = { id = "position-only", name = "PositionOnly", map = 37, online = true }
+    world.players = { own, discovery, first }
+    local refreshed = addon:GetPlayerRanking()
+    assert(sorts == 1 and ids(refreshed.players) == "friend,self" and refreshed.players[1].rank == 1
+        and refreshed.players[1].level == 30 and refreshed.players[1].map == 38
+        and refreshed.players[1].seenAt == 2000000010 and refreshed.players[1].stale
+        and refreshed.awaiting == 1 and refreshed.inactive == 1,
+        "Movement, contact and unranked discovery refresh metadata without sorting progress again")
+    first.xp = 75
+    addon:GetPlayerRanking()
+    assert(sorts == 2, "An XP change must recompute exact progress ordering")
+    first.xpState = "unavailable"
+    assert(#addon:GetPlayerRanking().players == 1 and sorts == 3,
+        "Losing usable XP removes a ranked player immediately")
+    world.players = { player("replacement", 29, 25, 100) }
+    assert(addon:GetPlayerRanking().players[1].id == "replacement" and sorts == 4,
+        "Replacing a ranked identity must invalidate ordering even when its progress and count match")
+end
+
+-- Hover frames share one coherent metadata snapshot; event invalidation and a
+-- bounded lifetime preserve progress changes and quiet-peer contact expiry.
+do
+    local addon, world = newAddon()
+    world.now = 0
+    world.environment.GetTime = function() return world.now end
+    world.players = { player("self", 29, 25, 100, true), player("friend", 30, 50, 100),
+        { id = "position-only", name = "PositionOnly", map = 37, online = true } }
+    local first = addon:GetPlayerTooltipPlayers()
+    assert(world.reads == 1 and first.friend.rank == 1 and first.self.rank == 2
+        and first["position-only"].rank == nil,
+        "Tooltip metadata includes every rank and discovery without XP from one Overview read")
+    for _ = 1, 9 do
+        world.now = world.now + 0.1
+        assert(addon:GetPlayerTooltipPlayers() == first)
+    end
+    addon:Notify("POSITIONS_CHANGED")
+    addon:Notify("POSITION_CONTACT_CHANGED")
+    assert(addon:GetPlayerTooltipPlayers() == first and world.reads == 1,
+        "Movement and repeated hover frames must not rebuild shared progress metadata")
+    world.players = { player("self", 29, 25, 100, true), player("friend", 30, 75, 100) }
+    addon:Notify("ROSTER_CHANGED")
+    local changed = addon:GetPlayerTooltipPlayers()
+    assert(world.reads == 2 and changed.friend.xp == 75 and changed["position-only"] == nil,
+        "Player metadata events immediately refresh cached progress and peer membership")
+    world.players[2].online = false
+    world.now = world.now + 1
+    local expired = addon:GetPlayerTooltipPlayers()
+    assert(world.reads == 3 and not expired.friend.online and expired.friend.stale,
+        "Time-based contact expiry must refresh without another packet")
+    world.connected = false
+    addon:Notify("DATA_CHANGED")
+    assert(addon:GetPlayerTooltipPlayers().friend.stale and world.reads == 4)
+    world.players = {}
+    addon:Notify("GROUP_CHANGED")
+    assert(next(addon:GetPlayerTooltipPlayers()) == nil and world.reads == 5,
+        "Group changes immediately discard the prior group's tooltip metadata")
+end
+
 -- Real Roster reports survive a SavedVariables reload and rank before peers reconnect.
 do
     local saved = { schemaVersion = 3 }

@@ -47,21 +47,6 @@ local function PlayerID(name)
     return (character .. "-" .. realm:gsub("%s", "")):lower()
 end
 
-local function TooltipPlayers(self)
-    local players = {}
-    local function Add(player)
-        local id = PlayerID(player.id) or PlayerID(player.name)
-        if id then players[id] = player end
-    end
-    -- Use fresh roster data, including characters without usable XP, and the
-    -- complete group ranking rather than the overlay's five visible players.
-    for _, player in ipairs(self:GetOverviewPlayers()) do Add(player) end
-    local ranking = self:GetPlayerRanking()
-    for _, player in ipairs(ranking.players) do Add(player) end
-    if ranking.own then Add(ranking.own) end
-    return players
-end
-
 local function TooltipPlayer(pin, players)
     local source = players[PlayerID(pin.playerID) or PlayerID(pin.playerName)]
     local player = {}
@@ -189,22 +174,26 @@ function Pin:OnLoad()
 end
 
 function Pin:OnAcquired(name, x, y, online, class, motion, provider, playerID, position)
-    self.playerName = name
-    self.playerID, self.positionPeer = playerID, position
-    self.online = online
-    self.provider = provider
-    if online == true then
-        self.red, self.green, self.blue = ClassColor(class)
-    else
-        self.red, self.green, self.blue = 0.6, 0.6, 0.6
+    self.playerID, self.provider = playerID, provider
+    self:UpdatePeer(name, x, y, online, class, motion, position)
+end
+
+function Pin:UpdatePeer(name, x, y, online, class, motion, position)
+    if self.playerName ~= name or self.online ~= online or self.playerClass ~= class then
+        if online == true then
+            self.red, self.green, self.blue = ClassColor(class)
+        else
+            self.red, self.green, self.blue = 0.6, 0.6, 0.6
+        end
+        -- Native pins are pooled, so reset every texture property before reuse.
+        self.Icon:SetTexture(online == true and DOT_TEXTURE or RING_TEXTURE)
+        self.Icon:SetTexCoord(0, 1, 0, 1)
+        self.Icon:SetVertexColor(self.red, self.green, self.blue)
+        self.Icon:SetDesaturated(false)
+        self.Icon:SetAlpha(1)
     end
-    -- Native pins are pooled, so reset every texture property before reuse.
-    self.Icon:SetTexture(online == true and DOT_TEXTURE or RING_TEXTURE)
-    self.Icon:SetTexCoord(0, 1, 0, 1)
-    self.Icon:SetVertexColor(self.red, self.green, self.blue)
-    self.Icon:SetDesaturated(false)
-    self.Icon:SetAlpha(1)
-    self.motion = motion
+    self.playerName, self.online, self.playerClass = name, online, class
+    self.positionPeer, self.motion, self.tooltipUpdated = position, motion, nil
     if motion then
         self:SetScript("OnUpdate", self.OnUpdate)
         self:OnUpdate()
@@ -219,13 +208,6 @@ function Pin:OnUpdate()
         local x, y
         x, y, moving = DisplayPosition(self.motion, now)
         self:SetPosition(x, y)
-    end
-    if self.restoreTooltip then
-        self.restoreTooltip = nil
-        -- Wait for the rebuilt pins' layout before restoring a stationary hover.
-        if GameTooltip and not GameTooltip:IsShown() and self:GetMap():IsShown() and self:IsMouseOver() then
-            self:OnMouseEnter()
-        end
     end
     if self.hovered then
         if not self:GetMap():IsShown() or not GameTooltip or not GameTooltip:IsOwned(self)
@@ -249,7 +231,7 @@ function Pin:RefreshTooltip(preserveAnchor)
         return a == b and first.playerName < second.playerName or a < b
     end)
     if #pins == 0 then pins[1] = self end
-    local players = TooltipPlayers(self.provider.addon)
+    local players = self.provider.addon:GetPlayerTooltipPlayers()
     local entries = {}
     for _, pin in ipairs(pins) do
         entries[#entries + 1] = { player = TooltipPlayer(pin, players),
@@ -274,7 +256,7 @@ function Pin:OnMouseLeave()
         local _, _, active = DisplayPosition(self.motion, GetTime())
         moving = active
     end
-    if not moving and not self.restoreTooltip then self:SetScript("OnUpdate", nil) end
+    if not moving then self:SetScript("OnUpdate", nil) end
 end
 
 function Pin:OnReleased()
@@ -283,10 +265,11 @@ function Pin:OnReleased()
     self.motion = nil
     self.playerName = nil
     self.playerID, self.positionPeer = nil, nil
+    self.playerClass, self.providerIndex = nil, nil
     self.online = nil
     self.provider = nil
     self.red, self.green, self.blue = nil, nil, nil
-    self.hovered, self.tooltipUpdated, self.restoreTooltip = nil, nil, nil
+    self.hovered, self.tooltipUpdated = nil, nil
     MapCanvasPinMixin.OnReleased(self)
 end
 
@@ -296,52 +279,83 @@ end
 
 function Provider:RemoveAllData()
     self:GetMap():RemoveAllPinsByTemplate(PIN_TEMPLATE)
-    self.positions, self.pins = {}, {}
+    self.positions, self.pins, self.pinsBySender = {}, {}, {}
+    self.mapID = nil
+end
+
+function Provider:RemovePeer(sender)
+    self.positions[sender] = nil
+    local pin = self.pinsBySender[sender]
+    if not pin then return end
+    local index, last = pin.providerIndex, self.pins[#self.pins]
+    self.pins[index], last.providerIndex = last, index
+    self.pins[#self.pins] = nil
+    self.pinsBySender[sender] = nil
+    -- Native removal owns pool release and OnReleased; never release twice.
+    self:GetMap():RemovePin(pin)
 end
 
 function Provider:OnHide()
     for _, pin in ipairs(self.pins or {}) do
-        pin.restoreTooltip = nil
         pin:OnMouseLeave()
+        pin:SetScript("OnUpdate", nil)
     end
 end
 
-function Provider:RefreshAllData(fromOnShow)
-    -- Keep motion by sender, independently of which pooled pin is acquired next.
-    local previous = not fromOnShow and self.positions or nil
-    local hoveredName
-    for _, pin in ipairs(self.pins or {}) do
-        if pin.hovered and GameTooltip and GameTooltip:IsOwned(pin) then hoveredName = pin.playerName end
-    end
-    self:RemoveAllData()
+local function ValidPeer(peer)
+    return peer and not IsSecret(peer.name) and type(peer.name) == "string" and peer.name ~= ""
+        and MapID(peer.map) and Coordinate(peer.x) and Coordinate(peer.y)
+end
+
+function Provider:RefreshAllData(fromOnShow, incremental)
     local map = self:GetMap()
-    if not map:IsShown() or not self.addon:GetShowPlayerIcons() then return end
+    if not map:IsShown() or not self.addon:GetShowPlayerIcons() then self:RemoveAllData(); return end
+    if not self.pins then self.positions, self.pins, self.pinsBySender = {}, {}, {} end
     local mapID = map:GetMapID()
+    -- Native map/art changes must reproject even when the numeric map ID is unchanged.
+    local keepMotion = incremental and self.mapID == mapID
+    self.mapID = mapID
     local now = GetTime()
-    for sender, peer in pairs(self.addon:GetSharedPositions()) do
-        if not IsSecret(peer.name) and type(peer.name) == "string" and peer.name ~= "" then
-            local x, y = PositionOnMap(peer, mapID)
-            if x then
-                local motion = NewMotion(peer, mapID, x, y, previous and previous[sender], now)
-                self.positions[sender] = motion
-                local pin = map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, peer.class, motion, self, sender, peer)
-                self.pins[#self.pins + 1] = pin
-            end
-        end
+    local peers = self.addon:GetSharedPositions()
+    -- Release departed players first so their frames are available for new arrivals.
+    for sender in pairs(self.pinsBySender) do
+        if not ValidPeer(peers[sender]) then self:RemovePeer(sender) end
     end
-    if hoveredName then
-        for _, pin in ipairs(self.pins) do
-            if pin.playerName == hoveredName then
-                pin.restoreTooltip = true
-                pin:SetScript("OnUpdate", pin.OnUpdate)
-                break
+    for sender, peer in pairs(peers) do
+        if ValidPeer(peer) then
+            local pin, previous = self.pinsBySender[sender], keepMotion and self.positions[sender]
+            local sameCoordinates = previous and previous.sourceMap == peer.map
+                and previous.sourceX == peer.x and previous.sourceY == peer.y
+            local x, y
+            if sameCoordinates then x, y = previous.x, previous.y
+            else x, y = PositionOnMap(peer, mapID) end
+            if x then
+                local class = not IsSecret(peer.class) and type(peer.class) == "string" and peer.class or nil
+                if pin and sameCoordinates and previous.name == peer.name and previous.online == (peer.online == true)
+                    and pin.playerClass == class then
+                    -- New status snapshots can replace the peer table without moving its pin.
+                    pin.positionPeer = peer
+                else
+                    local motion = NewMotion(peer, mapID, x, y, previous, now)
+                    self.positions[sender] = motion
+                    if pin then
+                        pin:UpdatePeer(peer.name, x, y, peer.online, class, motion, peer)
+                    else
+                        pin = map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, class, motion, self, sender, peer)
+                        self.pins[#self.pins + 1] = pin
+                        pin.providerIndex = #self.pins
+                        self.pinsBySender[sender] = pin
+                    end
+                end
+            elseif pin then
+                self:RemovePeer(sender)
             end
         end
     end
 end
 
 function addon:RefreshPositionPins()
-    if self.positionMapProvider then self.positionMapProvider:RefreshAllData() end
+    if self.positionMapProvider then self.positionMapProvider:RefreshAllData(false, true) end
 end
 
 for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_VISIBILITY_CHANGED" }) do
