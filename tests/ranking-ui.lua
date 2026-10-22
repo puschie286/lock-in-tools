@@ -57,9 +57,10 @@ do
     main.CloseButton:Click()
     assert(panel:IsVisible(), "closing the main window leaves the overlay visible")
     panel.CloseButton.scripts.OnEnter(panel.CloseButton)
+    assert(not tooltip:IsShown(), "hovering the overlay close button shows no tooltip")
     panel.CloseButton:Click()
     assert(not panel:IsShown() and not saved.ranking.enabled and not panel.scripts.OnUpdate and not tooltip:IsShown(),
-        "the overlay close button saves disabled, stops refresh work and dismisses its help")
+        "the overlay close button saves disabled and stops refresh work")
     ranking:Notify("ROSTER_CHANGED")
     ranking:Notify("DATA_CHANGED")
     ranking:Notify("GROUP_CHANGED")
@@ -74,6 +75,77 @@ do
     assert(not saved.ranking.enabled and not panel:IsShown(), "the explicit off command hides and persists ranking")
     assert(not contains(messages, SECRET) and not contains(messages, OTHER_SECRET),
         "ranking visibility never logs group keys")
+end
+
+-- Transparency fades window decoration independently of foreground content and other windows.
+do
+    local saved = settings(SECRET, false)
+    saved.ranking = { enabled = false, backgroundTransparency = 50 }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local peer, own = row("Peer", 1, 30, 500, 1000), row("Self", 2, 25, 400, 1000, true)
+    peer.stale = true
+    ranking.GetPlayerRanking = function()
+        return { grouped = true, connected = true, players = { peer, own }, own = own }
+    end
+    ranking.GetGroupBurnedStatus = function() return { average = 45, count = 2 } end
+    assert(not ranking.rankingOverlay, "a saved transparency preference does not create a disabled overlay")
+    assert(ranking:SetRankingEnabled(true))
+    ranking:OpenOptions("ranking")
+    local panel, main = ranking.rankingOverlay, ranking.mainPanel
+    local slider = ranking.optionsPanel.rankingTransparencySlider
+    local first, second = panel.rows[1], panel.rows[2]
+    local function decorationAlpha(alpha)
+        assert(panel.background.alpha == alpha and panel.stripe.alpha == alpha,
+            "window backing and accent use the selected transparency")
+        for _, border in ipairs(panel.borders) do
+            assert(border.alpha == alpha, "window borders use the selected transparency")
+        end
+    end
+    local function opaque(widget) return (widget.alpha or 1) == 1 end
+    local function foregroundVisible()
+        assert(opaque(panel) and opaque(panel.TitleText) and opaque(panel.CloseButton)
+            and opaque(first.name) and opaque(first.progressFill) and opaque(first.highlight)
+            and first.alpha == 0.65 and second.alpha == 1 and first.name:GetText() == "Peer"
+            and opaque(panel.groupBurned) and opaque(panel.groupBurned.label)
+            and opaque(panel.groupBurned.track) and opaque(panel.groupBurned.fill)
+            and opaque(panel.personalBurned) and opaque(panel.personalBurned.track)
+            and opaque(panel.personalBurned.thumbTexture) and opaque(panel.personalBurned.ticks[0])
+            and opaque(main.background) and opaque(main.stripe),
+            "transparency preserves readable names, stale dimming, meters, controls and the main window")
+    end
+    decorationAlpha(0.5)
+    foregroundVisible()
+    local statusSends, rosterSends, dataSends = #world.statusSends, #world.rosterSends, #world.dataSends
+    for _, value in ipairs({ 100, 0, 50, 100 }) do
+        slider:SetValue(value)
+        decorationAlpha(1 - value / 100)
+        foregroundVisible()
+        assert(saved.ranking.backgroundTransparency == value and panel:IsVisible()
+            and ranking.rankingOverlay == panel and panel.rows[1] == first and panel.rows[2] == second
+            and #world.statusSends == statusSends and #world.rosterSends == rosterSends
+            and #world.dataSends == dataSends,
+            "dragging updates the existing overlay immediately without changing group traffic")
+    end
+    panel.CloseButton:Click()
+    slider:SetValue(40)
+    assert(not panel:IsShown() and not saved.ranking.enabled,
+        "editing transparency leaves a dismissed overlay hidden")
+    assert(ranking:SetRankingEnabled(true))
+    decorationAlpha(0.6)
+    slider:SetValue(100)
+    local restored, restoredAPI, _, _, restoredWorld = loadAddon(saved, false)
+    restoredWorld:initialize()
+    loadOverlay(restored, restoredAPI)
+    restored:RefreshRankingOverlay()
+    local restoredPanel = restored.rankingOverlay
+    assert(restoredPanel:IsVisible() and restoredPanel.background.alpha == 0
+        and restoredPanel.stripe.alpha == 0 and opaque(restoredPanel.TitleText),
+        "a fully transparent overlay restores its saved account-wide preference")
+    assert(restored:SetRankingBackgroundTransparency(0))
+    assert(restoredPanel.background.alpha == 1 and restoredPanel.stripe.alpha == 1,
+        "returning from full transparency restores the existing window backing immediately")
 end
 
 -- Header double-click navigation stays separate from ordinary clicks and Shift movement.
@@ -102,7 +174,8 @@ do
         "releasing Shift during an active drag does not turn it into Overview navigation")
     header.scripts.OnDragStop(header)
     local position = saved.ranking.position
-    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
+    panel.rows[1].scripts.OnEnter(panel.rows[1])
+    assert(api.GameTooltip:IsShown(), "a player tooltip is visible before Overview navigation")
     header.scripts.OnDoubleClick(header, "LeftButton")
     local main, content = ranking.mainPanel, ranking.contentPanel
     assert(main:IsVisible() and content:IsVisible() and content.selectedTab == "overview"
@@ -568,7 +641,8 @@ do
         and panel.rows[4].progress:GetText() == "99.9%"
         and panel.rows[1].alpha == 0.65 and panel.rows[4].alpha == 0.65,
         "maximum level and percentages omit stale prefixes while saved rows stay dim and near-level XP stays below 100 percent")
-    assert(panel.rows[1]:GetHeight() == 34 and panel.rows[2].point[3] - panel.rows[1].point[3] == -34
+    local firstRowY, secondRowY = select(5, panel.rows[1]:GetPoint()), select(5, panel.rows[2]:GetPoint())
+    assert(panel.rows[1]:GetHeight() == 34 and secondRowY - firstRowY == -34
         and panel.rows[1].progressTrack.point[3] == -26
         and placed(panel.rows[1].progress, panel.rows[1].level, "RIGHT", "LEFT", -8, 0)
         and placed(panel.rows[2].progress, panel.rows[2].level, "RIGHT", "LEFT", -8, 0)
@@ -618,6 +692,610 @@ do
     assert(panel.empty:IsShown() and panel.empty:GetText():find("group", 1, true)
         and not panel.rows[1]:IsShown() and not panel.rows[1].player,
         "leaving the group clears all player rows while leaving the chosen overlay visible")
+end
+
+-- XP animation is presentation-only: exact values update now while earned fill catches up.
+do
+    local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local own = row("Self", 1, 24, 250, 1000, true)
+    local reads = 0
+    ranking.GetPlayerRanking = function()
+        reads = reads + 1
+        return { grouped = true, connected = true, players = { own }, own = own }
+    end
+    assert(ranking:SetRankingEnabled(true))
+    local panel, first = ranking.rankingOverlay, ranking.rankingOverlay.rows[1]
+    local function near(actual, expected) return math.abs(actual - expected) < 0.000001 end
+    local function descendants(widget)
+        local count = 1
+        for _, child in ipairs(widget.children or {}) do count = count + descendants(child) end
+        return count
+    end
+    local regions = descendants(panel)
+    assert(near(first.progressFill:GetWidth(), 174 * 0.25) and not first.progressGain:IsShown()
+        and not panel.xpAnimator.scripts.OnUpdate,
+        "first display establishes an exact XP baseline without replaying saved progress")
+    own.xp = 430
+    ranking:Notify("ROSTER_CHANGED")
+    assert(first.progress:GetText() == "43%" and first.player.xp == 430
+        and near(first.progressFill:GetWidth(), 174 * 0.25) and first.progressGain:IsShown()
+        and panel.xpAnimator.scripts.OnUpdate,
+        "fresh XP updates the percentage immediately and starts the fill and gain highlight from the old width")
+    first.scripts.OnEnter(first)
+    assert(api.GameTooltip.text == "#1 - Self"
+        and api.GameTooltip.lines[1]:find("570", 1, true),
+        "hover details immediately use the authoritative XP rather than the animated fraction")
+    panel.xpAnimator:AdvanceFrame(0.15)
+    local halfway = 0.25 + (0.43 - 0.25) * 0.875
+    assert(near(first.progressFill:GetWidth(), 174 * halfway),
+        "the fill uses a cubic ease-out and covers seven eighths of a gain halfway through 300 ms")
+    local width = first.progressFill:GetWidth()
+    for _ = 1, 10 do ranking:Notify("ROSTER_CHANGED") end
+    panel:AdvanceFrame(1)
+    assert(near(first.progressFill:GetWidth(), width) and first.progressGain:IsShown(),
+        "unrelated redraws preserve the current XP animation and highlight")
+    panel.xpAnimator:AdvanceFrame(0.15)
+    assert(near(first.progressFill:GetWidth(), 174 * 0.43) and first.progressGain:IsShown()
+        and panel.xpAnimator.scripts.OnUpdate,
+        "the fill reaches its exact target at 300 ms while the gain highlight continues")
+    panel.xpAnimator:AdvanceFrame(0.350001)
+    assert(not first.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "the highlight ends after 650 ms and removes the animation callback")
+
+    own.xp = 500
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    width = first.progressFill:GetWidth()
+    own.xp = 650
+    ranking:RefreshRankingOverlay()
+    assert(first.progress:GetText() == "65%" and near(first.progressFill:GetWidth(), width),
+        "a second gain retargets from the visible fill without jumping to the previous target")
+    local beforeReads = reads
+    local beforeSends = #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends
+    local timerCalls, after, newTimer = 0, api.C_Timer.After, api.C_Timer.NewTimer
+    api.C_Timer.After = function(...) timerCalls = timerCalls + 1; return after(...) end
+    api.C_Timer.NewTimer = function(...) timerCalls = timerCalls + 1; return newTimer(...) end
+    panel.xpAnimator:AdvanceFrame(0.15)
+    assert(near(first.progressFill:GetWidth(), width + (174 * 0.65 - width) * 0.875),
+        "retargeted gains retain the same easing from their current displayed position")
+    panel.xpAnimator:AdvanceFrame(10)
+    assert(near(first.progressFill:GetWidth(), 174 * 0.65) and not first.progressGain:IsShown()
+        and not panel.xpAnimator.scripts.OnUpdate and descendants(panel) == regions
+        and reads == beforeReads and timerCalls == 0
+        and #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends == beforeSends,
+        "animation frames reuse regions, finish long frames once and never read rankings, schedule timers or send status")
+    own.xp = 651
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.01)
+    assert(first.progressGain:IsShown() and first.progressGain:GetWidth() >= 3
+        and first.progressGain:GetHeight() == 5,
+        "subpixel XP gains receive a visible minimum-width five-pixel-high highlight")
+    panel.xpAnimator:AdvanceFrame(0.65)
+    assert(not first.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "a small gain also removes its callback after the highlight expires")
+    own.xp = 0
+    ranking:RefreshRankingOverlay()
+    assert(not first.progressFill:IsShown() and first.progress:GetText() == "0%",
+        "a corrected zero-XP baseline hides its empty fill")
+    own.xp = 10
+    ranking:RefreshRankingOverlay()
+    assert(not first.progressFill:IsShown() and first.progressGain:IsShown(),
+        "gaining XP from zero starts at the empty baseline with its gain highlight")
+    panel.xpAnimator:AdvanceFrame(0.65)
+    assert(first.progressFill:IsShown() and near(first.progressFill:GetWidth(), 1.74)
+        and not first.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "a gain from zero finishes with the exact nonzero fill and no lingering work")
+    own.xp = 999
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.65)
+    own.xp = 1000
+    ranking:RefreshRankingOverlay()
+    local _, _, _, gainStart = first.progressGain:GetPoint()
+    assert(first.progressGain:IsShown() and first.progressGain:GetWidth() >= 3
+        and gainStart >= 0 and gainStart + first.progressGain:GetWidth() <= 174,
+        "a minimum-width highlight near full XP stays inside the progress track")
+    panel.xpAnimator:AdvanceFrame(0.65)
+end
+
+-- Animation follows player identity across pooled leaders and the separate own row.
+do
+    local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local peers = {
+        row("Alpha", 1, 24, 850, 1000), row("Bravo", 2, 24, 750, 1000),
+        row("Charlie", 3, 24, 650, 1000), row("Delta", 4, 24, 550, 1000),
+        row("Echo", 5, 24, 450, 1000),
+    }
+    local own = row("Self", 6, 24, 250, 1000, true)
+    local state = { grouped = true, connected = true,
+        players = { peers[1], peers[2], peers[3], peers[4], peers[5], own }, own = own }
+    ranking.GetPlayerRanking = function() return state end
+    assert(ranking:SetRankingEnabled(true))
+    local panel = ranking.rankingOverlay
+    local function near(actual, expected) return math.abs(actual - expected) < 0.000001 end
+    local function entries()
+        local count = 0
+        for _ in pairs(panel.xpProgress) do count = count + 1 end
+        return count
+    end
+    assert(panel.ownRow:IsShown() and entries() == 6,
+        "progress state is bounded to five visible leaders and the separate local player")
+    own.xp, own.rank = 600, 4
+    state.players = { peers[1], peers[2], peers[3], own, peers[4], peers[5] }
+    ranking:Notify("ROSTER_CHANGED")
+    assert(panel.rows[4].player == own and panel.rows[4].rank:GetText() == "4"
+        and panel.rows[4].progress:GetText() == "60%" and not panel.ownRow:IsShown()
+        and near(panel.rows[4].progressFill:GetWidth(), 174 * 0.25)
+        and panel.rows[4].progressGain:IsShown() and entries() == 5,
+        "entering the leaders updates rank immediately and transfers the separate row's previous XP baseline")
+    panel.xpAnimator:AdvanceFrame(0.1)
+    local width = panel.rows[4].progressFill:GetWidth()
+    own.xp, own.rank = 800, 2
+    state.players = { peers[1], own, peers[2], peers[3], peers[4], peers[5] }
+    ranking:RefreshRankingOverlay()
+    assert(panel.rows[2].player == own and panel.rows[2].rank:GetText() == "2"
+        and near(panel.rows[2].progressFill:GetWidth(), width) and panel.rows[2].progressGain:IsShown()
+        and panel.rows[4].player == peers[3] and not panel.rows[4].progressGain:IsShown()
+        and near(panel.rows[4].progressFill:GetWidth(), 174 * 0.65),
+        "reordering leaders transfers an active gain by identity and never gives a recycled row another player's animation")
+    for index, peer in ipairs(peers) do peer.level, peer.rank = 25, index end
+    own.rank = 6
+    state.players = { peers[1], peers[2], peers[3], peers[4], peers[5], own }
+    ranking:RefreshRankingOverlay()
+    assert(panel.ownRow:IsShown() and panel.ownRow.player == own and panel.ownRow.rank:GetText() == "6"
+        and near(panel.ownRow.progressFill:GetWidth(), width) and panel.ownRow.progressGain:IsShown()
+        and panel.rows[2].player == peers[2] and not panel.rows[2].progressGain:IsShown() and entries() == 6,
+        "falling outside the leaders carries the active fill and highlight into the separate local row")
+    panel.xpAnimator:AdvanceFrame(0.65)
+    assert(near(panel.ownRow.progressFill:GetWidth(), 174 * 0.8)
+        and not panel.ownRow.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "a transferred animation finishes on its current row and removes its callback")
+    local fresh = row("Fresh", 1, 25, 100, 1000)
+    state.players, state.own = { fresh }, nil
+    ranking:RefreshRankingOverlay()
+    assert(entries() == 1 and panel.xpProgress.Fresh and not panel.xpProgress.Self,
+        "players leaving the visible rows do not accumulate retained animation state")
+    fresh.xp = 500
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    fresh.xp = 600
+    ranking:Notify("GROUP_CHANGED")
+    assert(entries() == 1 and near(panel.rows[1].progressFill:GetWidth(), 174 * 0.6)
+        and not panel.rows[1].progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "changing groups resets progress even when the new standings reuse a visible player identity")
+    state.grouped, state.players = false, {}
+    ranking:Notify("GROUP_CHANGED")
+    assert(entries() == 0 and not panel.xpAnimator.scripts.OnUpdate,
+        "leaving a group clears every presentation state and active XP callback")
+end
+
+-- Level, denominator and availability changes establish fresh baselines instead of fake gains.
+do
+    local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local own = row("Self", 1, 24, 250, 1000, true)
+    local state = { grouped = true, connected = true, players = { own }, own = own }
+    ranking.GetPlayerRanking = function() return state end
+    assert(ranking:SetRankingEnabled(true))
+    local panel, first = ranking.rankingOverlay, ranking.rankingOverlay.rows[1]
+    local function snapped(fraction, message)
+        ranking:RefreshRankingOverlay()
+        assert(math.abs(first.progressFill:GetWidth() - 174 * fraction) < 0.000001
+            and not first.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate, message)
+    end
+    own.xp = 400
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    own.xp = 200
+    snapped(0.2, "a corrected XP decrease snaps instead of playing a backward or stale forward animation")
+    own.level, own.xp = 25, 80
+    snapped(0.08, "a level-up snaps to the new level's XP baseline without a backward tween")
+    assert(first.level:GetText() == "25" and first.progress:GetText() == "8%",
+        "level-up text immediately matches its new progress baseline")
+    own.level, own.xp = 26, 300
+    snapped(0.3, "a report for a new level snaps even when its percentage exceeds the previous level's percentage")
+    own.xpMax = 500
+    snapped(0.6, "a changed XP denominator snaps rather than interpreting a larger fraction as earned XP")
+    own.xp, own.xpMax, own.xpState = nil, nil, "max"
+    snapped(1, "maximum-level reports snap to a full bar without a gain highlight")
+    assert(first.progress:GetText() == "MAX", "maximum-level text updates with the full baseline")
+    own.xp, own.xpMax, own.xpState = 100, 1000, "known"
+    snapped(0.1, "returning from maximum-level state establishes a known-progress baseline")
+    own.xp, own.xpMax, own.xpState, own.rank = nil, nil, "unavailable", nil
+    state.players = {}
+    ranking:RefreshRankingOverlay()
+    assert(panel.ownRow:IsShown() and panel.ownRow.progress:GetText() == "Waiting for XP"
+        and not panel.ownRow.progressTrack:IsShown() and not panel.ownRow.progressFill:IsShown()
+        and not panel.ownRow.progressGain:IsShown() and not panel.xpProgress.Self
+        and not panel.xpAnimator.scripts.OnUpdate,
+        "unknown XP clears its animation state and shows no invented progress")
+    own.xp, own.xpMax, own.xpState, own.rank = 300, 1000, "known", 1
+    state.players = { own }
+    snapped(0.3, "recovering unknown XP snaps to the first complete report without replaying missing gains")
+end
+
+-- Stale reports and hidden interfaces never replay catch-up progress as a new gain.
+do
+    local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local peer = row("Peer", 1, 24, 250, 1000)
+    ranking.GetPlayerRanking = function()
+        return { grouped = true, connected = true, players = { peer } }
+    end
+    assert(ranking:SetRankingEnabled(true))
+    local panel, first = ranking.rankingOverlay, ranking.rankingOverlay.rows[1]
+    local function at(fraction)
+        return math.abs(first.progressFill:GetWidth() - 174 * fraction) < 0.000001
+    end
+    peer.xp = 400
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    peer.stale = true
+    ranking:Notify("ROSTER_CHANGED")
+    assert(at(0.4) and first.alpha == 0.65 and not first.progressGain:IsShown()
+        and not panel.xpAnimator.scripts.OnUpdate,
+        "contact expiry ends an active gain at the saved target and restores ordinary stale dimming")
+    peer.xp = 600
+    ranking:RefreshRankingOverlay()
+    assert(at(0.6) and not first.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "changed stale snapshots are displayed without claiming a fresh gain")
+    peer.xp, peer.stale = 700, false
+    ranking:Notify("ROSTER_CHANGED")
+    assert(at(0.7) and first.alpha == 1 and not first.progressGain:IsShown()
+        and not panel.xpAnimator.scripts.OnUpdate,
+        "reconnection updates brightness and establishes a fresh baseline without replaying catch-up XP")
+    peer.xp = 800
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    panel.CloseButton:Click()
+    assert(not panel:IsShown() and not panel.xpAnimator.scripts.OnUpdate
+        and not first.progressGain:IsShown(),
+        "closing the ranking overlay stops active XP work and clears its gain highlight")
+    peer.xp = 900
+    ranking:Notify("ROSTER_CHANGED")
+    assert(not panel:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "fresh XP cannot restart the animation driver on a dismissed overlay")
+    assert(ranking:SetRankingEnabled(true))
+    assert(at(0.9) and not first.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
+        "reopening ranking snaps to XP received while the overlay was dismissed")
+    peer.xp = 950
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    api.UIParent:Hide()
+    assert(not panel:IsVisible() and not panel.xpAnimator.scripts.OnUpdate
+        and not first.progressGain:IsShown(),
+        "hiding the native interface stops active XP animation as well as the standings refresh")
+    peer.xp = 980
+    ranking:Notify("ROSTER_CHANGED")
+    assert(not panel.xpAnimator.scripts.OnUpdate and not first.progressGain:IsShown(),
+        "XP notifications while the native interface is hidden cannot restart a gain animation")
+    api.UIParent:Show()
+    assert(panel:IsVisible() and at(0.98) and not first.progressGain:IsShown()
+        and not panel.xpAnimator.scripts.OnUpdate,
+        "restoring the native interface starts from current XP without replaying hidden gains")
+    peer.xp = 990
+    ranking:RefreshRankingOverlay()
+    panel.xpAnimator:AdvanceFrame(0.1)
+    panel:Hide()
+    ranking:RefreshRankingOverlay()
+    assert(panel:IsVisible() and at(0.99) and not first.progressGain:IsShown()
+        and not panel.xpAnimator.scripts.OnUpdate,
+        "a direct hide and refresh also discard unfinished motion and establish a current baseline")
+end
+
+-- Ranking motion moves native row hit areas while live values and XP keep their own timing.
+do
+    local function near(actual, expected) return math.abs(actual - expected) < 0.000001 end
+    local function position(widget) return -select(5, widget:GetPoint()) end
+    local function count(map)
+        local total = 0
+        for _ in pairs(map) do total = total + 1 end
+        return total
+    end
+    local function descendants(widget)
+        local total = 1
+        for _, child in ipairs(widget.children or {}) do total = total + descendants(child) end
+        return total
+    end
+    local function scene(players, own)
+        local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
+        world:initialize()
+        loadOverlay(ranking, api)
+        local state = { grouped = true, connected = true, players = players, own = own, reads = 0 }
+        ranking.GetPlayerRanking = function()
+            state.reads = state.reads + 1
+            return state
+        end
+        assert(ranking:SetRankingEnabled(true))
+        return ranking, api, world, ranking.rankingOverlay, state
+    end
+    local function four()
+        local own = row("Self", 4, 24, 500, 1000, true)
+        return { row("Alpha", 1, 24, 850, 1000), row("Bravo", 2, 24, 750, 1000),
+            row("Charlie", 3, 24, 650, 1000), own }, own
+    end
+    local function activeGhosts(panel)
+        local total = 0
+        for _, ghost in ipairs(panel.rowGhosts) do
+            if ghost:IsShown() and ghost.playerID then total = total + 1 end
+        end
+        return total
+    end
+
+    do
+        local players, own = four()
+        local ranking, api, world, panel, state = scene(players, own)
+        assert(panel.rowViewport.frameType == "ScrollFrame" and panel.rowViewport.scrollChild == panel.rowContent
+            and panel.rows[1].parent == panel.rowContent and near(position(panel.rows[4]), 102)
+            and not panel.rowAnimator.scripts.OnUpdate,
+            "ranking first display uses a native clipped row viewport and snaps its initial positions")
+        local regions = descendants(panel)
+        own.xp, own.rank, players[3].rank = 700, 3, 4
+        state.players = { players[1], players[2], own, players[3] }
+        ranking:Notify("ROSTER_CHANGED")
+        local moving, displaced = panel.rows[3], panel.rows[4]
+        assert(moving.player == own and moving.rank:GetText() == "3" and moving.progress:GetText() == "70%"
+            and displaced.rank:GetText() == "4" and moving.layoutY == 68
+            and near(position(moving), 102) and near(position(displaced), 68)
+            and moving.mouseEnabled and displaced.mouseEnabled and panel.rowAnimator.scripts.OnUpdate,
+            "a rank swap updates logical slots and labels immediately while complete interactive rows start at their old positions")
+        assert(moving.motionBacking:IsShown() and not displaced.motionBacking:IsShown()
+            and moving:GetFrameLevel() > displaced:GetFrameLevel(),
+            "the climbing player's opaque backing and frame layer preserve readable content through crossings")
+        panel.xpAnimator:AdvanceFrame(0.3)
+        assert(near(moving.progressFill:GetWidth(), 174 * 0.7) and moving.progressGain:IsShown()
+            and near(position(moving), 102) and panel.rowAnimator.scripts.OnUpdate,
+            "the existing 300 ms XP fill finishes independently of the slower ranking glide")
+        panel.rowAnimator:AdvanceFrame(0.35)
+        assert(near(position(moving), 102 + (68 - 102) * 0.875)
+            and near(position(displaced), 68 + (102 - 68) * 0.875),
+            "ranking rows use cubic ease-out over 700 ms in both directions")
+        local movingY, displacedY = position(moving), position(displaced)
+        for _ = 1, 5 do ranking:Notify("ROSTER_CHANGED") end
+        panel:AdvanceFrame(1)
+        assert(near(position(moving), movingY) and near(position(displaced), displacedY),
+            "unchanged full repaints and the standings timer preserve visible ranking positions")
+        local reads = state.reads
+        local sends = #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends
+        local timerCalls, after, newTimer = 0, api.C_Timer.After, api.C_Timer.NewTimer
+        api.C_Timer.After = function(...) timerCalls = timerCalls + 1; return after(...) end
+        api.C_Timer.NewTimer = function(...) timerCalls = timerCalls + 1; return newTimer(...) end
+        panel.xpAnimator:AdvanceFrame(0.350001)
+        assert(not moving.progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate
+            and panel.rowAnimator.scripts.OnUpdate,
+            "the 650 ms gain highlight also finishes without stopping the 700 ms row glide")
+        panel.rowAnimator:AdvanceFrame(0.35)
+        assert(near(position(moving), 68) and near(position(displaced), 102)
+            and not panel.rowAnimator.scripts.OnUpdate and not moving.motionBacking:IsShown()
+            and state.reads == reads and timerCalls == 0
+            and descendants(panel) == regions
+            and #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends == sends,
+            "rows settle at exactly 700 ms without allocation, ranking reads, timers or group traffic")
+    end
+
+    do
+        local players, own = four()
+        local ranking, api, _, panel, state = scene(players, own)
+        local fresh = row("Fresh", 3, 24, 700, 1000)
+        fresh.stale = true
+        state.players = { players[1], players[2], fresh, own }
+        ranking:RefreshRankingOverlay()
+        local incoming = panel.rows[3]
+        api.IsShiftKeyDown = function() return true end
+        local function rejectedCallbacks()
+            incoming.scripts.OnEnter(incoming)
+            incoming.scripts.OnClick(incoming, "RightButton")
+            incoming.scripts.OnDragStart(incoming, "LeftButton")
+            assert(not api.GameTooltip:IsShown() and not panel.actionMenu and not panel.moving
+                and not panel.dragHandle and panel.rowAnimator.scripts.OnUpdate
+                and fresh.xp == 700 and fresh.rank == 3,
+                "late hover, click and Shift-drag callbacks from a fading entrant cannot open interactions or change its report")
+        end
+        assert(incoming.player == fresh and near(incoming.alpha, 0) and not incoming.mouseEnabled
+            and panel.xpProgress.Fresh and not panel.xpProgress.Charlie and count(panel.xpProgress) == 4,
+            "an invisible incoming peer cannot accept input and its outgoing ghost cannot retain or steal live XP state")
+        rejectedCallbacks()
+        panel.rowAnimator:AdvanceFrame(0.35)
+        assert(near(incoming.alpha, 0.65 * 0.875) and not incoming.mouseEnabled,
+            "incoming opacity multiplies stale dimming while unfinished fades remain noninteractive")
+        rejectedCallbacks()
+        ranking:Notify("ROSTER_CHANGED")
+        assert(near(incoming.alpha, 0.65 * 0.875) and not incoming.mouseEnabled,
+            "an unchanged full redraw preserves a partially faded peer's opacity and input state")
+        panel.rowAnimator:AdvanceFrame(0.35)
+        assert(near(incoming.alpha, 0.65) and incoming.mouseEnabled and activeGhosts(panel) == 0
+            and not panel.rowAnimator.scripts.OnUpdate and count(panel.xpProgress) == 4,
+            "a stale incoming peer regains input at its normal dimmed opacity once its fade settles")
+        panel.header.scripts.OnDragStart(panel.header, "LeftButton")
+        assert(panel.moving and panel.dragHandle == panel.header,
+            "the entrant interaction guard leaves ordinary header Shift dragging available")
+        panel.header.scripts.OnDragStop(panel.header)
+    end
+
+    do
+        local players, own = four()
+        local ranking, _, _, panel, state = scene(players, own)
+        own.xp, own.rank, players[3].rank = 700, 3, 4
+        state.players = { players[1], players[2], own, players[3] }
+        ranking:RefreshRankingOverlay()
+        panel.rowAnimator:AdvanceFrame(0.2)
+        local y, x = position(panel.rows[3]), select(4, panel.rows[3]:GetPoint())
+        own.xp, own.rank, players[2].rank = 800, 2, 3
+        state.players = { players[1], own, players[2], players[3] }
+        ranking:RefreshRankingOverlay()
+        assert(near(position(panel.rows[2]), y) and near(select(4, panel.rows[2]:GetPoint()), x)
+            and panel.rows[2].player == own and panel.rows[2].rank:GetText() == "2",
+            "a quick second reorder transfers the player's current visible position without a horizontal or vertical jump")
+        panel.rowAnimator:AdvanceFrame(0.35)
+        assert(near(position(panel.rows[2]), y + (34 - y) * 0.875),
+            "a retargeted row eases from its displayed position toward the newest ranking slot")
+        panel.rowAnimator:AdvanceFrame(10)
+        assert(near(position(panel.rows[2]), 34) and not panel.rowAnimator.scripts.OnUpdate,
+            "one long frame completes the latest row motion without repeated catch-up steps")
+    end
+
+    do
+        local peers = {
+            row("Alpha", 1, 24, 850, 1000), row("Bravo", 2, 24, 750, 1000),
+            row("Charlie", 3, 24, 650, 1000), row("Delta", 4, 24, 550, 1000),
+            row("Echo", 5, 24, 450, 1000),
+        }
+        local own = row("Self", 6, 24, 250, 1000, true)
+        local ranking, _, _, panel, state = scene(
+            { peers[1], peers[2], peers[3], peers[4], peers[5], own }, own)
+        assert(near(panel.rowViewport:GetHeight(), 228) and near(position(panel.ownRow), 194)
+            and near(position(panel.personalBurned), 78 + 228 + 25),
+            "a separate own row starts below the leaders and separator with matching meter placement")
+        own.xp, own.rank = 800, 2
+        peers[2].rank, peers[3].rank, peers[4].rank, peers[5].rank = 3, 4, 5, 6
+        state.players = { peers[1], own, peers[2], peers[3], peers[4], peers[5] }
+        ranking:Notify("ROSTER_CHANGED")
+        local departing
+        for _, ghost in ipairs(panel.rowGhosts) do
+            if ghost:IsShown() and ghost.playerID == "Echo" then departing = ghost end
+        end
+        assert(panel.rows[2].player == own and near(position(panel.rows[2]), 194)
+            and not panel.ownRow:IsShown() and departing and departing.mouseEnabled == false
+            and near(panel.rowViewport:GetHeight(), 228) and panel.rowLayout.target == 170,
+            "entering the top five transfers the own-row position while a decorative outgoing peer fades inside the old viewport")
+        panel.rowAnimator:AdvanceFrame(0.35)
+        local height = 228 + (170 - 228) * 0.875
+        assert(near(panel.rowViewport:GetHeight(), height)
+            and near(position(panel.personalBurned), 78 + height + 25)
+            and near(position(panel.rows[2]), 194 + (34 - 194) * 0.875),
+            "the viewport, personal meter and incoming player interpolate together without an abrupt own-area collapse")
+        local ownY, returningY = position(panel.rows[2]), position(departing)
+        for index, peer in ipairs(peers) do peer.level, peer.rank = 25, index end
+        own.rank = 6
+        state.players = { peers[1], peers[2], peers[3], peers[4], peers[5], own }
+        ranking:RefreshRankingOverlay()
+        assert(panel.ownRow:IsShown() and panel.ownRow.player == own and near(position(panel.ownRow), ownY)
+            and panel.rows[5].player == peers[5] and near(position(panel.rows[5]), returningY)
+            and activeGhosts(panel) == 0 and panel.rowLayout.target == 228,
+            "reversing before entry completes transfers self back and reuses an outgoing peer's current position without a duplicate ghost")
+        panel.rowAnimator:AdvanceFrame(0.7)
+        assert(near(position(panel.ownRow), 194) and near(position(panel.rows[5]), 136)
+            and near(panel.rowViewport:GetHeight(), 228)
+            and near(position(panel.personalBurned), 78 + 228 + 25)
+            and not panel.rowAnimator.scripts.OnUpdate,
+            "leaving the top five settles the separate row and expanded lower layout in 700 ms")
+        local regions = descendants(panel)
+        for index = 1, 24 do
+            state.players, state.own = { row("Transient" .. index, 1, 25, index, 1000) }, nil
+            ranking:RefreshRankingOverlay()
+            assert(count(panel.rowMotion) <= 12 and #panel.rowGhosts == 6 and activeGhosts(panel) <= 6,
+                "rapid membership churn keeps live snapshots and outgoing decorative rows bounded")
+        end
+        for _, prefix in ipairs({ "BatchA", "BatchB" }) do
+            state.players = {}
+            for index = 1, 5 do state.players[index] = row(prefix .. index, index, 25, 500, 1000) end
+            ranking:RefreshRankingOverlay()
+        end
+        for index = 1, 5 do
+            local departing = panel.rowMotion["BatchA" .. index]
+            assert(departing and departing.leaving and departing.row:IsShown()
+                and not departing.row.mouseEnabled,
+                "a full replacement with an occupied pool preserves each newly outgoing player's fade")
+        end
+        panel.rowAnimator:AdvanceFrame(10)
+        assert(count(panel.rowMotion) == 5 and activeGhosts(panel) == 0
+            and descendants(panel) == regions and not panel.rowAnimator.scripts.OnUpdate,
+            "finished exits release their snapshots and reuse the fixed ghost pool without allocating rows")
+    end
+
+    do
+        local players, own = four()
+        local ranking, _, _, panel, state = scene(players, own)
+        own.xp, own.rank, players[2].rank, players[3].rank = 750, 2, 2, 4
+        state.players = { players[1], players[2], own, players[3] }
+        ranking:RefreshRankingOverlay()
+        assert(panel.rows[2].rank:GetText() == "2" and panel.rows[3].rank:GetText() == "2"
+            and panel.rows[4].rank:GetText() == "4" and panel.rows[2].player.id == "Bravo"
+            and panel.rows[3].player == own and near(position(panel.rows[3]), 102),
+            "shared competition ranks and stable tie order are authoritative before tied players finish moving")
+        panel.rowAnimator:AdvanceFrame(0.7)
+        own.level, own.xp, own.rank = 25, 80, 1
+        players[1].rank, players[2].rank = 2, 3
+        state.players = { own, players[1], players[2], players[3] }
+        ranking:RefreshRankingOverlay()
+        assert(panel.rows[1].player == own and panel.rows[1].rank:GetText() == "1"
+            and panel.rows[1].level:GetText() == "25" and panel.rows[1].progress:GetText() == "8%"
+            and near(panel.rows[1].progressFill:GetWidth(), 174 * 0.08)
+            and not panel.rows[1].progressGain:IsShown() and near(position(panel.rows[1]), 68)
+            and panel.rowAnimator.scripts.OnUpdate and not panel.xpAnimator.scripts.OnUpdate,
+            "a level-up snaps its new XP baseline immediately while the player's ranking position still glides")
+        panel.rowAnimator:AdvanceFrame(0.7)
+        assert(near(position(panel.rows[1]), 0) and not panel.rowAnimator.scripts.OnUpdate,
+            "level-up ranking motion also settles into its exact new slot")
+    end
+
+    do
+        local players, own = four()
+        local ranking, api, _, panel, state = scene(players, own)
+        local function overtake()
+            own.xp, own.rank, players[3].rank = 700, 3, 4
+            state.players = { players[1], players[2], own, players[3] }
+            ranking:RefreshRankingOverlay()
+            panel.rowAnimator:AdvanceFrame(0.2)
+        end
+        overtake()
+        panel.CloseButton:Click()
+        assert(not panel:IsShown() and not panel.rowAnimator.scripts.OnUpdate
+            and count(panel.rowMotion) == 0 and activeGhosts(panel) == 0,
+            "closing ranking clears unfinished row motion and every outgoing decorative player")
+        own.xp, own.rank, players[2].rank = 800, 2, 3
+        state.players = { players[1], own, players[2], players[3] }
+        ranking:Notify("ROSTER_CHANGED")
+        assert(not panel:IsShown() and not panel.rowAnimator.scripts.OnUpdate,
+            "reports cannot restart row motion on a dismissed overlay")
+        assert(ranking:SetRankingEnabled(true))
+        assert(near(position(panel.rows[2]), 34) and not panel.rowAnimator.scripts.OnUpdate,
+            "reopening ranking snaps to the latest complete order instead of replaying missed moves")
+        own.xp, own.rank, players[1].rank = 900, 1, 2
+        state.players = { own, players[1], players[2], players[3] }
+        ranking:RefreshRankingOverlay()
+        panel.rowAnimator:AdvanceFrame(0.2)
+        api.UIParent:Hide()
+        assert(not panel:IsVisible() and not panel.rowAnimator.scripts.OnUpdate and activeGhosts(panel) == 0,
+            "hiding the native interface stops row motion and clears outgoing ghosts")
+        own.level, own.xp, own.rank = 23, 400, 4
+        players[1].rank, players[2].rank, players[3].rank = 1, 2, 3
+        state.players = { players[1], players[2], players[3], own }
+        ranking:Notify("ROSTER_CHANGED")
+        assert(not panel.rowAnimator.scripts.OnUpdate,
+            "hidden-interface reports cannot restart the ranking animation driver")
+        api.UIParent:Show()
+        assert(panel:IsVisible() and near(position(panel.rows[4]), 102)
+            and not panel.rowAnimator.scripts.OnUpdate,
+            "restoring the interface uses the newest ranking baseline")
+        own.level = 24
+        overtake()
+        own.xp, own.rank, players[2].rank = 800, 2, 3
+        state.players = { players[1], own, players[2], players[3] }
+        ranking:Notify("GROUP_CHANGED")
+        assert(near(position(panel.rows[2]), 34) and not panel.rowAnimator.scripts.OnUpdate
+            and activeGhosts(panel) == 0,
+            "switching groups establishes fresh positions even when player identities overlap")
+        own.xp, own.rank, players[1].rank = 900, 1, 2
+        state.players = { own, players[1], players[2], players[3] }
+        ranking:RefreshRankingOverlay()
+        panel.rowAnimator:AdvanceFrame(0.2)
+        api.IsShiftKeyDown = function() return true end
+        panel.rows[1].scripts.OnDragStart(panel.rows[1], "LeftButton")
+        assert(panel.moving and not panel.rowAnimator.scripts.OnUpdate and near(position(panel.rows[1]), 0),
+            "starting a Shift drag settles unfinished row motion before moving the overlay")
+        panel.rows[1].scripts.OnDragStop(panel.rows[1])
+        state.switching = true
+        ranking:Notify("GROUP_CHANGED")
+        assert(count(panel.rowMotion) == 0 and activeGhosts(panel) == 0
+            and not panel.rowAnimator.scripts.OnUpdate,
+            "unavailable standings during group switching clear all row animation state")
+    end
 end
 
 -- Real roster events update local XP immediately; quiet peers keep their rank using stale progress.
@@ -843,13 +1521,12 @@ do
     ranking:RefreshRankingOverlay()
     assert(tooltip.lines[1] == "Lv ? - Awaiting XP" and #tooltip.lines == 2,
         "a missing level is shown without inventing an XP value")
-    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
     panel.ownRow.scripts.OnLeave(panel.ownRow)
-    assert(tooltip:IsShown() and tooltip:IsOwned(panel.CloseButton)
-        and anchorOwners[#anchorOwners] == panel.CloseButton and tooltip.anchor == "ANCHOR_CURSOR",
-        "close-button help follows global positioning and survives another owner's leave callback")
+    local beforeCloseHover = #anchorOwners
+    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
     panel.CloseButton.scripts.OnLeave(panel.CloseButton)
-    assert(not tooltip:IsShown(), "globally positioned help still dismisses when its owner is left")
+    assert(not tooltip:IsShown() and #anchorOwners == beforeCloseHover,
+        "the overlay close button never shows a tooltip or calls global tooltip positioning")
     first.scripts.OnEnter(first)
     state.players[1], state.players[2] = state.players[2], state.players[1]
     ranking:RefreshRankingOverlay()
@@ -985,7 +1662,8 @@ do
     shiftDown = true
     panel.header.scripts.OnDragStart(panel.header, "RightButton")
     assert(not panel.moving, "Shift-right-drag does not move the overlay")
-    panel.CloseButton.scripts.OnEnter(panel.CloseButton)
+    panel.rows[1].scripts.OnEnter(panel.rows[1])
+    assert(api.GameTooltip:IsShown(), "a player tooltip is visible before Shift-dragging")
     panel.header.scripts.OnDragStart(panel.header, "LeftButton")
     assert(panel.moving and not api.GameTooltip:IsShown(), "Shift-dragging the header moves the overlay and clears visible help")
     panel:SetPoint("BOTTOMRIGHT", api.UIParent, "BOTTOMRIGHT", -120, 65)
@@ -1020,7 +1698,7 @@ do
         "damaged saved placement falls back to a valid finite native anchor")
     local future = settings(SECRET, false)
     future.schemaVersion = 99
-    future.ranking = { enabled = true, locked = false,
+    future.ranking = { enabled = true, locked = false, backgroundTransparency = 75,
         position = { point = "TOPRIGHT", relativePoint = "TOPRIGHT", x = -80, y = -70 }, future = "keep" }
     local originalPosition = future.ranking.position
     local readonly, readonlyAPI, _, _, readonlyWorld = loadAddon(future, false)
@@ -1029,8 +1707,10 @@ do
     readonlyWorld:initialize()
     local readonlyPanel = readonly.rankingOverlay
     assert(readonly.savedDataReadOnly and readonlyPanel:IsVisible() and readonlyPanel.header.mouseEnabled
-        and readonlyPanel.CloseButton:IsEnabled(),
-        "a future-schema profile permits viewing, temporary Shift movement and closing")
+        and readonlyPanel.CloseButton:IsEnabled() and readonlyPanel.background.alpha == 0.25,
+        "a future-schema profile permits viewing its saved transparency, temporary Shift movement and closing")
+    readonlyPanel.CloseButton.scripts.OnEnter(readonlyPanel.CloseButton)
+    assert(not readonlyAPI.GameTooltip:IsShown(), "read-only overlay close buttons also have no tooltip")
     -- A future profile intentionally has no active group. Exercise a stale row
     -- callback against the production action guard without reading its schema.
     local readonlyPlayer = row("Future", 1, 24, 200, 1000)
@@ -1038,6 +1718,7 @@ do
         return { players = { readonlyPlayer }, connected = false, grouped = true }
     end
     readonly:RefreshRankingOverlay()
+    readonlyPanel.rowAnimator:AdvanceFrame(0.7)
     readonlyPanel.rows[1]:Click("RightButton")
     local readonlyMenu = readonlyPanel.actionMenu
     assert(readonlyMenu and readonlyMenu:IsShown(), "future-schema profiles permit viewing the action list")
@@ -1045,8 +1726,9 @@ do
         "read-only ranking party actions remain unavailable")
     readonly:OpenOptions("ranking")
     assert(not readonly.optionsPanel.rankingEnabled:IsEnabled()
-        and not readonly.optionsPanel.rankingBurningEffect:IsEnabled(),
-        "future-schema Ranking Settings cannot change saved visibility or burning effects")
+        and not readonly.optionsPanel.rankingBurningEffect:IsEnabled()
+        and not readonly.optionsPanel.rankingTransparencySlider:IsEnabled(),
+        "future-schema Ranking Settings cannot change saved visibility, burning effects or transparency")
     readonlyPanel.header.scripts.OnDragStart(readonlyPanel.header, "LeftButton")
     assert(readonlyPanel.moving, "Shift movement remains available for a read-only profile")
     readonlyPanel:SetPoint("CENTER", readonlyAPI.UIParent, "CENTER", 20, 30)
@@ -1057,7 +1739,7 @@ do
     assert(not readonlyPanel:IsShown() and not readonlyPanel.scripts.OnUpdate
         and future.ranking.enabled and future.ranking.locked == false and future.ranking.future == "keep"
         and future.ranking.position == originalPosition and originalPosition.x == -80 and originalPosition.y == -70
-        and future.schemaVersion == 99,
+        and future.schemaVersion == 99 and future.ranking.backgroundTransparency == 75,
         "read-only movement and session dismissal never write settings or allow notifications to reopen the overlay")
     local command = readonlyAPI.SlashCmdList.LOCKINTOOLS
     command("ranking on")

@@ -112,6 +112,62 @@ do
     for _, count in pairs(calls) do assert(count == 1) end
 end
 
+-- Ranking transparency applies live, without refresh writes or changes to other preferences.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    local calls, setter, failure = 0, addon.SetRankingBackgroundTransparency, nil
+    addon.SetRankingBackgroundTransparency = function(self, value)
+        calls = calls + 1
+        if failure then return false, failure end
+        return setter(self, value)
+    end
+    loadOptions(addon, api)
+    addon:OpenOptions("ranking")
+    local panel = addon.optionsPanel
+    local slider = panel.rankingTransparencySlider
+    assert(slider:IsEnabled() and slider:GetValue() == 0 and panel.rankingTransparencyValue:GetText() == "0%"
+        and calls == 0, "ranking transparency defaults to zero without saving while creating the controls")
+    addon:RefreshOptions()
+    addon:Notify("RANKING_CHANGED")
+    assert(calls == 0, "ranking refresh and notifications do not save transparency")
+    slider:SetValue(24.6)
+    assert(slider:GetValue() == 25 and addon:GetRankingSettings().backgroundTransparency == 25
+        and panel.rankingTransparencyValue:GetText() == "25%" and calls == 1
+        and not addon:GetRankingSettings().enabled and addon:GetRankingSettings().burningEffect,
+        "dragging rounds to a whole percentage, saves once and leaves overlay toggles unchanged")
+    slider:SetValue(25.2)
+    assert(slider:GetValue() == 25 and calls == 1,
+        "dragging within the saved percentage does not save it again")
+    slider:SetValue(104)
+    assert(slider:GetValue() == 100 and addon:GetRankingSettings().backgroundTransparency == 100)
+    slider:SetValue(-4)
+    assert(slider:GetValue() == 0 and addon:GetRankingSettings().backgroundTransparency == 0,
+        "ranking transparency stays within zero to one hundred")
+    slider:SetValue(47)
+    failure = "Unable to save transparency."
+    slider:SetValue(60)
+    assert(slider:GetValue() == 47 and addon:GetRankingSettings().backgroundTransparency == 47
+        and panel.feedback:GetText() == failure,
+        "rejected transparency changes restore the saved value and show the error")
+    failure = nil
+    local writes = calls
+    addon.db.ranking.backgroundTransparency = 82
+    addon:Notify("RANKING_CHANGED")
+    assert(slider:GetValue() == 82 and panel.rankingTransparencyValue:GetText() == "82%" and calls == writes,
+        "external transparency changes refresh the slider without writing back")
+    addon.mainPanel:Hide()
+    addon:OpenOptions("ranking")
+    assert(slider:GetValue() == 82 and calls == writes, "reopening Settings retains transparency without saving")
+    local reloaded, reloadedAPI, _, _, reloadedWorld = loadAddon(api.LockInToolsDB, false)
+    reloadedWorld:initialize()
+    loadOptions(reloaded, reloadedAPI)
+    reloaded:OpenOptions("ranking")
+    assert(reloaded.optionsPanel.rankingTransparencySlider:GetValue() == 82
+        and reloaded:GetRankingSettings().backgroundTransparency == 82,
+        "ranking transparency survives a saved-variable reload")
+end
+
 -- Data channels default on; checkbox and label actions save once and survive reloads.
 do
     local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
@@ -168,13 +224,19 @@ do
         data = { channels = { party = false, guild = true, global = false } } }
     local addon, api, _, _, world = loadAddon(saved, false)
     world:initialize()
+    local transparencyWrites = 0
+    addon.SetRankingBackgroundTransparency = function() transparencyWrites = transparencyWrites + 1; return true end
     loadOptions(addon, api)
     addon:OpenOptions()
     local panel = addon.optionsPanel
     for _, control in ipairs({ panel.secret, panel.applyGroup, panel.createGroup,
-        panel.autoJoin, panel.positionSharing, panel.positionRetention, panel.rankingBurningEffect }) do
+        panel.autoJoin, panel.positionSharing, panel.positionRetention, panel.rankingBurningEffect,
+        panel.rankingTransparencySlider }) do
         assert(not control:IsEnabled())
     end
+    panel.rankingTransparencySlider:SetValue(42)
+    assert(panel.rankingTransparencySlider:GetValue() == 0 and transparencyWrites == 0,
+        "even a directly invoked slider callback cannot save read-only ranking transparency")
     for _, preference in ipairs({ { panel.autoJoin, addon.db.chat, "autoJoin" },
         { panel.positionSharing, addon.db.position, "sharing" },
         { panel.positionRetention, addon.db.position, "keepLastKnown" },
@@ -239,6 +301,13 @@ do
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR"
             and tooltip.lines[1]:find("70%%") and tooltip.lines[1]:find("both burned meters"),
             "Burning effect help explains its threshold and both meters using the shared tooltip")
+        widget.scripts.OnLeave(widget)
+        assert(not tooltip:IsShown())
+    end
+    for _, widget in ipairs({ panel.rankingTransparencyHelp, panel.rankingTransparencySlider }) do
+        widget.scripts.OnEnter(widget)
+        assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
+            "ranking transparency help uses global tooltip positioning")
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())
     end

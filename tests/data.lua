@@ -1,32 +1,7 @@
 -- Shared feature routing and the native channel lifecycle run against mocked WoW APIs.
 local loadNotifications = dofile("tests/support/notifications.lua")
-local function loadModule(file, addon, environment)
-    local chunk, problem
-    if setfenv then
-        chunk, problem = loadfile(file)
-        assert(chunk, problem)
-        setfenv(chunk, environment)
-    else
-        chunk, problem = loadfile(file, "t", environment)
-        assert(chunk, problem)
-    end
-    chunk("LockInTools", addon)
-end
-
-local function copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, item in pairs(value) do result[key] = copy(item) end
-    return result
-end
-
-local function equal(left, right)
-    if type(left) ~= type(right) then return false end
-    if type(left) ~= "table" then return left == right end
-    for key, item in pairs(left) do if not equal(item, right[key]) then return false end end
-    for key in pairs(right) do if left[key] == nil then return false end end
-    return true
-end
+local helpers = dofile("tests/support/helpers.lua")
+local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
 
 local function newAddon(saved, readOnly, withPositions, native)
     native = native or {}

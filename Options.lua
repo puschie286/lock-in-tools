@@ -222,10 +222,10 @@ end
 local RESTEDXP_APPEARANCE_PREFERENCES = {
     { field = "restedxpSkinEnabled", getter = "IsRestedXPSkinEnabled", setter = "SetRestedXPSkinEnabled",
         label = "Use LockInTools skin",
-        description = "Apply the LockInTools theme with flat styling and a slim scrollbar." },
+        description = "Apply the LockInTools theme, flat styling and modern controls." },
     { field = "restedxpChromeHidden", getter = "IsRestedXPChromeHidden", setter = "SetRestedXPChromeHidden",
         label = "Hide header and footer",
-        description = "Hide header/footer decorations with the LockInTools theme; use /rxp for settings." },
+        description = "Right-click the scrollbar for guides; use /rxp for settings." },
 }
 
 local function RestedXPTransparency()
@@ -746,6 +746,64 @@ local function CreateOptionsPanel()
         "Add bright glow and animated flames to both burned meters at 70% and above. Turn this off to hide the effect.\n\n"
             .. "This preference saves across reloads and characters.")
 
+    panel.rankingTransparencyHelp = CreateFrame("Frame", nil, ranking)
+    panel.rankingTransparencyHelp:SetPoint("TOPLEFT", 16, -182)
+    panel.rankingTransparencyHelp:SetSize(308, 20)
+    panel.rankingTransparencyHelp:EnableMouse(true)
+    local transparencyLabel = UI:Label(panel.rankingTransparencyHelp, "Background transparency", 12)
+    transparencyLabel:SetPoint("TOPLEFT", 0, 0)
+    panel.rankingTransparencyValue = UI:Label(panel.rankingTransparencyHelp, "0%", 12, "muted")
+    panel.rankingTransparencyValue:SetPoint("TOPRIGHT", 0, 0)
+    local slider = CreateFrame("Slider", nil, ranking)
+    panel.rankingTransparencySlider = slider
+    slider:SetPoint("TOPLEFT", 20, -210)
+    slider:SetSize(296, 20)
+    slider:SetOrientation("HORIZONTAL")
+    slider:EnableMouse(true)
+    slider:SetMinMaxValues(0, 100)
+    slider:SetValueStep(1)
+    if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
+    local track = slider:CreateTexture(nil, "BACKGROUND")
+    track:SetPoint("LEFT", 0, 0)
+    track:SetPoint("RIGHT", 0, 0)
+    track:SetHeight(4)
+    track:SetColorTexture(0.025, 0.035, 0.05, 1)
+    local thumb = slider:CreateTexture(nil, "ARTWORK")
+    thumb:SetSize(10, 18)
+    thumb:SetColorTexture(UI:GetAccentColor())
+    slider:SetThumbTexture(thumb)
+    local function SavedTransparency()
+        return addon:GetRankingSettings().backgroundTransparency or 0
+    end
+    local function ShowTransparency(value)
+        ranking.updatingTransparency = true
+        slider:SetValue(value)
+        panel.rankingTransparencyValue:SetText(string.format("%d%%", value))
+        ranking.updatingTransparency = nil
+    end
+    ranking.RefreshTransparency = function()
+        local editable = not addon.savedDataReadOnly
+        slider:SetEnabled(editable)
+        panel.rankingTransparencyHelp:SetAlpha(editable and 1 or 0.5)
+        thumb:SetAlpha(editable and 1 or 0.5)
+        ShowTransparency(SavedTransparency())
+    end
+    slider:SetScript("OnValueChanged", function(widget, value)
+        if ranking.updatingTransparency then return end
+        local saved = SavedTransparency()
+        if not widget:IsEnabled() or addon.savedDataReadOnly then ShowTransparency(saved); return end
+        value = math.min(100, math.max(0, math.floor(value + 0.5)))
+        ShowTransparency(value)
+        if value == saved then return end
+        local success, message = addon:SetRankingBackgroundTransparency(value)
+        ShowTransparency(SavedTransparency())
+        SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
+    end)
+    local transparencyHelp = "Fade the ranking overlay's background and border while keeping player rows and meters readable.\n\n"
+        .. "Changes apply immediately and save across reloads and characters."
+    OptionTooltip(ranking, panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
+    OptionTooltip(ranking, slider, "Background transparency", transparencyHelp)
+
     CreateRestedXPPage(panel)
 
     for _, page in pairs(panel.pages) do
@@ -849,6 +907,7 @@ function addon:RefreshOptions()
     panel.rankingEnabled:SetEnabled(editable)
     panel.rankingBurningEffect:SetChecked(ranking.burningEffect)
     panel.rankingBurningEffect:SetEnabled(editable)
+    panel.pages.ranking.RefreshTransparency()
     panel.join:SetEnabled(self.ready and hasGroup and not switching)
     panel.leave:SetEnabled(self.ready and hasGroup and not switching)
     RefreshRestedXP(panel)

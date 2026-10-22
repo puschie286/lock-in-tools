@@ -304,6 +304,8 @@ function addon:RefreshRestedXPSkin()
             if self.RefreshRestedXPChrome then self:RefreshRestedXPChrome(rxp) end
             if self.RefreshRestedXPScrollbar then self:RefreshRestedXPScrollbar(rxp) end
             if self.RefreshRestedXPCheckboxes then self:RefreshRestedXPCheckboxes(rxp) end
+            if self.RefreshRestedXPTooltips then self:RefreshRestedXPTooltips(rxp) end
+            if self.RefreshRestedXPMenus then self:RefreshRestedXPMenus(rxp) end
             if self.RefreshRestedXPTransparency then self:RefreshRestedXPTransparency(rxp) end
             return
         end
@@ -329,6 +331,8 @@ function addon:RefreshRestedXPSkin()
         if self.RefreshRestedXPChrome then self:RefreshRestedXPChrome(rxp) end
         if self.RefreshRestedXPScrollbar then self:RefreshRestedXPScrollbar(rxp) end
         if self.RefreshRestedXPCheckboxes then self:RefreshRestedXPCheckboxes(rxp) end
+        if self.RefreshRestedXPTooltips then self:RefreshRestedXPTooltips(rxp) end
+        if self.RefreshRestedXPMenus then self:RefreshRestedXPMenus(rxp) end
         if self.RefreshRestedXPTransparency then self:RefreshRestedXPTransparency(rxp) end
         state.profile, state.chromeHidden, state.dirty = profile, self:IsRestedXPChromeHidden(), nil
     end)
@@ -649,8 +653,8 @@ function addon:RefreshRestedXPChrome(rxp)
     if not success then error(problem, 0) end
 end
 
--- Keep RXP's slider, callbacks and scroll range. Only its decorative regions
--- and dimensions change; the native wheel, track click and drag still scroll.
+-- Keep RXP's slider, callbacks and scroll range. The hidden-header shortcut
+-- adds only a right-button mouse-up hook; scrolling and dragging stay native.
 local function ScrollbarArrayEqual(left, right)
     if type(left) ~= "table" or type(right) ~= "table" then return left == right end
     if #left ~= #right then return false end
@@ -749,6 +753,68 @@ local function ScrollbarPaint(record, enabled, palette)
     record.appliedThumb = ScrollbarThumbState(thumb)
 end
 
+local function ScrollbarGuideSelection(rxp)
+    local v2 = rxp.v2
+    -- This native chooser is available in both interfaces, despite its V2
+    -- namespace. It keeps RXP's guide filtering, submenus and load callbacks.
+    if v2 and type(v2.ShowGuideSelectionMenu) == "function" then v2:ShowGuideSelectionMenu(); return end
+    local frame = rxp.RXPFrame
+    if not frame or type(frame.GenerateMenuTable) ~= "function" or type(rxp.ShowMenu) ~= "function" then return end
+    -- Older versions lack the dedicated chooser. Match its guide-only prefix;
+    -- the rest of GenerateMenuTable contains unrelated settings and actions.
+    local source = frame:GenerateMenuTable({})
+    if type(source) ~= "table" then return end
+    local menu = {}
+    for _, item in ipairs(source) do
+        if item.isTitle and item.text == "" then break end
+        menu[#menu + 1] = item
+    end
+    menu[#menu + 1] = { text = "", notCheckable = 1, isTitle = 1 }
+    menu[#menu + 1] = { text = CLOSE or "Close", notCheckable = 1, func = function(button) button:Hide() end }
+    rxp:ShowMenu(menu)
+end
+
+local function ScrollbarVisibility(target, forced)
+    if not target then return end
+    if target.forced == nil and forced == nil then return end
+    if target.forced == nil then target.native = target.frame:IsShown() end
+    target.forced = forced
+    local shown = forced
+    if shown == nil then shown = target.native; target.native = nil end
+    if target.frame:IsShown() ~= shown then
+        if shown then target.frame:Show() else target.frame:Hide() end
+    end
+end
+
+local function ScrollbarAccess(record, enabled)
+    record.accessActive = enabled
+    -- Empty/collapsed guides hide this ancestor. Keep only the control visible;
+    -- showing cached step rows would undo RXP's collapsed/hidden-list setting.
+    ScrollbarVisibility(record.container, enabled and true or nil)
+    local hideContent = enabled and record.container and record.container.native == false
+    local contentVisibility
+    if hideContent then contentVisibility = false end
+    ScrollbarVisibility(record.content, contentVisibility)
+    ScrollbarVisibility(record.control, enabled and true or nil)
+end
+
+local function ScrollbarSpace(record, enabled, modern)
+    local frame, parent = record.outer, record.container and record.container.frame
+    if not frame or not parent or not ChromeCapable(frame, true) then return end
+    record.spacing = record.spacing or {}
+    if not enabled then ChromeRestore(record.spacing); return end
+    -- FixScroll rewrites the inner viewport's anchors. Reserve space on its
+    -- outer frame instead so the bar stays inside the window at zero overflow.
+    ChromeRemember(record.spacing, frame, true, false, false)
+    local points = { { "TOPLEFT", parent, "TOPLEFT", 0, 0 },
+        { "BOTTOMRIGHT", parent, "BOTTOMRIGHT", modern and -10 or -18, 0 } }
+    if not ChromePointsEqual(ChromePoints(frame), points) then
+        frame:ClearAllPoints()
+        for _, point in ipairs(points) do frame:SetPoint(unpack(point, 1, 5)) end
+    end
+    ChromeApplied(record.spacing)
+end
+
 function addon:RefreshRestedXPScrollbar(rxp)
     if not rxp or type(rxp.settings) ~= "table" or type(rxp.settings.profile) ~= "table" then return end
     self.restedxpScrollbarState = self.restedxpScrollbarState or setmetatable({}, { __mode = "k" })
@@ -767,21 +833,76 @@ function addon:RefreshRestedXPScrollbar(rxp)
         hooksecurefunc(owner, method, callback or Refresh)
         hooks[method] = true
     end
-    local function Find(scrollframe, slider, background)
+    local function RepairAccess(record)
+        for _, item in pairs({ record.container, record.content, record.control }) do
+            if InCombat() and type(item.frame.IsProtected) == "function" and item.frame:IsProtected() then
+                if self.restedxpSkinState then self.restedxpSkinState.pending = true end
+                return
+            end
+        end
+        -- Visibility retries must not repaint/reanchor the slider or run a
+        -- guide layout on every native Hide/SetShown.
+        state.applying = true
+        local success, problem = pcall(ScrollbarAccess, record, record.accessActive)
+        state.applying = false
+        if not success then error(problem, 0) end
+    end
+    local function Find(scrollframe, slider, background, container, content, outer)
         if not scrollframe or not slider or type(slider.GetThumbTexture) ~= "function" then return end
         local thumb = slider:GetThumbTexture()
         if not thumb or not ScrollbarCapable(slider, thumb) then return end
         local record = state.bars[slider]
         if not record then
             if not (rxp.settings.profile.activeTheme == NAME
-                and type(self.IsRestedXPModernScrollbarEnabled) == "function" and self:IsRestedXPModernScrollbarEnabled()) then return end
-            record = { slider = slider, scrollframe = scrollframe, ornaments = {} }
+                and (self:IsRestedXPModernScrollbarEnabled() or self:IsRestedXPChromeHidden())) then return end
+            record = { slider = slider, scrollframe = scrollframe, ornaments = {}, outer = outer }
             state.bars[slider] = record
+            local function AccessTarget(frame)
+                if not ChromeCapable(frame) then return end
+                local target = { frame = frame }
+                local function Request(shown)
+                    if state.applying or target.forced == nil then return end
+                    target.native = shown
+                    RepairAccess(record)
+                end
+                Hook(frame, "Show", function()
+                    Request(true)
+                    if frame == slider and not state.applying and target.forced == nil and record.active then Refresh() end
+                end)
+                Hook(frame, "Hide", function() Request(false) end)
+                Hook(frame, "SetShown", function(_, shown) Request(not not shown) end)
+                if type(frame.HookScript) == "function" then
+                    local function Changed()
+                        -- Parent hiding fires OnHide too; IsShown still reports
+                        -- the child's own flag, preserving the user's root hide.
+                        if target.forced ~= nil and frame:IsShown() ~= target.forced then Request(frame:IsShown()) end
+                    end
+                    frame:HookScript("OnShow", Changed)
+                    frame:HookScript("OnHide", Changed)
+                end
+                return target
+            end
+            record.container, record.content, record.control = AccessTarget(container), AccessTarget(content), AccessTarget(slider)
             local included = {}
             local function Ornament(region)
                 if region and region ~= thumb and not included[region] and ChromeCapable(region) then
                     included[region] = true
                     record.ornaments[#record.ornaments + 1] = region
+                    local function KeepHidden()
+                        if state.applying or not record.active or not region:IsShown() then return end
+                        -- SetShown and native OnShow paths can bypass the Lua
+                        -- Show method. Hide just this ornament, keeping the
+                        -- slider's drag, geometry and scroll callbacks intact.
+                        record.visibility[region] = true
+                        if InCombat() and type(region.IsProtected) == "function" and region:IsProtected() then
+                            if self.restedxpSkinState then self.restedxpSkinState.pending = true end
+                            return
+                        end
+                        region:Hide()
+                    end
+                    Hook(region, "Show", KeepHidden)
+                    Hook(region, "SetShown", KeepHidden)
+                    if type(region.HookScript) == "function" then region:HookScript("OnShow", KeepHidden) end
                 end
             end
             Ornament(slider.ScrollUpButton)
@@ -796,10 +917,20 @@ function addon:RefreshRestedXPScrollbar(rxp)
             record.track = slider:CreateTexture(nil, "BACKGROUND")
             record.track:SetAllPoints(slider)
             record.track:Hide()
-            Hook(slider, "Show")
             Hook(slider, "SetThumbTexture")
-            Hook(slider.ScrollUpButton, "Show")
-            Hook(slider.ScrollDownButton, "Show")
+            if type(slider.HookScript) == "function" then
+                slider:HookScript("OnMouseUp", function(_, button)
+                    if button ~= "RightButton" or rxp.settings.profile.activeTheme ~= NAME
+                        or not self:IsRestedXPChromeHidden() then return end
+                    local native = rxp.v2
+                    local useV2 = native and type(native.IsGuideWindowEnabled) == "function" and native:IsGuideWindowEnabled()
+                    local window = native and native.state and native.state.guideWindow
+                    local steps = window and window.guideSteps
+                    local current = useV2 and steps and steps.scroll and steps.scroll.scrollbar
+                        or not useV2 and rxp.RXPFrame and rxp.RXPFrame.ScrollFrame and rxp.RXPFrame.ScrollFrame.ScrollBar
+                    if slider == current then ScrollbarGuideSelection(rxp) end
+                end)
+            end
         end
     end
     Hook(rxp, "LoadActiveTheme")
@@ -807,6 +938,17 @@ function addon:RefreshRestedXPScrollbar(rxp)
     Hook(rxp.RXPFrame, "UpdateVisuals")
     Hook(rxp.RXPFrame, "UpdateScrollBar")
     local classic = rxp.RXPFrame and rxp.RXPFrame.ScrollFrame
+    Hook(rxp.RXPFrame and rxp.RXPFrame.BottomFrame, "UpdateFrame", function()
+        local record = classic and state.bars[classic.ScrollBar]
+        if state.applying or not record or not record.accessActive or not record.container then return end
+        local body = record.container.frame
+        if type(body.GetHeight) ~= "function" then return end
+        -- Classic UpdateFrame only calls Show when IsShown is false. Our
+        -- forced visibility masks that transition, so capture its actual
+        -- postcondition (height >=30 and no guide.hidewindow) at this boundary.
+        record.container.native = body:GetHeight() >= 30 and not (rxp.currentGuide and rxp.currentGuide.hidewindow)
+        RepairAccess(record)
+    end)
     -- Discovery is read-only in combat; creation and frame changes wait below.
     local v2 = rxp.v2
     Hook(v2, "GetGuideWindow")
@@ -828,22 +970,29 @@ function addon:RefreshRestedXPScrollbar(rxp)
     Hook(scroll, "FixScroll")
     local enabled = rxp.settings.profile.activeTheme == NAME
         and type(self.IsRestedXPModernScrollbarEnabled) == "function" and self:IsRestedXPModernScrollbarEnabled()
+    local accessible = rxp.settings.profile.activeTheme == NAME and self:IsRestedXPChromeHidden()
     if InCombat() then
-        local pending = enabled
-        for _, record in pairs(state.bars) do pending = pending or record.active end
+        local pending = enabled or accessible
+        for _, record in pairs(state.bars) do pending = pending or record.active or record.accessActive end
         if pending and self.restedxpSkinState then self.restedxpSkinState.pending = true end
         return
     end
     state.applying = true
     local success, problem = pcall(function()
-        Find(classic, classic and classic.ScrollBar)
-        Find(scroll and scroll.scrollframe, scroll and scroll.scrollbar, scroll and scroll.scrollbg)
+        local root, steps = rxp.RXPFrame, window and window.guideSteps
+        Find(classic, classic and classic.ScrollBar, nil, root and root.BottomFrame, root and root.ScrollChild)
+        Find(scroll and scroll.scrollframe, scroll and scroll.scrollbar, scroll and scroll.scrollbg,
+            steps and steps.frame, scroll and scroll.content, scroll and scroll.frame)
         local palette = self.Theme:GetPalette()
         local v2Enabled = v2 and type(v2.IsGuideWindowEnabled) == "function" and v2:IsGuideWindowEnabled()
         for slider, record in pairs(state.bars) do
-            local active = enabled and (v2Enabled and scroll and slider == scroll.scrollbar
-                or not v2Enabled and classic and slider == classic.ScrollBar)
-            ScrollbarPaint(record, active, palette)
+            local current = v2Enabled and scroll and slider == scroll.scrollbar
+                or not v2Enabled and classic and slider == classic.ScrollBar
+            ScrollbarPaint(record, enabled and current, palette)
+            ScrollbarSpace(record, accessible and current, enabled)
+            -- Never set scrollBarShown or change the native range. V2's wheel
+            -- math assumes positive overflow when that native flag is set.
+            ScrollbarAccess(record, accessible and current)
         end
     end)
     state.applying = false
@@ -1216,6 +1365,320 @@ function addon:RefreshRestedXPCheckboxes(rxp)
         -- Pooled controls can be absent from the current item list when disabled.
         if InCombat() and not Wanted() then
             for _, record in pairs(state.buttons) do if record.active then Pending(); break end end
+        end
+    end)
+    state.applying = false
+    if not success then error(problem, 0) end
+end
+
+-- RXP uses the shared GameTooltip. Match exact addon-owned frame ancestry,
+-- never tooltip text or frame-name prefixes (RXP also annotates ordinary items).
+local function RestedXPTooltipOwner(rxp, owner)
+    local roots = {}
+    local function Root(frame)
+        if not frame or frame == UIParent or frame == WorldFrame then return end
+        roots[frame] = true
+        if frame.frame and frame.frame ~= UIParent and frame.frame ~= WorldFrame then roots[frame.frame] = true end
+    end
+    Root(rxp.RXPFrame)
+    Root(rxp.RXPFrame and rxp.RXPFrame.activeItemFrame)
+    Root(rxp.activeItemFrame)
+    Root(rxp.targeting and rxp.targeting.activeTargetFrame)
+    for _, frame in pairs(rxp.enabledFrames or {}) do Root(frame) end
+    local native = rxp.v2 and rxp.v2.state
+    Root(native and native.guideWindow)
+    Root(native and native.activePartyStepFrame)
+    for _, player in pairs(native and native.player or {}) do
+        Root(player.activeStepFrame)
+        Root(player.childContainer)
+        for _, item in ipairs(player.activeStepItems or {}) do Root(item); Root(item.card) end
+    end
+    local menus = addon.restedxpMenuState and addon.restedxpMenuState[rxp]
+    for frame in pairs(menus and menus.panels or {}) do
+        if not (type(frame.IsForbidden) == "function" and frame:IsForbidden())
+            and frame:IsShown() and menus.owners[frame.dropdown] then Root(frame) end
+    end
+    -- Map buttons live under shared map frames. HBD's addon-keyed registries
+    -- identify RXP pins without claiming other addons' pins or the whole map.
+    local pins
+    if LibStub then
+        local success, library = pcall(LibStub, "HereBeDragons-Pins-2.0", true)
+        if success and type(library) == "table" then pins = library end
+    end
+    local worldPins = pins and pins.worldmapPinRegistry and pins.worldmapPinRegistry[rxp]
+    local miniPins = pins and pins.minimapPinRegistry and pins.minimapPinRegistry[rxp]
+    local seen = {}
+    for _ = 1, 32 do
+        if not owner or owner == UIParent or owner == WorldFrame or seen[owner] then return false end
+        if type(owner.IsForbidden) == "function" and owner:IsForbidden() then return false end
+        if roots[owner] or worldPins and worldPins[owner] or miniPins and miniPins[owner] then return true end
+        seen[owner] = true
+        owner = type(owner.GetParent) == "function" and owner:GetParent() or nil
+    end
+    return false
+end
+
+local function TooltipColor(tooltip, method)
+    if type(tooltip[method]) ~= "function" then return end
+    local red, green, blue, alpha = tooltip[method](tooltip)
+    if type(red) == "number" and type(green) == "number" and type(blue) == "number" then
+        return { red, green, blue, alpha or 1 }
+    end
+end
+
+local function TooltipRestore(tooltip, state)
+    if not state.active then return end
+    state.active = false
+    for region, alpha in pairs(state.native) do
+        if region:GetAlpha() == 0 then region:SetAlpha(alpha) end
+        state.native[region] = nil
+    end
+    -- A new owner may already have supplied its own backdrop; preserve it.
+    local legacy = state.legacy
+    if legacy and not tooltip:GetBackdrop() and legacy.backdrop then
+        tooltip:SetBackdrop(legacy.backdrop)
+        if legacy.fill and type(tooltip.SetBackdropColor) == "function" then tooltip:SetBackdropColor(unpack(legacy.fill)) end
+        if legacy.border and type(tooltip.SetBackdropBorderColor) == "function" then tooltip:SetBackdropBorderColor(unpack(legacy.border)) end
+    end
+    state.legacy = nil
+    for _, texture in ipairs(state.textures or {}) do texture:Hide() end
+end
+
+local function FlatPanelTextures(frame)
+    local textures = {}
+    for index = 1, 5 do textures[index] = frame:CreateTexture(nil, index == 1 and "BACKGROUND" or "BORDER") end
+    textures[1]:SetAllPoints(frame)
+    textures[2]:SetPoint("TOPLEFT"); textures[2]:SetPoint("TOPRIGHT"); textures[2]:SetHeight(1)
+    textures[3]:SetPoint("BOTTOMLEFT"); textures[3]:SetPoint("BOTTOMRIGHT"); textures[3]:SetHeight(1)
+    textures[4]:SetPoint("TOPLEFT"); textures[4]:SetPoint("BOTTOMLEFT"); textures[4]:SetWidth(1)
+    textures[5]:SetPoint("TOPRIGHT"); textures[5]:SetPoint("BOTTOMRIGHT"); textures[5]:SetWidth(1)
+    return textures
+end
+
+function addon:RefreshRestedXPTooltips(rxp)
+    local tooltip = GameTooltip
+    if not rxp or not rxp.settings or not rxp.settings.profile or not tooltip
+        or type(tooltip.GetOwner) ~= "function" or type(tooltip.HookScript) ~= "function"
+        or type(tooltip.CreateTexture) ~= "function" then return end
+    if type(tooltip.IsForbidden) == "function" and tooltip:IsForbidden() then return end
+    self.restedxpTooltipState = self.restedxpTooltipState or setmetatable({}, { __mode = "k" })
+    local state = self.restedxpTooltipState[rxp]
+    if not state then
+        state = { native = setmetatable({}, { __mode = "k" }), hooks = setmetatable({}, { __mode = "k" }) }
+        self.restedxpTooltipState[rxp] = state
+    end
+    if state.applying then return end
+    local function Update() self:RefreshRestedXPTooltips(rxp) end
+    local function Hook(owner, method, callback)
+        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
+        local hooks = state.hooks[owner] or {}
+        state.hooks[owner] = hooks
+        if hooks[method] then return end
+        hooksecurefunc(owner, method, callback or Update)
+        hooks[method] = true
+    end
+    if not state.scripts then
+        tooltip:HookScript("OnShow", Update)
+        tooltip:HookScript("OnHide", Update)
+        state.scripts = true
+    end
+    Hook(tooltip, "SetOwner")
+    Hook(tooltip, "Show")
+    Hook(tooltip, "SetShown")
+    Hook(tooltip, "Hide")
+    Hook(tooltip, "SetHyperlink")
+    Hook(tooltip, "SetBackdrop", function()
+        if state.applying then return end
+        if state.legacy then
+            local backdrop = tooltip:GetBackdrop()
+            state.legacy = { backdrop = Copy(backdrop), fill = backdrop and TooltipColor(tooltip, "GetBackdropColor"),
+                border = backdrop and TooltipColor(tooltip, "GetBackdropBorderColor") }
+        end
+        Update()
+    end)
+    for _, entry in ipairs({ { "SetBackdropColor", "fill" }, { "SetBackdropBorderColor", "border" } }) do
+        local field = entry[2]
+        Hook(tooltip, entry[1], function(_, red, green, blue, alpha)
+            if state.applying then return end
+            if state.legacy and type(red) == "number" and type(green) == "number" and type(blue) == "number" then
+                state.legacy[field] = { red, green, blue, alpha or 1 }
+            end
+            Update()
+        end)
+    end
+    Hook(rxp, "LoadActiveTheme")
+    local wanted = self:IsRestedXPSkinEnabled() and rxp.settings.profile.activeTheme == NAME
+        and tooltip:IsShown() and RestedXPTooltipOwner(rxp, tooltip:GetOwner())
+    if wanted and not state.textures and InCombat() then
+        if self.restedxpSkinState then self.restedxpSkinState.pending = true end
+        return
+    end
+    state.applying = true
+    local success, problem = pcall(function()
+        if not wanted then TooltipRestore(tooltip, state); return end
+        state.textures = state.textures or FlatPanelTextures(tooltip)
+        state.active = true
+        local function Suppress(region)
+            if not region or region == tooltip or type(region.GetAlpha) ~= "function" or type(region.SetAlpha) ~= "function" then return end
+            local alpha = region:GetAlpha()
+            if state.native[region] == nil or alpha ~= 0 then state.native[region] = alpha end
+            if alpha ~= 0 then region:SetAlpha(0) end
+        end
+        Suppress(tooltip.NineSlice)
+        Suppress(tooltip.BackdropContainer)
+        Suppress(tooltip.TextureSliceBackground)
+        for _, piece in ipairs(backdropPieces) do Suppress(tooltip[piece]) end
+        -- Older clients keep backdrop pixels private. Clearing only that
+        -- decoration leaves tooltip padding, text and native anchor untouched.
+        if not tooltip.Center and type(tooltip.GetBackdrop) == "function" and type(tooltip.SetBackdrop) == "function" then
+            local backdrop = tooltip:GetBackdrop()
+            if backdrop then
+                state.legacy = { backdrop = Copy(backdrop), fill = TooltipColor(tooltip, "GetBackdropColor"),
+                    border = TooltipColor(tooltip, "GetBackdropBorderColor") }
+                tooltip:SetBackdrop(nil)
+            end
+        end
+        local palette = self.Theme:GetPalette()
+        for index, texture in ipairs(state.textures) do
+            texture:SetColorTexture(unpack(index == 1 and palette.background or palette.border))
+            texture:Show()
+        end
+    end)
+    state.applying = false
+    if not success then error(problem, 0) end
+end
+
+local function MenuRestore(record)
+    if not record.active then return end
+    record.active = false
+    for region, alpha in pairs(record.native) do
+        if region:GetAlpha() == 0 then region:SetAlpha(alpha) end
+        record.native[region] = nil
+    end
+    for _, texture in ipairs(record.textures or {}) do texture:Hide() end
+    for _, texture in pairs(record.highlights) do texture:Hide() end
+end
+
+function addon:RefreshRestedXPMenus(rxp)
+    if not rxp or not rxp.settings or not rxp.settings.profile then return end
+    self.restedxpMenuState = self.restedxpMenuState or setmetatable({}, { __mode = "k" })
+    local state = self.restedxpMenuState[rxp]
+    if not state then
+        state = { owners = setmetatable({}, { __mode = "k" }), panels = setmetatable({}, { __mode = "k" }),
+            hooks = setmetatable({}, { __mode = "k" }) }
+        self.restedxpMenuState[rxp] = state
+    end
+    if state.applying then return end
+    local default = rxp.RXPFrame and rxp.RXPFrame.MenuFrame
+    if default then state.owners[default] = true end
+    local function Update() self:RefreshRestedXPMenus(rxp) end
+    local function Hook(owner, method, callback)
+        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
+        local hooks = state.hooks[owner] or {}
+        state.hooks[owner] = hooks
+        if hooks[method] then return end
+        hooksecurefunc(owner, method, callback or Update)
+        hooks[method] = true
+    end
+    Hook(rxp, "ShowMenu", function(_, _, menuFrame)
+        local owner = menuFrame or rxp.RXPFrame and rxp.RXPFrame.MenuFrame
+        if owner then state.owners[owner] = true end
+        Update()
+    end)
+    Hook(rxp, "LoadActiveTheme")
+    -- Both menu backends pool their lists across addons. Discover after native
+    -- creation/toggling; submenus can open without another RXP ShowMenu call.
+    for _, method in ipairs({ "EasyMenu", "ToggleDropDownMenu", "UIDropDownMenu_CreateFrames", "UIDropDownMenu_Initialize" }) do
+        Hook(_G, method)
+    end
+    if LibStub then
+        local success, library = pcall(LibStub, "LibUIDropDownMenu-4.0", true)
+        if success and type(library) == "table" then
+            for _, method in ipairs({ "EasyMenu", "ToggleDropDownMenu", "UIDropDownMenu_CreateFrames", "UIDropDownMenu_Initialize" }) do
+                Hook(library, method)
+            end
+        end
+    end
+    -- Native V2 themes menus after OnShow, including delayed submenu hooks.
+    -- Reapply decorations afterward; never change its menu-theme preference.
+    Hook(rxp.v2, "UpdateMenuTheme")
+    local function Pending()
+        if self.restedxpSkinState then self.restedxpSkinState.pending = true end
+    end
+    local function Find(frame)
+        if not frame or state.panels[frame] or type(frame.HookScript) ~= "function"
+            or type(frame.CreateTexture) ~= "function" then return end
+        if type(frame.IsForbidden) == "function" and frame:IsForbidden() then return end
+        state.panels[frame] = { frame = frame, native = setmetatable({}, { __mode = "k" }),
+            highlights = setmetatable({}, { __mode = "k" }) }
+        frame:HookScript("OnShow", Update)
+        frame:HookScript("OnHide", Update)
+        Hook(frame, "Show")
+        Hook(frame, "SetShown")
+        Hook(frame, "Hide")
+    end
+    local enabled = rxp.settings.profile.activeTheme == NAME
+        and (self:IsRestedXPSkinEnabled() or self:IsRestedXPChromeHidden())
+    state.applying = true
+    local success, problem = pcall(function()
+        for _, backend in ipairs({ { "DropDownList", "UIDROPDOWNMENU_MAXLEVELS" },
+            { "L_DropDownList", "L_UIDROPDOWNMENU_MAXLEVELS" } }) do
+            local levels = math.min(32, math.max(3, tonumber(_G[backend[2]]) or 3))
+            for level = 1, levels do Find(_G[backend[1] .. level]) end
+        end
+        local palette = self.Theme:GetPalette()
+        for frame, record in pairs(state.panels) do
+            if not (type(frame.IsForbidden) == "function" and frame:IsForbidden()) then
+                -- A hidden list retains its last dropdown owner. That stale
+                -- reference must not keep our artwork on a shared native panel.
+                local wanted = enabled and frame:IsShown() and state.owners[frame.dropdown] == true
+                if not wanted then
+                    MenuRestore(record)
+                elseif not record.textures and InCombat() then
+                    Pending()
+                else
+                    record.textures = record.textures or FlatPanelTextures(frame)
+                    record.active = true
+                    local function Suppress(region)
+                        if not region or region == frame or type(region.GetAlpha) ~= "function" or type(region.SetAlpha) ~= "function" then return end
+                        local alpha = region:GetAlpha()
+                        if record.native[region] == nil or alpha ~= 0 then record.native[region] = alpha end
+                        if alpha ~= 0 then region:SetAlpha(0) end
+                    end
+                    local name = type(frame.GetName) == "function" and frame:GetName()
+                    Suppress(frame.Backdrop or name and _G[name .. "Backdrop"])
+                    Suppress(frame.MenuBackdrop or name and _G[name .. "MenuBackdrop"])
+                    Suppress(frame.NineSlice)
+                    for _, piece in ipairs(backdropPieces) do Suppress(frame[piece]) end
+                    for _, group in ipairs({ "rxpBackground", "rxpBorder", "rxpShadow" }) do Suppress(frame[group]) end
+                    for index, texture in ipairs(record.textures) do
+                        texture:SetColorTexture(unpack(index == 1 and palette.background or palette.border))
+                        texture:Show()
+                    end
+                    for index = 1, frame.numButtons or 0 do
+                        local button = frame["Button" .. index] or name and _G[name .. "Button" .. index]
+                        if button and type(button.CreateTexture) == "function" then
+                            local highlight = record.highlights[button]
+                            if not highlight and InCombat() then
+                                Pending()
+                            else
+                                if not highlight then
+                                    -- HIGHLIGHT follows native hover and
+                                    -- LockHighlight selection. No input handlers,
+                                    -- checked callbacks or hit areas change.
+                                    highlight = button:CreateTexture(nil, "HIGHLIGHT")
+                                    highlight:SetAllPoints(button)
+                                    record.highlights[button] = highlight
+                                end
+                                local native = button.Highlight or type(button.GetHighlightTexture) == "function" and button:GetHighlightTexture()
+                                Suppress(native or name and _G[name .. "Button" .. index .. "Highlight"])
+                                highlight:SetColorTexture(palette.accent[1], palette.accent[2], palette.accent[3], 0.18)
+                                highlight:Show()
+                            end
+                        end
+                    end
+                end
+            end
         end
     end)
     state.applying = false

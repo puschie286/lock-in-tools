@@ -1,17 +1,6 @@
 -- Published known-answer vectors exercise algorithms independently of addon logic.
 local loadNotifications = dofile("tests/support/notifications.lua")
-local function loadModule(file, addon, environment)
-    local chunk, problem
-    if setfenv then
-        chunk, problem = loadfile(file)
-        assert(chunk, problem)
-        setfenv(chunk, environment)
-    else
-        chunk, problem = loadfile(file, "t", environment)
-        assert(chunk, problem)
-    end
-    chunk("LockInTools", addon)
-end
+local loadModule = dofile("tests/support/helpers.lua").loadModule
 
 local function newAddon(saved)
     -- Use the exact-integer fallback even if the test interpreter has bit32.

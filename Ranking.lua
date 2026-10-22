@@ -8,6 +8,12 @@ local function Number(value, maximum)
         and value == value and value >= 0 and value <= maximum and value == math.floor(value)
 end
 
+local function Transparency(value)
+    if (issecretvalue and issecretvalue(value)) or type(value) ~= "number"
+        or value ~= value or math.abs(value) == math.huge then return nil end
+    return math.floor(math.max(0, math.min(100, value)) + 0.5)
+end
+
 local function Position(position)
     local function Offset(value)
         return type(value) == "number" and value == value and math.abs(value) <= 100000
@@ -24,6 +30,7 @@ function addon:InitializeRanking()
     local settings = self.savedDataReadOnly and {} or saved
     settings.enabled, settings.locked = saved.enabled == true, saved.locked ~= false
     settings.burningEffect = saved.burningEffect ~= false
+    settings.backgroundTransparency = Transparency(saved.backgroundTransparency) or 0
     local savedPosition = saved.position
     settings.position = Position(savedPosition)
     if settings.position then
@@ -140,6 +147,17 @@ function addon:SetRankingBurningEffect(enabled)
     local success, message = Editable(self, enabled)
     if not success then return false, message end
     self.rankingSettings.burningEffect = enabled
+    self:Notify("RANKING_CHANGED")
+    return true
+end
+
+function addon:SetRankingBackgroundTransparency(value)
+    if not self.initialized or not self.rankingSettings then return false, "Still loading. Please try again after login." end
+    local percent = Transparency(value)
+    if not percent then return false, "Choose a background transparency percentage." end
+    if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
+    if self.rankingSettings.backgroundTransparency == percent then return true end
+    self.rankingSettings.backgroundTransparency = percent
     self:Notify("RANKING_CHANGED")
     return true
 end
