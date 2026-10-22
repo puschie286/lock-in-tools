@@ -656,4 +656,152 @@ do
     assert(world:find("self-testrealm").level == nil, "Throwing level APIs cannot escape overview rendering")
 end
 
-print("PASS: overview presence and native party actions")
+-- Native membership is cached separately from shared party flags and survives without a LIT group.
+do
+    local native = { raid = false, partyCount = 0, raidCount = 0, units = {}, reads = 0, modeReads = 0 }
+    local addon, world = newAddon(nil, false, nil, function(environment)
+        environment.IsInRaid = function() native.modeReads = native.modeReads + 1; return native.raid end
+        environment.GetNumGroupMembers = function() return native.raidCount end
+        environment.GetNumSubgroupMembers = function() return native.partyCount end
+        local unitFullName = environment.UnitFullName
+        environment.UnitFullName = function(unit)
+            if unit == "player" then return unitFullName(unit) end
+            native.reads = native.reads + 1
+            local member = native.units[unit]
+            if member then return member[1], member[2] end
+        end
+    end)
+    local changed = 0
+    addon:RegisterNotification("NATIVE_GROUP_CHANGED", function() changed = changed + 1 end)
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil)
+    addon:InitializeNativeGroupMembership()
+    assert(native.modeReads == 1 and native.reads == 0 and changed == 0,
+        "Initialization and repeated lookups cannot rescan the native roster")
+
+    native.partyCount = 3
+    native.units = { party1 = { "Friend", "Test Realm" }, party2 = { "Friend", "Other Realm" },
+        party3 = { "Local", "" } }
+    world:event("GROUP_ROSTER_UPDATE")
+    assert(addon:GetNativeGroupUnit("FRIEND-testrealm") == "party1"
+        and addon:GetNativeGroupUnit("Friend-Other Realm") == "party2"
+        and addon:GetNativeGroupUnit("Friend") == "party1"
+        and addon:GetNativeGroupUnit("Local-TestRealm") == "party3",
+        "Full normalized realm identities distinguish matching cross-realm character names")
+    local reads, modes = native.reads, native.modeReads
+    for _ = 1, 10 do assert(addon:GetNativeGroupUnit("Friend-OtherRealm") == "party2") end
+    assert(native.reads == reads and native.modeReads == modes and changed == 1,
+        "A map render performs cached membership lookups only")
+    addon.rosterState.peers["remote-testrealm"] = { name = "Remote-TestRealm", inParty = true }
+    assert(addon:GetNativeGroupUnit("Remote-TestRealm") == nil,
+        "A shared inParty flag does not identify membership in our own native group")
+
+    native.units.party1 = { "Renamed", "TestRealm" }
+    world:event("UNIT_NAME_UPDATE", "target")
+    world:event("UNIT_NAME_UPDATE", "partypet1")
+    world:event("UNIT_NAME_UPDATE", {})
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == "party1" and native.reads == reads and changed == 1)
+    world:event("UNIT_NAME_UPDATE", "party1")
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil
+        and addon:GetNativeGroupUnit("Renamed-TestRealm") == "party1" and changed == 2)
+
+    native.raid, native.raidCount = true, 3
+    native.units = { raid1 = { "Self", "TestRealm" }, raid2 = { "Friend", "OtherRealm" },
+        raid3 = { "Raidmate", "TestRealm" } }
+    world:event("GROUP_ROSTER_UPDATE")
+    assert(addon:GetNativeGroupUnit("Renamed-TestRealm") == nil
+        and addon:GetNativeGroupUnit("Friend-OtherRealm") == "raid2"
+        and addon:GetNativeGroupUnit("Friend") == nil and changed == 3,
+        "Converting to raid replaces party tokens without matching a short name to a foreign realm")
+    native.units.raid2 = { "Fresh", "OtherRealm" }
+    world:event("UNIT_NAME_UPDATE", "raid2")
+    assert(addon:GetNativeGroupUnit("Friend-OtherRealm") == nil
+        and addon:GetNativeGroupUnit("Fresh-OtherRealm") == "raid2" and changed == 4)
+
+    -- The native roster remains useful with no writable/shared addon group.
+    world.fingerprint, addon.savedDataReadOnly = nil, true
+    native.units.raid3 = { "Reloaded", "TestRealm" }
+    world:event("PLAYER_ENTERING_WORLD")
+    assert(addon:GetNativeGroupUnit("Reloaded-TestRealm") == "raid3" and changed == 5)
+    world:event("UNIT_NAME_UPDATE", "player")
+    assert(changed == 6, "Player name updates may resolve a previously unavailable local realm")
+    native.raid, native.partyCount, native.raidCount = false, 0, 0
+    world:event("GROUP_ROSTER_UPDATE")
+    assert(addon:GetNativeGroupUnit("Reloaded-TestRealm") == nil
+        and next(addon.nativeGroupMembership.units) == nil and changed == 7,
+        "Leaving the native group immediately discards every cached token")
+end
+
+-- Missing, secret, throwing and incomplete native APIs fail open instead of inventing membership.
+do
+    local secret = {}
+    local addon, world = newAddon(nil, false, nil, function(environment)
+        environment.issecretvalue = function(value) return value == secret end
+        environment.IsInRaid = function() return false end
+        environment.GetNumSubgroupMembers = function() return 1 end
+        local unitFullName = environment.UnitFullName
+        environment.UnitFullName = function(unit)
+            if unit == "party1" then return "Friend", "TestRealm" end
+            return unitFullName(unit)
+        end
+    end)
+    local environment = world.environment
+    local original = { IsInRaid = environment.IsInRaid, GetNumSubgroupMembers = environment.GetNumSubgroupMembers,
+        UnitFullName = environment.UnitFullName, GetNormalizedRealmName = environment.GetNormalizedRealmName }
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == "party1")
+    for _, api in ipairs({ "IsInRaid", "GetNumSubgroupMembers", "UnitFullName" }) do
+        for _, result in ipairs({ "missing", "error", "secret", "unknown", "malformed" }) do
+            if result == "missing" then environment[api] = nil
+            elseif result == "error" then environment[api] = function() error("native roster unavailable") end
+            elseif result == "secret" then environment[api] = function() return secret end
+            elseif result == "malformed" then environment[api] = function() return {} end
+            else environment[api] = function() return nil end end
+            addon:RefreshNativeGroupMembership()
+            assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil,
+                api .. " " .. result .. " must clear old native membership")
+            environment[api] = original[api]
+            addon:RefreshNativeGroupMembership()
+            assert(addon:GetNativeGroupUnit("Friend-TestRealm") == "party1")
+        end
+    end
+    environment.IsInRaid = function() return true end
+    for _, result in ipairs({ -1, 41, 1.5, secret, "2" }) do
+        environment.GetNumGroupMembers = function() return result end
+        addon:RefreshNativeGroupMembership()
+        assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil)
+    end
+    environment.GetNumGroupMembers = function() error("raid roster unavailable") end
+    addon:RefreshNativeGroupMembership()
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil)
+    environment.GetNumGroupMembers = nil
+    addon:RefreshNativeGroupMembership()
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil)
+    environment.IsInRaid = original.IsInRaid
+
+    for _, member in ipairs({ { secret, "TestRealm" }, { "Friend", secret }, { "Friend", {} },
+        { "Bad|Name", "TestRealm" }, { "Friend", "Bad|Realm" }, { "Friend", " " } }) do
+        environment.UnitFullName = function() return member[1], member[2] end
+        addon:RefreshNativeGroupMembership()
+        assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil)
+    end
+    assert(addon:GetNativeGroupUnit(secret) == nil and addon:GetNativeGroupUnit({}) == nil)
+
+    environment.UnitFullName = function() return "Friend", "" end
+    for _, result in ipairs({ "missing", "error", "secret", "unknown" }) do
+        if result == "missing" then environment.GetNormalizedRealmName = nil
+        elseif result == "error" then environment.GetNormalizedRealmName = function() error("realm unavailable") end
+        elseif result == "secret" then environment.GetNormalizedRealmName = function() return secret end
+        else environment.GetNormalizedRealmName = function() return nil end end
+        addon:RefreshNativeGroupMembership()
+        assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil
+            and addon:GetNativeGroupUnit("Friend") == nil,
+            "An unresolved native realm cannot turn a short name into a full identity")
+    end
+    environment.GetNormalizedRealmName = original.GetNormalizedRealmName
+    world:event("UNIT_NAME_UPDATE", "player")
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == "party1")
+    local reads = addon.nativeGroupMembership.units
+    world:event("UNIT_NAME_UPDATE", secret)
+    assert(addon.nativeGroupMembership.units == reads, "Secret unit events cannot be inspected")
+end
+
+print("PASS: overview presence, native party actions and membership cache")

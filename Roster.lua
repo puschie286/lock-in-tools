@@ -70,6 +70,92 @@ local function NativeNumber(callback, maximum, ...)
     if ok and Number(value, maximum) then return value end
 end
 
+local function NativeGroupRealm()
+    if type(GetNormalizedRealmName) ~= "function" then return nil end
+    local ok, realm = pcall(GetNormalizedRealmName)
+    if not ok or IsSecret(realm) or type(realm) ~= "string" or realm == ""
+        or realm:find("[|%c]") then return nil end
+    realm = realm:gsub("%s", "")
+    return realm ~= "" and realm or nil
+end
+
+local function NativeGroupIdentity(name, realm)
+    if IsSecret(name) or type(name) ~= "string" then return nil end
+    -- A short name belongs only to our cached local realm, never to the first
+    -- matching character on another realm in the native roster.
+    if not name:find("-", 1, true) then
+        if IsSecret(realm) or type(realm) ~= "string" or realm == "" then return nil end
+        name = name .. "-" .. realm
+    end
+    return Identity(name)
+end
+
+local function CacheNativeGroupUnit(units, ambiguous, name, realm, unit)
+    local id = NativeGroupIdentity(name, realm)
+    if not id or ambiguous[id] then return end
+    if units[id] and units[id] ~= unit then
+        units[id], ambiguous[id] = nil, true
+    else
+        units[id] = unit
+    end
+end
+
+function addon:GetNativeGroupUnit(name)
+    self:InitializeNativeGroupMembership()
+    local state = self.nativeGroupMembership
+    local id = NativeGroupIdentity(name, state.realm)
+    return id and state.units[id] or nil
+end
+
+function addon:RefreshNativeGroupMembership()
+    if not self.nativeGroupMembership then self:InitializeNativeGroupMembership(); return end
+    local state, units, ambiguous = self.nativeGroupMembership, {}, {}
+    state.realm = NativeGroupRealm()
+    local ok, inRaid
+    if type(IsInRaid) == "function" then ok, inRaid = pcall(IsInRaid) end
+    -- Unknown roster mode/counts must keep LIT's fallback visible. Never use
+    -- the remotely shared inParty flag as evidence of our native membership.
+    if ok and not IsSecret(inRaid) and type(inRaid) == "boolean" then
+        local count = inRaid and NativeNumber(GetNumGroupMembers, 40)
+            or (not inRaid and NativeNumber(GetNumSubgroupMembers, 4))
+        if count then
+            for index = 1, count do
+                local unit = (inRaid and "raid" or "party") .. index
+                if type(UnitFullName) == "function" then
+                    local readable, name, realm = pcall(UnitFullName, unit)
+                    if readable and not IsSecret(realm) and (realm == nil or type(realm) == "string") then
+                        if realm == nil or realm == "" then realm = state.realm end
+                        CacheNativeGroupUnit(units, ambiguous, name, realm, unit)
+                    end
+                end
+                -- Addon senders use unmodified names, which can differ from
+                -- UnitFullName's internal realm. Cache both complete identities;
+                -- an alias shared by two units cannot safely identify either.
+                if NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" then
+                    local readable, name = pcall(NameUtil.GetUnmodifiedUnitFullName, unit)
+                    if readable then CacheNativeGroupUnit(units, ambiguous, name, state.realm, unit) end
+                end
+            end
+        end
+    end
+    state.units = units
+    self:Notify("NATIVE_GROUP_CHANGED")
+end
+
+function addon:InitializeNativeGroupMembership()
+    if self.nativeGroupMembership then return end
+    self.nativeGroupMembership = { units = {} }
+    self.nativeGroupEvents = self:RegisterGameEvents({ "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD",
+        "UNIT_NAME_UPDATE" }, function(self, event, unit)
+        if event == "UNIT_NAME_UPDATE" then
+            if IsSecret(unit) or type(unit) ~= "string"
+                or (unit ~= "player" and not unit:match("^party%d+$") and not unit:match("^raid%d+$")) then return end
+        end
+        self:RefreshNativeGroupMembership()
+    end)
+    self:RefreshNativeGroupMembership()
+end
+
 local STATUS_FLAGS = { "inParty", "canInvite", "partyFull", "sharing" }
 
 local function SavePeer(self, id, peer)
@@ -201,6 +287,7 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
 end
 
 function addon:InitializeRoster()
+    self:InitializeNativeGroupMembership()
     if self.rosterState then return end
     local settings = not self.savedDataReadOnly and type(self.db.roster) == "table" and self.db.roster or {}
     if not self.savedDataReadOnly then self.db.roster = settings end

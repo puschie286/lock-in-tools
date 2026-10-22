@@ -30,14 +30,36 @@ local function LoadMap()
         menuModifiers = {}, menuRegistrations = 0, serverNow = 1000,
         overviewPlayers = {}, rankingPlayers = {}, overviewReads = 0, rankingReads = 0,
         mapNames = { [101] = "Elwynn Forest" },
+        groupUnits = {}, partyCount = 0, raidCount = 0, isRaid = false, unitNameReads = 0,
+        nativeConnected = {}, nativeSubgroup = {}, nativePositions = {}, nativePositionReads = 0, nativeUnitChecks = 0,
+        nativeFilters = { party = true, raid = true },
     }
     local environment = setmetatable({
         CreateFromMixins = Mix,
         Mixin = Mixin,
         CreateVector2D = Vector,
         C_AddOns = { GetAddOnMetadata = function() return "test" end },
+        C_PvP = { IsActiveBattlefield = function() return world.battlefield == true end },
         GetTime = function() return world.now end,
         GetServerTime = function() return world.serverNow end,
+        GetNormalizedRealmName = function() return "Realm" end,
+        IsInRaid = function() return world.isRaid end,
+        GetNumSubgroupMembers = function() return world.partyCount end,
+        GetNumGroupMembers = function() return world.isRaid and world.raidCount or world.partyCount + 1 end,
+        UnitFullName = function(unit)
+            world.unitNameReads = world.unitNameReads + 1
+            local identity = world.groupUnits[unit]
+            if identity then return identity[1], identity[2] end
+        end,
+        UnitIsConnected = function(unit)
+            world.nativeUnitChecks = world.nativeUnitChecks + 1
+            if world.nativeConnected[unit] ~= nil then return world.nativeConnected[unit] end
+            return world.groupUnits[unit] ~= nil
+        end,
+        UnitInSubgroup = function(unit)
+            if world.nativeSubgroup[unit] ~= nil then return world.nativeSubgroup[unit] end
+            return world.groupUnits[unit] ~= nil
+        end,
         Menu = { ModifyMenu = function(tag, callback)
             world.menuRegistrations = world.menuRegistrations + 1
             assert(not world.menuModifiers[tag], "register each menu modifier only once")
@@ -51,6 +73,13 @@ local function LoadMap()
         C_Map = { GetMapInfo = function(mapID)
             local name = world.mapNames[mapID]
             if name then return { name = name } end
+        end,
+        GetPlayerMapPosition = function(mapID, unit)
+            world.nativePositionReads = world.nativePositionReads + 1
+            local position = world.nativePositions[unit]
+            if position == false then return nil end
+            if position then return position end
+            if world.groupUnits[unit] then return Vector(0.25, 0.5) end
         end,
         GetMapRectOnMap = function(source, target)
             local rectangle = world.rectangles[source .. ":" .. target]
@@ -96,7 +125,7 @@ local function LoadMap()
     end
     world.environment, world.mapAPI = environment, environment.C_Map
     world.notificationErrors = loadNotifications(addon, environment)
-    for _, file in ipairs({ "Core.lua", "Position.lua", "Ranking.lua", "PositionMap.lua" }) do
+    for _, file in ipairs({ "Core.lua", "Position.lua", "Roster.lua", "Ranking.lua", "PositionMap.lua" }) do
         local chunk = assert(loadfile(file))
         setfenv(chunk, environment)
         chunk("LockInTools", addon)
@@ -120,6 +149,10 @@ local function LoadMap()
     function world:loadNativeMap(shown)
         environment.MapCanvasDataProviderMixin = {
             OnAdded = function(self, map) self.owningMap = map end,
+            OnRemoved = function(self, map)
+                assert(self.owningMap == map)
+                self.owningMap = nil
+            end,
             GetMap = function(self) return self.owningMap end,
             OnMapChanged = function(self) self:RefreshAllData() end,
         }
@@ -134,12 +167,29 @@ local function LoadMap()
         }
         local map = { shown = shown, id = 101, pins = {}, pool = {}, unrelatedPin = {},
             width = 1000, height = 600, zoom = 1, effectiveScale = 1, originX = 100, originY = 200 }
+        local nativePin = { shown = true, mapID = 101, dataProvider = {} }
+        function nativePin:IsShown() return self.shown end
+        function nativePin:GetUiMapID() return self.mapID end
+        function nativePin.dataProvider:ShouldShowUnit(category) return world.nativeFilters[category] end
+        world.nativePin = nativePin
+        function map:EnumeratePinsByTemplate(template)
+            assert(template == "GroupMembersPinTemplate", "inspect only the native group marker")
+            local visited = false
+            return function()
+                if not visited then visited = true; return world.nativePin end
+            end
+        end
         function map:IsShown() return self.shown end
         function map:GetMapID() return self.id end
         function map:AddDataProvider(provider)
             world.added = world.added + 1
             self.provider = provider
             provider:OnAdded(self)
+        end
+        function map:RegisterDataProviderOnUpdate(provider) self.updateProvider = provider end
+        function map:UnregisterDataProviderOnUpdate(provider)
+            assert(self.updateProvider == provider)
+            self.updateProvider = nil
         end
         function map:RemovePin(pin)
             for index, candidate in ipairs(self.pins) do
@@ -230,6 +280,7 @@ local function LoadMap()
     function world:advance(seconds)
         self.now = self.now + seconds
         if self.map and self.map:IsShown() then
+            if self.map.updateProvider then self.map.updateProvider:OnUpdate() end
             for _, pin in ipairs(self.map.pins) do
                 local update = pin:GetScript("OnUpdate")
                 if update then update(pin, seconds) end
@@ -883,12 +934,14 @@ local function CheckIncrementalPins()
     local incremental, clock = LoadMap()
     clock.bounds[1456] = { 1000, 1400, 4000, 4600, continent = 1 }
     clock.bounds[1412] = { 500, 2500, 2000, 6000, continent = 1 }
+    clock.bounds[13] = { 1000, 1400, 4000, 4600, continent = 2 }
     clock:loadNativeMap(true)
     clock.map.id = 1412
     for index = 1, 39 do
         incremental.positions[index] = { name = "Player" .. index .. "-Realm", map = 1456,
             x = 0.25, y = 0.5, online = true, class = "MAGE" }
     end
+    incremental.positions.offMap = { name = "OffMap-Realm", map = 13, x = 0.25, y = 0.5, online = true }
     incremental:InitializePositionMap()
     local retained = {}
     for index = 1, 39 do retained[index] = FindPin(clock, "Player" .. index .. "-Realm") end
@@ -901,7 +954,7 @@ local function CheckIncrementalPins()
     assert(clock.acquired == acquired and clock.released == released,
         "a round of 39 moving peers updates native pins without pool churn")
     assert(clock.worldConversions - conversions == 39 * 3,
-        "movement reprojects only changed peers instead of every visible pin on each report")
+        "movement reprojects changed peers without repeating visible or off-map projections for each report")
     for index = 1, 39 do
         assert(FindPin(clock, "Player" .. index .. "-Realm") == retained[index],
             "unrelated peer updates preserve each sender's native pin")
@@ -931,6 +984,11 @@ local function CheckIncrementalPins()
     Near(retained[1].x, 0.56)
     assert(not retained[1].motion.started,
         "native map-art changes reproject and snap retained pins even for an unchanged map ID")
+    clock.bounds[13].continent = 1
+    clock:advance(1.01)
+    incremental:Notify("POSITIONS_CHANGED")
+    assert(FindPin(clock, "OffMap-Realm"),
+        "failed projections are retried after a bounded delay so temporarily unavailable geometry can recover")
 end
 CheckIncrementalPins()
 
@@ -953,5 +1011,198 @@ local function CheckTooltipSnapshotReuse()
         "roster updates invalidate the tooltip snapshot before its periodic refresh")
 end
 CheckTooltipSnapshotReuse()
+
+local function CheckNativeGroupPins()
+    local grouped, clock = LoadMap()
+    clock:loadNativeMap(true)
+    local alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5,
+        online = true, positionAvailable = true, positionStamp = 900, stamp = 1000 }
+    local otherRealm = { name = "Alice-OtherRealm", map = 101, x = 0.5, y = 0.5,
+        online = true, inParty = true }
+    grouped.positions = { alice = alice, otherRealm = otherRealm }
+    grouped:InitializePositionMap()
+    assert(#clock.map.pins == 2, "players in another group still retain their LIT pins")
+
+    clock.groupUnits.party1, clock.partyCount = { "Alice", "" }, 1
+    -- A stitched map can draw a party marker outside its underlying map even
+    -- though the per-unit coordinate API returns no position for that map.
+    clock.nativePositions.party1 = false
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock.map.pins == 1 and FindPin(clock, otherRealm.name),
+        "party joins hide the matching live pin even without an underlying-map unit projection")
+    assert(clock.nativePositionReads == 0, "duplicate detection does not query the per-unit coordinate API")
+    assert(grouped.positions.alice == alice and grouped.positions.otherRealm == otherRealm
+        and alice.x == 0.25 and alice.y == 0.5 and alice.positionStamp == 900 and alice.stamp == 1000
+        and grouped.db.position.sharing,
+        "deduplication retains shared positions, contact times and sharing preferences")
+    local nameReads = clock.unitNameReads
+    for index = 1, 8 do grouped:RefreshPositionPins() end
+    clock:advance(1.1)
+    assert(clock.unitNameReads == nameReads,
+        "refreshes and periodic availability checks reuse native membership without scanning unit names")
+
+    clock.groupUnits, clock.partyCount = {}, 0
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock.map.pins == 2 and FindPin(clock, alice.name).positionPeer == alice,
+        "party departures immediately restore the retained position without requiring another report")
+
+    clock.isRaid, clock.raidCount = true, 2
+    clock.groupUnits = { raid1 = { "Self", "Realm" }, raid2 = { "Alice", "Realm" } }
+    clock.nativePositions.raid2 = false
+    clock.nativeSubgroup.raid2 = false
+    clock.nativeFilters.party = false
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock.map.pins == 1 and grouped:GetNativeGroupUnit(alice.name) == "raid2",
+        "conversion to a raid replaces cached unit tokens and checks the raid marker category")
+    clock.battlefield = true
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 2,
+        "battleground home-party overrides with differing native filters preserve the fallback")
+    clock.battlefield = false
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 1)
+    clock.environment.C_PvP.IsActiveBattlefield = nil
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 2, "unknown battlefield state cannot guess a differently filtered native category")
+    clock.environment.C_PvP.IsActiveBattlefield = function() return false end
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 1)
+    clock.nativeFilters.raid = false
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 2, "hidden native raid markers retain the addon fallback")
+    clock.nativeFilters.raid = true
+    clock.nativeSubgroup.raid2 = true
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 2, "raid members in the player's subgroup use the party marker filter")
+    clock.nativeFilters.party = true
+    grouped:RefreshPositionPins()
+    assert(#clock.map.pins == 1)
+
+    for _, state in ipairs({ "unavailable", "offline" }) do
+        if state == "unavailable" then alice.positionAvailable = false else alice.online = false end
+        grouped:Notify("POSITION_CONTACT_CHANGED")
+        assert(#clock.map.pins == 2 and FindPin(clock, alice.name).positionPeer == alice,
+            "contact-only updates immediately restore a last-known position when " .. state)
+        Near(FindPin(clock, alice.name).x, 0.25)
+        alice.positionAvailable, alice.online = true, true
+        grouped:Notify("POSITION_CONTACT_CHANGED")
+        assert(#clock.map.pins == 1, "fresh contact data hides the duplicate again")
+    end
+
+    clock.nativeConnected.raid2 = false
+    clock:fire("UNIT_CONNECTION", "raid2")
+    assert(#clock.map.pins == 2, "native connection loss immediately restores the last-known position")
+    clock.nativeConnected.raid2 = true
+    clock:fire("UNIT_CONNECTION", "raid2")
+    assert(#clock.map.pins == 1, "native connection recovery removes the duplicate again")
+
+    local function CheckFallback(target, key, value, label)
+        local previous = target[key]
+        target[key] = value
+        clock:fire("ZONE_CHANGED_NEW_AREA")
+        assert(#clock.map.pins == 2, label .. " preserves the retained addon fallback")
+        target[key] = previous
+        clock:fire("ZONE_CHANGED_NEW_AREA")
+        assert(#clock.map.pins == 1, label .. " recovery hides the duplicate")
+    end
+    CheckFallback(clock.nativePin, "shown", false, "A hidden native group frame")
+    CheckFallback(clock.nativePin, "mapID", 100, "A native frame on another map")
+    CheckFallback(clock.nativePin, "dataProvider", nil, "A missing native provider")
+    CheckFallback(clock.nativePin.dataProvider, "ShouldShowUnit", nil, "A missing native filter API")
+    CheckFallback(clock.nativePin.dataProvider, "ShouldShowUnit", function() error("native filter unavailable") end,
+        "A failing native filter API")
+    local secret = {}
+    clock.secretValues[secret] = true
+    CheckFallback(clock.nativeConnected, "raid2", secret, "A secret native connection state")
+    CheckFallback(clock.nativeSubgroup, "raid2", secret, "A secret native subgroup state")
+    CheckFallback(clock.nativePin.dataProvider, "ShouldShowUnit", function() return secret end,
+        "A secret native filter state")
+    CheckFallback(clock, "nativePin", nil, "An absent native group frame")
+    CheckFallback(clock.map, "EnumeratePinsByTemplate", nil, "A missing native pin iterator")
+
+    clock.mapAPI.GetPlayerMapPosition = function() error("per-unit coordinates are unavailable") end
+    clock:fire("ZONE_CHANGED_NEW_AREA")
+    assert(#clock.map.pins == 1, "unsupported raid coordinate queries cannot prevent duplicate suppression")
+    clock.mapAPI.GetPlayerMapPosition = nil
+    clock:fire("ZONE_CHANGED_NEW_AREA")
+    assert(#clock.map.pins == 1, "missing per-unit coordinates cannot prevent duplicate suppression")
+
+    clock.nativeConnected.raid2 = false
+    clock:advance(1.1)
+    assert(#clock.map.pins == 2, "idle native connection loss restores fallback within a bounded visible-map check")
+    clock.nativeConnected.raid2 = true
+    clock:advance(1.1)
+    assert(#clock.map.pins == 1, "idle native connection recovery hides the duplicate without a new shared report")
+    clock.map:hide()
+    local unitChecks = clock.nativeUnitChecks
+    nameReads = clock.unitNameReads
+    clock:advance(5)
+    assert(clock.nativeUnitChecks == unitChecks and clock.unitNameReads == nameReads,
+        "hidden maps perform no periodic native availability or membership work")
+    clock.map:show()
+    assert(#clock.map.pins == 1 and #clock.notificationErrors == 0,
+        "reopening applies current native availability without affecting native markers")
+    local provider = grouped.positionMapProvider
+    provider:OnRemoved(clock.map)
+    assert(not clock.map.updateProvider and not grouped.positionMapProvider and not provider:GetMap(),
+        "removing the provider unregisters its native update callback and delegates base cleanup")
+end
+CheckNativeGroupPins()
+
+local function CheckNativeGroupAliases()
+    local grouped, clock = LoadMap()
+    clock:loadNativeMap(true)
+    clock.partyCount = 1
+    clock.groupUnits.party1 = { "DisplayName", "InternalRealm" }
+    clock.environment.NameUtil = { GetUnmodifiedUnitFullName = function(unit)
+        if unit == "party1" then return "WireName-Realm" end
+    end }
+    local peer = { name = "WireName-Realm", map = 101, x = 0.25, y = 0.5,
+        online = true, positionAvailable = true }
+    grouped.positions = { wire = peer,
+        foreign = { name = "WireName-OtherRealm", map = 101, x = 0.5, y = 0.5, online = true } }
+    grouped:InitializePositionMap()
+    assert(#clock.map.pins == 1 and FindPin(clock, "WireName-OtherRealm")
+        and grouped.positions.wire == peer,
+        "wire-name aliases suppress only the grouped character, preserving other realms and shared data")
+    clock.groupUnits, clock.partyCount = {}, 0
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock.map.pins == 2 and FindPin(clock, peer.name).positionPeer == peer,
+        "leaving a native group restores an aliased player's retained pin without a new report")
+end
+CheckNativeGroupAliases()
+
+local function CheckNativeRaidRefreshCost()
+    local grouped, clock = LoadMap()
+    clock:loadNativeMap(true)
+    clock.isRaid, clock.raidCount = true, 40
+    clock.groupUnits.raid1 = { "Self", "Realm" }
+    for index = 1, 39 do
+        clock.groupUnits["raid" .. (index + 1)] = { "Player" .. index, "Realm" }
+        grouped.positions[index] = { name = "Player" .. index .. "-Realm", map = 101,
+            x = 0.25, y = 0.5, online = true, positionAvailable = true }
+    end
+    grouped:InitializePositionMap()
+    assert(#clock.map.pins == 0 and clock.nativeUnitChecks == 39 and clock.nativePositionReads == 0,
+        "a full native raid replaces all 39 live peer pins without depending on per-unit coordinates")
+    local nameReads, unitChecks = clock.unitNameReads, clock.nativeUnitChecks
+    for index = 1, 39 do
+        grouped.positions[index].x = 0.3
+        grouped:Notify("POSITIONS_CHANGED")
+    end
+    for index = 1, 5 do clock:advance(0.1) end
+    assert(clock.unitNameReads == nameReads and clock.nativeUnitChecks == unitChecks,
+        "39 movement reports and frame callbacks reuse membership and native availability within a second")
+    clock:advance(0.51)
+    assert(clock.unitNameReads == nameReads and clock.nativeUnitChecks == unitChecks + 39,
+        "native availability is checked once per unit after the bounded cache expires")
+    grouped.positions[1].positionAvailable = false
+    grouped:Notify("POSITION_CONTACT_CHANGED")
+    assert(#clock.map.pins == 1 and FindPin(clock, "Player1-Realm"),
+        "cached native availability never suppresses a newly unavailable shared-position fallback")
+    assert(clock.nativeUnitChecks == unitChecks + 39 and clock.nativePositionReads == 0,
+        "contact-only fallback updates retain the bounded native availability cache")
+end
+CheckNativeRaidRefreshCost()
 
 print("PASS: map attachment/filter, compact player details, tooltip ownership, projection, movement and pooled lifecycle")

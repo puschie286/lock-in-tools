@@ -47,6 +47,48 @@ local function PlayerID(name)
     return (character .. "-" .. realm:gsub("%s", "")):lower()
 end
 
+local function NativeValue(callback, ...)
+    if type(callback) ~= "function" then return nil end
+    local ok, value = pcall(callback, ...)
+    if ok and not IsSecret(value) then return value end
+end
+
+local function NativeMarkerCategories(map, mapID)
+    if type(map.EnumeratePinsByTemplate) ~= "function" then return false, false end
+    local ok, party, raid = pcall(function()
+        for pin in map:EnumeratePinsByTemplate("GroupMembersPinTemplate") do
+            local provider = pin.dataProvider
+            if NativeValue(pin.IsShown, pin) == true and NativeValue(pin.GetUiMapID, pin) == mapID
+                and provider then
+                return NativeValue(provider.ShouldShowUnit, provider, "party") == true,
+                    NativeValue(provider.ShouldShowUnit, provider, "raid") == true
+            end
+        end
+    end)
+    party, raid = ok and party == true, ok and raid == true
+    -- Battleground markers may classify units using the home party rather than
+    -- the active raid. With differing filters, preserve our fallback instead of
+    -- guessing which native appearance applies (including unknown PvP state).
+    if party ~= raid and NativeValue(C_PvP and C_PvP.IsActiveBattlefield) ~= false then return false, false end
+    return party, raid
+end
+
+local function HasNativeMarker(unit, party, raid)
+    -- Native rendering owns group markers; only suppress our pin when its frame,
+    -- filter and connected unit are available. GetPlayerMapPosition is not a
+    -- renderer visibility API: it can return nil for raid units or the underlying
+    -- map of a stitched view even while that view draws the group member.
+    if not (party or raid) or NativeValue(UnitIsConnected, unit) ~= true then return false end
+    local subgroup = NativeValue(UnitInSubgroup, unit)
+    if type(subgroup) ~= "boolean" then return false end
+    if subgroup then
+        if not party then return false end
+    else
+        if not raid then return false end
+    end
+    return true
+end
+
 local function TooltipPlayer(pin, players)
     local source = players[PlayerID(pin.playerID) or PlayerID(pin.playerName)]
     local player = {}
@@ -277,14 +319,52 @@ function Pin:GetDisplayName()
     return addon:GetPlayerDisplayName(self.playerName)
 end
 
+function Provider:OnAdded(map)
+    MapCanvasDataProviderMixin.OnAdded(self, map)
+    if map.RegisterDataProviderOnUpdate then map:RegisterDataProviderOnUpdate(self) end
+end
+
+function Provider:OnRemoved(map)
+    if map.UnregisterDataProviderOnUpdate then map:UnregisterDataProviderOnUpdate(self) end
+    if self.addon.positionMapProvider == self then self.addon.positionMapProvider = nil end
+    MapCanvasDataProviderMixin.OnRemoved(self, map)
+end
+
+function Provider:OnUpdate()
+    local now = GetTime()
+    if self.hasGroupedPeers and self:GetMap():IsShown() and self.addon:GetShowPlayerIcons()
+        and (not self.nativeCheckedAt or now < self.nativeCheckedAt or now - self.nativeCheckedAt >= 1) then
+        -- Native availability can change while everybody is stationary. Avoid
+        -- a per-peer frame callback or rebuilding the membership cache here.
+        self.nativeCheckedAt = now
+        self:RefreshAllData(false, true)
+    end
+end
+
 function Provider:RemoveAllData()
     self:GetMap():RemoveAllPinsByTemplate(PIN_TEMPLATE)
     self.positions, self.pins, self.pinsBySender = {}, {}, {}
+    self.unmapped = {}
+    self.nativeMarkers = {}
     self.mapID = nil
+    self.hasGroupedPeers, self.nativeCheckedAt = nil, nil
+end
+
+function Provider:HasNativeMarker(peer, unit, party, raid, now)
+    -- Contact-only updates must restore retained/offline pins immediately, even
+    -- while native unit availability is cached for a busy raid's receives.
+    if peer.online ~= true or peer.positionAvailable == false then return false end
+    local cached = self.nativeMarkers[unit]
+    if cached and cached.party == party and cached.raid == raid
+        and now >= cached.at and now - cached.at < 1 then return cached.visible end
+    local visible = HasNativeMarker(unit, party, raid)
+    self.nativeMarkers[unit] = { at = now, visible = visible, party = party, raid = raid }
+    return visible
 end
 
 function Provider:RemovePeer(sender)
     self.positions[sender] = nil
+    self.unmapped[sender] = nil
     local pin = self.pinsBySender[sender]
     if not pin then return end
     local index, last = pin.providerIndex, self.pins[#self.pins]
@@ -310,26 +390,49 @@ end
 function Provider:RefreshAllData(fromOnShow, incremental)
     local map = self:GetMap()
     if not map:IsShown() or not self.addon:GetShowPlayerIcons() then self:RemoveAllData(); return end
-    if not self.pins then self.positions, self.pins, self.pinsBySender = {}, {}, {} end
+    if not self.pins then self:RemoveAllData() end
     local mapID = map:GetMapID()
     -- Native map/art changes must reproject even when the numeric map ID is unchanged.
     local keepMotion = incremental and self.mapID == mapID
+    if not keepMotion then self.unmapped, self.nativeMarkers = {}, {} end
     self.mapID = mapID
     local now = GetTime()
-    local peers = self.addon:GetSharedPositions()
+    local party, raid
+    local peers = {}
+    self.hasGroupedPeers = false
+    self.nativeCheckedAt = self.nativeCheckedAt or now
+    for sender, peer in pairs(self.addon:GetSharedPositions()) do
+        if ValidPeer(peer) then
+            local unit = self.addon:GetNativeGroupUnit(peer.name)
+            if unit then
+                self.hasGroupedPeers = true
+                if party == nil then party, raid = NativeMarkerCategories(map, mapID) end
+            end
+            if not unit or not self:HasNativeMarker(peer, unit, party, raid, now) then peers[sender] = peer end
+        end
+    end
     -- Release departed players first so their frames are available for new arrivals.
     for sender in pairs(self.pinsBySender) do
         if not ValidPeer(peers[sender]) then self:RemovePeer(sender) end
+    end
+    for sender in pairs(self.unmapped) do
+        if not ValidPeer(peers[sender]) then self.unmapped[sender] = nil end
     end
     for sender, peer in pairs(peers) do
         if ValidPeer(peer) then
             local pin, previous = self.pinsBySender[sender], keepMotion and self.positions[sender]
             local sameCoordinates = previous and previous.sourceMap == peer.map
                 and previous.sourceX == peer.x and previous.sourceY == peer.y
+            local missing = self.unmapped[sender]
+            -- Off-map/temporarily unavailable geometry should not be retried for
+            -- every unrelated receive. Retry after a second or a native map refresh.
+            local waitForMap = missing and missing.map == peer.map and missing.x == peer.x and missing.y == peer.y
+                and now >= missing.at and now - missing.at < 1
             local x, y
             if sameCoordinates then x, y = previous.x, previous.y
-            else x, y = PositionOnMap(peer, mapID) end
+            elseif not waitForMap then x, y = PositionOnMap(peer, mapID) end
             if x then
+                self.unmapped[sender] = nil
                 local class = not IsSecret(peer.class) and type(peer.class) == "string" and peer.class or nil
                 if pin and sameCoordinates and previous.name == peer.name and previous.online == (peer.online == true)
                     and pin.playerClass == class then
@@ -347,8 +450,11 @@ function Provider:RefreshAllData(fromOnShow, incremental)
                         self.pinsBySender[sender] = pin
                     end
                 end
-            elseif pin then
-                self:RemovePeer(sender)
+            else
+                if pin then self:RemovePeer(sender) end
+                if not waitForMap then
+                    self.unmapped[sender] = { map = peer.map, x = peer.x, y = peer.y, at = now }
+                end
             end
         end
     end
@@ -358,11 +464,23 @@ function addon:RefreshPositionPins()
     if self.positionMapProvider then self.positionMapProvider:RefreshAllData(false, true) end
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_VISIBILITY_CHANGED" }) do
-    addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
+function addon:RefreshNativePositionPins()
+    if self.positionMapProvider then self.positionMapProvider.nativeMarkers = {} end
+    self:RefreshPositionPins()
 end
 
+for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED",
+    "POSITION_VISIBILITY_CHANGED" }) do
+    addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
+end
+addon:RegisterNotification("NATIVE_GROUP_CHANGED", function() addon:RefreshNativePositionPins() end)
+
 function addon:InitializePositionMap()
+    self:InitializeNativeGroupMembership()
+    if not self.positionNativeEvents then
+        self.positionNativeEvents = self:RegisterGameEvents({ "UNIT_CONNECTION", "ZONE_CHANGED_NEW_AREA" },
+            function() self:RefreshNativePositionPins() end)
+    end
     RegisterMapFilter(self)
     if not self.positionMapProvider and WorldMapFrame and WorldMapFrame.AddDataProvider
         and MapCanvasDataProviderMixin and MapCanvasPinMixin then
