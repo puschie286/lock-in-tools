@@ -2,7 +2,7 @@
 ## Title: LockInTools
 ## IconTexture: Interface\AddOns\LockInTools\Media\Icon.tga
 ## Notes: Tools for playing World of Warcraft Forever with friends.
-## Version: 0.3.1
+## Version: 0.4.0
 ## SavedVariables: LockInToolsDB
 ## OptionalDeps: RXPGuides
 
