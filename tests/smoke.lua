@@ -14,6 +14,7 @@ local positionEntry = manifest:find("\nPosition.lua\n", 1, true)
 local rosterEntry = manifest:find("\nRoster.lua\n", 1, true)
 local rankingEntry = manifest:find("\nRanking.lua\n", 1, true)
 local themeEntry = manifest:find("\nTheme.lua\n", 1, true)
+local skinEntry = manifest:find("\nRestedXPSkin.lua\n", 1, true)
 local overlayEntry = manifest:find("\nRankingOverlay.lua\n", 1, true)
 local optionsEntry = manifest:find("\nOptions.lua\n", 1, true)
 assert(channelEntry and dataEntry and channelEntry < dataEntry,
@@ -27,6 +28,8 @@ assert(rankingEntry and themeEntry and overlayEntry and optionsEntry
     and rosterEntry < rankingEntry and rankingEntry < themeEntry
     and themeEntry < overlayEntry and overlayEntry < optionsEntry,
     "the native manifest must load the ranking model after its data and the overlay after its theme")
+assert(skinEntry and themeEntry < skinEntry and skinEntry < optionsEntry,
+    "the optional RestedXP skin loads after its palette and before Settings")
 
 -- Fire primitives must load natively and keep soft edges. Integer overloads in
 -- the texture generator once turned every alpha into a hard zero or 255.

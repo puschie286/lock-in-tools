@@ -18,6 +18,11 @@ local function GetRestedXP()
     if found and type(rxp) == "table" then return rxp end
 end
 
+-- Skin capabilities are independent of the importer's format/version checks.
+function addon:GetRestedXPAddon()
+    return GetRestedXP()
+end
+
 local function Compatible(rxp)
     return rxp and rxp.version == FORMAT and type(rxp.guideImporter) == "table"
         and type(rxp.guideImporter.ImportString) == "function"

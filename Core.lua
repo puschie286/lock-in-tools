@@ -86,6 +86,7 @@ function addon:Initialize()
     self:InitializeRoster()
     self:InitializeRanking()
     self:InitializeRestedXP()
+    self:InitializeRestedXPSkin()
 
     -- Also support loading after login through an addon manager.
     if IsLoggedIn() then
@@ -101,6 +102,7 @@ function addon:OnLogin()
     self.ready = true
     self.startupEvents:UnregisterEvent("PLAYER_LOGIN")
     self:InitializeMinimapButton()
+    self:RefreshRestedXPSkin()
 
     if self.savedDataReadOnly then
         self:Print("Saved settings belong to a newer version; preferences are read-only.")

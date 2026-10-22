@@ -29,6 +29,7 @@ RestedXP.lua
 PositionMap.lua
 PositionPins.xml
 Theme.lua
+RestedXPSkin.lua
 Overview.lua
 RankingOverlay.lua
 Options.lua

@@ -1,7 +1,7 @@
 local support = dofile("tests/support/addon.lua")
 local loadOptions = dofile("tests/support/ui.lua")
 
-local function Fixture(state)
+local function Fixture(state, skin)
     local addon, environment, _, _, world = support.loadAddon({ schemaVersion = 3,
         showWelcome = false, chat = { autoJoin = false } }, false)
     world:initialize()
@@ -13,6 +13,33 @@ local function Fixture(state)
     function addon:ImportRestedXPString(raw, source)
         calls[#calls + 1] = { raw = raw, source = source }
         return not calls.importError, calls.importError
+    end
+    if skin then
+        function addon:GetRestedXPSkinState() return skin end
+        for _, preference in ipairs({
+            { "enabled", "IsRestedXPSkinEnabled", "SetRestedXPSkinEnabled", "skinChanges" },
+            { "chromeHidden", "IsRestedXPChromeHidden", "SetRestedXPChromeHidden", "chromeChanges" },
+        }) do
+            local field, getter, setter, changes = unpack(preference)
+            calls[changes] = {}
+            addon[getter] = function() return skin[field] == true end
+            addon[setter] = function(self, enabled)
+                calls[changes][#calls[changes] + 1] = enabled
+                if calls.skinError then return false, calls.skinError end
+                skin[field] = enabled
+                self:Notify("RESTEDXP_SKIN_CHANGED")
+                return true
+            end
+        end
+        calls.transparencyChanges = {}
+        function addon:GetRestedXPBackgroundTransparency() return skin.backgroundTransparency or 0 end
+        function addon:SetRestedXPBackgroundTransparency(value)
+            calls.transparencyChanges[#calls.transparencyChanges + 1] = value
+            if calls.skinError then return false, calls.skinError end
+            skin.backgroundTransparency = value
+            self:Notify("RESTEDXP_SKIN_CHANGED")
+            return true
+        end
     end
     loadOptions(addon, environment)
     addon:OpenOptions("restedxp")
@@ -88,17 +115,120 @@ do
         "local imports initiate no group communication")
 end
 
+-- Skin preferences stay independent of native guide availability and import work.
+do
+    local state = { installed = false, loaded = false, canImport = false }
+    local skin = { enabled = false, available = false, status = "RestedXP is not loaded." }
+    local addon, panel, calls = Fixture(state, skin)
+    local checkbox = panel.restedxpSkinEnabled
+    local chrome = panel.restedxpChromeHidden
+    for _, control in ipairs({ checkbox, chrome }) do
+        assert(control:IsEnabled() and control.labelButton:IsEnabled() and not control:GetChecked(),
+            "appearance preferences default off and can be configured before RestedXP is available")
+    end
+    chrome.labelButton:Click()
+    assert(skin.chromeHidden and not skin.enabled and calls.chromeChanges[1] == true,
+        "header visibility remains independent of the combined skin preference")
+    checkbox:Click()
+    assert(skin.enabled and checkbox:GetChecked() and calls.skinChanges[1] == true)
+    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
+    Paste(panel, "Retained+draft==")
+    state.installed, state.loaded, state.busy = true, true, true
+    skin.available, skin.pending, skin.status = true, true, "The appearance will update after combat."
+    addon:Notify("RESTEDXP_SKIN_CHANGED")
+    assert(checkbox:IsEnabled() and checkbox.labelButton:IsEnabled() and chrome:IsEnabled()
+        and not panel.restedxpImport:IsEnabled()
+        and panel.restedxpSkinStatus:GetText() == skin.status,
+        "skin state updates independently while native imports are busy")
+    checkbox.labelButton:Click()
+    chrome:Click()
+    assert(not skin.enabled and not checkbox:GetChecked() and calls.skinChanges[2] == false
+        and not skin.chromeHidden and not chrome:GetChecked() and calls.chromeChanges[2] == false
+        and Export(panel) == "Retained+draft==" and panel.restedxpBattleTag:GetText() == "SourceOwner#5678",
+        "all appearance preferences remain independent during imports and preserve the draft")
+    calls.skinError = "The saved preference could not be changed."
+    for _, control in ipairs({ checkbox, chrome }) do
+        control:Click()
+        assert(not control:GetChecked() and panel.feedback:GetText() == calls.skinError,
+            "rejected appearance changes restore the saved value and explain the failure")
+    end
+    skin.enabled, skin.active, skin.pending, skin.status = true, true, false, "The appearance is active."
+    skin.chromeHidden = true
+    addon:Notify("RESTEDXP_SKIN_CHANGED")
+    assert(checkbox:GetChecked() and chrome:GetChecked()
+        and panel.restedxpSkinStatus:GetText() == skin.status,
+        "external appearance changes refresh every visible preference and status")
+end
+
+do
+    local state = { installed = false, loaded = false, canImport = false }
+    local skin = {}
+    local addon, panel, calls = Fixture(state, skin)
+    local slider = panel.restedxpTransparencySlider
+    assert(slider:IsEnabled() and slider:GetValue() == 0 and #calls.transparencyChanges == 0,
+        "transparency defaults to zero and remains configurable without RestedXP")
+    addon:RefreshOptions()
+    addon:Notify("RESTEDXP_SKIN_CHANGED")
+    assert(#calls.transparencyChanges == 0, "programmatic slider refreshes never write a preference")
+    slider:SetValue(24.6)
+    assert(slider:GetValue() == 25 and skin.backgroundTransparency == 25
+        and calls.transparencyChanges[1] == 25 and #calls.transparencyChanges == 1
+        and not skin.enabled and not skin.chromeHidden,
+        "the slider rounds to whole percentages and applies independently without recursion")
+    slider:SetValue(25.2)
+    assert(slider:GetValue() == 25 and #calls.transparencyChanges == 1,
+        "rounding back to the saved percentage does not repeat the write")
+    slider:SetValue(104)
+    assert(slider:GetValue() == 100 and skin.backgroundTransparency == 100)
+    slider:SetValue(-4)
+    assert(slider:GetValue() == 0 and skin.backgroundTransparency == 0, "slider input stays within zero to one hundred")
+    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
+    Paste(panel, "Retained+opacity+draft==")
+    state.busy = true
+    addon:Notify("RESTEDXP_CHANGED")
+    slider:SetValue(40)
+    assert(slider:IsEnabled() and skin.backgroundTransparency == 40
+        and Export(panel) == "Retained+opacity+draft==" and panel.restedxpBattleTag:GetText() == "SourceOwner#5678",
+        "busy native imports cannot disable transparency changes or lose their draft")
+    calls.skinError = "The saved preference could not be changed."
+    slider:SetValue(60)
+    assert(slider:GetValue() == 40 and skin.backgroundTransparency == 40 and panel.feedback:GetText() == calls.skinError,
+        "rejected transparency changes restore the saved value and explain the failure")
+    local writes = #calls.transparencyChanges
+    skin.backgroundTransparency = 82
+    addon:Notify("RESTEDXP_SKIN_CHANGED")
+    assert(slider:GetValue() == 82 and #calls.transparencyChanges == writes,
+        "external transparency changes update the slider without writing back")
+end
+
 do
     local futureSource = { sourceBattleTag = "FutureOwner#1234", futureField = "keep" }
     local future = { schemaVersion = 4, showWelcome = false, restedxp = futureSource }
     local addon, environment, _, _, world = support.loadAddon(future, false)
     world:initialize()
+    local skinChanges = 0
+    function addon:IsRestedXPSkinEnabled() return true end
+    function addon:GetRestedXPSkinState() return { enabled = true } end
+    function addon:SetRestedXPSkinEnabled() skinChanges = skinChanges + 1; return true end
+    addon.IsRestedXPChromeHidden = addon.IsRestedXPSkinEnabled
+    addon.SetRestedXPChromeHidden = addon.SetRestedXPSkinEnabled
+    function addon:GetRestedXPBackgroundTransparency() return 61 end
+    function addon:SetRestedXPBackgroundTransparency() skinChanges = skinChanges + 1; return true end
     loadOptions(addon, environment)
     addon:OpenOptions("restedxp")
     local panel = addon.optionsPanel
     assert(addon.savedDataReadOnly and not panel.restedxpBattleTag:IsEnabled()
         and not panel.restedxpImport:IsEnabled() and not panel.restedxpPaste:IsEnabled()
         and not panel.restedxpClearExport:IsEnabled())
+    for _, control in ipairs({ panel.restedxpSkinEnabled, panel.restedxpChromeHidden }) do
+        assert(control:GetChecked() and not control:IsEnabled() and not control.labelButton:IsEnabled())
+        control:Click()
+        control.labelButton:Click()
+    end
+    assert(not panel.restedxpTransparencySlider:IsEnabled() and panel.restedxpTransparencySlider:GetValue() == 61)
+    panel.restedxpTransparencySlider:SetValue(12)
+    assert(panel.restedxpTransparencySlider:GetValue() == 61, "read-only transparency stays at the saved value")
+    assert(skinChanges == 0, "read-only skin controls cannot change saved preferences")
     panel.parent.CloseButton:Click()
     world.fire("PLAYER_LOGOUT")
     assert(environment.LockInToolsDB == future and future.restedxp == futureSource
@@ -213,4 +343,4 @@ for _, closeWindow in ipairs({ false, true }) do
     assert(#calls == 1 and calls[1].raw == "Fresh+draft==", "reopening cannot revive discarded chunks")
 end
 
-print("PASS: local RestedXP form, remembered source, exact buffered paste, size limits and privacy")
+print("PASS: local RestedXP form, independent skin preference, buffered paste, size limits and privacy")

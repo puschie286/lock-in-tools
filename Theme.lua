@@ -50,6 +50,17 @@ function Theme:GetAccentColor()
     return unpack(colors.accent)
 end
 
+function Theme:GetPalette()
+    local palette = {}
+    for role, color in pairs(colors) do palette[role] = { unpack(color) } end
+    return palette
+end
+
+function Theme:GetFont()
+    local font = GameFontHighlight or GameFontNormal
+    if font then return font:GetFont() end
+end
+
 function Theme:Label(parent, text, size, role)
     local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     local font = label:GetFont()

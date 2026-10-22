@@ -731,6 +731,77 @@ do
         "Leaving the native group immediately discards every cached token")
 end
 
+-- Native full names and unmodified addon sender names can use different realm aliases.
+do
+    local secret = {}
+    local native = { units = { party1 = { "Friend", "Internal Realm" }, party2 = { "Friend", "Other Realm" } },
+        aliases = { party1 = "Friend", party2 = "Friend-Other Realm" }, aliasReads = 0 }
+    local addon, world = newAddon(nil, false, nil, function(environment)
+        environment.issecretvalue = function(value) return value == secret end
+        environment.GetNumSubgroupMembers = function() return 2 end
+        local fullName, unmodifiedName = environment.UnitFullName, environment.NameUtil.GetUnmodifiedUnitFullName
+        environment.UnitFullName = function(unit)
+            if unit == "player" then return fullName(unit) end
+            local member = native.units[unit]
+            if member then return member[1], member[2] end
+        end
+        environment.NameUtil.GetUnmodifiedUnitFullName = function(unit)
+            if unit == "player" then return unmodifiedName(unit) end
+            native.aliasReads = native.aliasReads + 1
+            return native.aliases[unit]
+        end
+    end)
+    local environment = world.environment
+    local fullName, unmodifiedName = environment.UnitFullName, environment.NameUtil.GetUnmodifiedUnitFullName
+    assert(addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1"
+        and addon:GetNativeGroupUnit("Friend-TestRealm") == "party1"
+        and addon:GetNativeGroupUnit("Friend") == "party1"
+        and addon:GetNativeGroupUnit("Friend-OtherRealm") == "party2",
+        "Both native and wire identities resolve without matching a foreign realm by short name")
+    local reads = native.aliasReads
+    for _ = 1, 10 do assert(addon:GetNativeGroupUnit("Friend-TestRealm") == "party1") end
+    assert(native.aliasReads == reads, "Unmodified name aliases are read only during roster refreshes")
+
+    native.aliases.party1, native.aliases.party2 = "Shared-TestRealm", "Shared-TestRealm"
+    world:event("GROUP_ROSTER_UPDATE")
+    assert(addon:GetNativeGroupUnit("Shared-TestRealm") == nil
+        and addon:GetNativeGroupUnit("Friend-TestRealm") == nil
+        and addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1"
+        and addon:GetNativeGroupUnit("Friend-OtherRealm") == "party2",
+        "Ambiguous aliases identify neither unit, while distinct complete identities remain usable")
+    native.aliases.party1 = "Renamed-TestRealm"
+    world:event("UNIT_NAME_UPDATE", "party1")
+    assert(addon:GetNativeGroupUnit("Renamed-TestRealm") == "party1"
+        and addon:GetNativeGroupUnit("Shared-TestRealm") == "party2",
+        "Refreshing removes obsolete aliases and resolves former collisions from the current roster")
+
+    for _, result in ipairs({ "missing", "error" }) do
+        if result == "missing" then environment.UnitFullName = nil
+        else environment.UnitFullName = function() error("full name unavailable") end end
+        addon:RefreshNativeGroupMembership()
+        assert(addon:GetNativeGroupUnit("Renamed-TestRealm") == "party1"
+            and addon:GetNativeGroupUnit("Friend-InternalRealm") == nil,
+            "Unmodified names remain usable when UnitFullName is " .. result)
+    end
+    environment.UnitFullName = fullName
+    for _, result in ipairs({ "missing", "error", "secret", "malformed" }) do
+        if result == "missing" then environment.NameUtil = nil
+        elseif result == "error" then environment.NameUtil = { GetUnmodifiedUnitFullName = function() error("alias unavailable") end }
+        else environment.NameUtil = { GetUnmodifiedUnitFullName = function() return result == "secret" and secret or {} end } end
+        addon:RefreshNativeGroupMembership()
+        assert(addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1"
+            and addon:GetNativeGroupUnit("Renamed-TestRealm") == nil,
+            "An unavailable or invalid unmodified alias cannot erase a valid native full name")
+    end
+    environment.NameUtil = { GetUnmodifiedUnitFullName = unmodifiedName }
+    native.aliases.party1 = "Friend"
+    environment.GetNormalizedRealmName = nil
+    addon:RefreshNativeGroupMembership()
+    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil
+        and addon:GetNativeGroupUnit("Shared-TestRealm") == "party2",
+        "An unresolved local realm rejects short aliases while retaining complete aliases")
+end
+
 -- Missing, secret, throwing and incomplete native APIs fail open instead of inventing membership.
 do
     local secret = {}

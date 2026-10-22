@@ -309,7 +309,7 @@ local function loadAddon(savedVariables, loggedIn)
     world.notificationErrors = loadNotifications(addon, environment)
     for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
         "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Burned.lua", "Position.lua", "Roster.lua", "Ranking.lua",
-        "RestedXPCodec.lua", "RestedXPAdapter.lua", "RestedXP.lua", "Minimap.lua", "Commands.lua" }) do
+        "RestedXPCodec.lua", "RestedXPAdapter.lua", "RestedXP.lua", "Theme.lua", "RestedXPSkin.lua", "Minimap.lua", "Commands.lua" }) do
         local chunk, problem
         if setfenv then
             chunk, problem = loadfile(file)

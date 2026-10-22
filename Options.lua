@@ -219,27 +219,42 @@ local function GuideText(value)
     return tostring(value or ""):gsub("|", "||")
 end
 
+local RESTEDXP_APPEARANCE_PREFERENCES = {
+    { field = "restedxpSkinEnabled", getter = "IsRestedXPSkinEnabled", setter = "SetRestedXPSkinEnabled",
+        label = "Use LockInTools skin",
+        description = "Apply the LockInTools theme with flat styling and a slim scrollbar." },
+    { field = "restedxpChromeHidden", getter = "IsRestedXPChromeHidden", setter = "SetRestedXPChromeHidden",
+        label = "Hide header and footer",
+        description = "Hide header/footer decorations with the LockInTools theme; use /rxp for settings." },
+}
+
+local function RestedXPTransparency()
+    local value = type(addon.GetRestedXPBackgroundTransparency) == "function"
+        and addon:GetRestedXPBackgroundTransparency() or 0
+    return math.min(100, math.max(0, math.floor(value + 0.5)))
+end
+
 local function CreateRestedXPPage(panel)
-    local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP import")
+    local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP")
     panel.pages.restedxp = page
     panel.restedxpNotice = UI:Label(page, "", 12, "muted")
-    panel.restedxpNotice:SetPoint("TOPLEFT", 16, -48)
-    panel.restedxpNotice:SetSize(648, 36)
+    panel.restedxpNotice:SetPoint("TOPLEFT", 16, -46)
+    panel.restedxpNotice:SetSize(648, 28)
 
     local sourceLabel = UI:Label(page, "Export's source BattleTag", 12, "muted")
-    sourceLabel:SetPoint("TOPLEFT", 16, -100)
+    sourceLabel:SetPoint("TOPLEFT", 16, -80)
     panel.restedxpBattleTag = UI:EditBox(page)
-    panel.restedxpBattleTag:SetPoint("TOPLEFT", 16, -122)
+    panel.restedxpBattleTag:SetPoint("TOPLEFT", 16, -100)
     panel.restedxpBattleTag:SetSize(648, 30)
     panel.restedxpBattleTag:SetMaxLetters(128)
     panel.restedxpBattleTag:SetMaxBytes(128)
     OptionTooltip(page, panel.restedxpBattleTag, "Export's source BattleTag",
-        "Enter the BattleTag this import string was originally created for. Your entry is saved automatically; pasted guide text is never saved.")
+        "BattleTag this export was created for.")
 
     local exportLabel = UI:Label(page, "Guide export", 12, "muted")
-    exportLabel:SetPoint("TOPLEFT", 16, -164)
+    exportLabel:SetPoint("TOPLEFT", 16, -140)
     panel.restedxpPaste = UI:Button(page, "Paste export")
-    panel.restedxpPaste:SetPoint("TOPLEFT", 16, -186)
+    panel.restedxpPaste:SetPoint("TOPLEFT", 16, -160)
     panel.restedxpPaste:SetSize(148, 32)
     -- A focused EditBox is still required for native Ctrl+V. Keep it shown but
     -- transparent, with no visible text or surface; only the byte count is shown.
@@ -253,18 +268,94 @@ local function CreateRestedXPPage(panel)
     panel.restedxpExport:SetAlpha(0)
     panel.restedxpExport:EnableMouse(false)
     panel.restedxpExportStatus = UI:Label(page, "No export loaded (0 bytes).", 12, "muted")
-    panel.restedxpExportStatus:SetPoint("TOPLEFT", 180, -186)
+    panel.restedxpExportStatus:SetPoint("TOPLEFT", 180, -160)
     panel.restedxpExportStatus:SetSize(380, 32)
     panel.restedxpClearExport = UI:Button(page, "Clear")
-    panel.restedxpClearExport:SetPoint("TOPLEFT", 572, -186)
+    panel.restedxpClearExport:SetPoint("TOPLEFT", 572, -160)
     panel.restedxpClearExport:SetSize(92, 32)
     local pasteHint = UI:Label(page, "Click Paste export, then press Ctrl+V. Pasting again replaces the loaded export.", 12, "muted")
-    pasteHint:SetPoint("TOPLEFT", 16, -228)
-    pasteHint:SetSize(648, 32)
+    pasteHint:SetPoint("TOPLEFT", 16, -200)
+    pasteHint:SetSize(648, 28)
 
     panel.restedxpImport = UI:Button(page, "Import", "primary")
-    panel.restedxpImport:SetPoint("TOPLEFT", 16, -278)
+    panel.restedxpImport:SetPoint("TOPLEFT", 16, -236)
     panel.restedxpImport:SetSize(128, 32)
+
+    for index, preference in ipairs(RESTEDXP_APPEARANCE_PREFERENCES) do
+        local getter, setter = preference.getter, preference.setter
+        local checkbox = UI:Checkbox(page)
+        panel[preference.field] = checkbox
+        checkbox:SetPoint("TOPLEFT", 12, -282 - (index - 1) * 32)
+        checkbox:SetSize(28, 28)
+        BindPreference(panel, checkbox,
+            function() return type(addon[getter]) == "function" and addon[getter](addon) == true end,
+            function(_, enabled)
+                if type(addon[setter]) ~= "function" then
+                    return false, "RestedXP styling is unavailable. Reload LockInTools and try again."
+                end
+                return addon[setter](addon, enabled)
+            end)
+        PreferenceLabel(page, checkbox, preference.label, preference.description, 276)
+    end
+
+    panel.restedxpTransparencyHelp = CreateFrame("Frame", nil, page)
+    panel.restedxpTransparencyHelp:SetPoint("TOPLEFT", 356, -286)
+    panel.restedxpTransparencyHelp:SetSize(308, 20)
+    panel.restedxpTransparencyHelp:EnableMouse(true)
+    local transparencyLabel = UI:Label(panel.restedxpTransparencyHelp, "Transparency", 12)
+    transparencyLabel:SetPoint("TOPLEFT", 0, 0)
+    panel.restedxpTransparencyValue = UI:Label(panel.restedxpTransparencyHelp, "0%", 12, "muted")
+    panel.restedxpTransparencyValue:SetPoint("TOPRIGHT", 0, 0)
+    local slider = CreateFrame("Slider", nil, page)
+    panel.restedxpTransparencySlider = slider
+    slider:SetPoint("TOPLEFT", 360, -314)
+    slider:SetSize(296, 20)
+    slider:SetOrientation("HORIZONTAL")
+    slider:EnableMouse(true)
+    slider:SetMinMaxValues(0, 100)
+    slider:SetValueStep(1)
+    if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
+    local track = slider:CreateTexture(nil, "BACKGROUND")
+    track:SetPoint("LEFT", 0, 0)
+    track:SetPoint("RIGHT", 0, 0)
+    track:SetHeight(4)
+    track:SetColorTexture(0.025, 0.035, 0.05, 1)
+    local thumb = slider:CreateTexture(nil, "ARTWORK")
+    thumb:SetSize(10, 18)
+    thumb:SetColorTexture(UI:GetAccentColor())
+    slider:SetThumbTexture(thumb)
+    local function ShowTransparency(value)
+        page.updatingTransparency = true
+        slider:SetValue(value)
+        panel.restedxpTransparencyValue:SetText(string.format("%d%%", value))
+        page.updatingTransparency = nil
+    end
+    page.RefreshTransparency = function()
+        local editable = not addon.savedDataReadOnly and type(addon.SetRestedXPBackgroundTransparency) == "function"
+        slider:SetEnabled(editable)
+        panel.restedxpTransparencyHelp:SetAlpha(editable and 1 or 0.5)
+        thumb:SetAlpha(editable and 1 or 0.5)
+        ShowTransparency(RestedXPTransparency())
+    end
+    slider:SetScript("OnValueChanged", function(widget, value)
+        if page.updatingTransparency then return end
+        local saved = RestedXPTransparency()
+        if not widget:IsEnabled() or addon.savedDataReadOnly then ShowTransparency(saved); return end
+        value = math.min(100, math.max(0, math.floor(value + 0.5)))
+        ShowTransparency(value)
+        if value == saved then return end
+        local success, message = addon:SetRestedXPBackgroundTransparency(value)
+        ShowTransparency(RestedXPTransparency())
+        SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
+    end)
+    local transparencyHelp = "Fade LockInTools theme backgrounds and borders without fading text."
+    OptionTooltip(page, panel.restedxpTransparencyHelp, "Transparency", transparencyHelp)
+    OptionTooltip(page, slider, "Transparency", transparencyHelp)
+
+    panel.restedxpSkinStatus = UI:Label(page, "", 12, "muted")
+    panel.restedxpSkinStatus:SetPoint("TOPLEFT", 16, -380)
+    panel.restedxpSkinStatus:SetSize(648, 28)
+
     local raw, buffer, bufferSize, quietTime, oversized = "", nil, 0, 0, false
     local pending, pendingCount, blockCount = nil, 0, 0
     local maxData, concat = addon.RestedXPCodec.MAX_DATA, table.concat
@@ -399,6 +490,15 @@ local function RefreshRestedXP(panel)
     local notice = not state.installed and "RestedXP is required. Install and enable RestedXP to import guides."
         or state.problem or (not state.loaded and "Enable RestedXP to import guides.") or ""
     panel.restedxpNotice:SetText(GuideText(notice))
+    local skin = type(addon.GetRestedXPSkinState) == "function" and addon:GetRestedXPSkinState() or {}
+    for _, preference in ipairs(RESTEDXP_APPEARANCE_PREFERENCES) do
+        panel[preference.field]:SetChecked(type(addon[preference.getter]) == "function"
+            and addon[preference.getter](addon) == true)
+        panel[preference.field]:SetEnabled(not addon.savedDataReadOnly
+            and type(addon[preference.setter]) == "function")
+    end
+    page.RefreshTransparency()
+    panel.restedxpSkinStatus:SetText(GuideText(skin.problem or skin.status))
     for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
         edit:SetEnabled(not page.readOnly and not page.busy)
     end
@@ -850,7 +950,7 @@ function addon:OpenWelcome()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED", "RANKING_CHANGED" }) do
+for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
 end
 addon:RegisterNotification("GROUP_CHANGED", function() RefreshContentFeedback(addon) end)
