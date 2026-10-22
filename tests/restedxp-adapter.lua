@@ -1,4 +1,6 @@
 -- Forwarding leaves validation and import lifecycle entirely with RestedXP.
+local helpers = dofile("tests/support/helpers.lua")
+
 local function newAddon()
     local world = { installed = true, loaded = true, tag = "Player#1234", calls = 0, accepted = true }
     local addon = {}
@@ -40,9 +42,7 @@ local function newAddon()
         },
     }, { __index = _G })
     env._G = env
-    local chunk = assert(loadfile("RestedXPAdapter.lua"))
-    setfenv(chunk, env)
-    chunk("LockInTools", addon)
+    helpers.loadModule("RestedXPAdapter.lua", addon, env)
     return addon, world, rxp, importer, env
 end
 
@@ -57,16 +57,7 @@ local function enableTracking(world, rxp, importer, env)
         world.aborts = (world.aborts or 0) + 1
         self.importCoroutine, self.importBufferSize, self.importReady = nil, 0, false
     end
-    function env.hooksecurefunc(owner, method, callback)
-        world.hooks = world.hooks + 1
-        local original = assert(owner[method])
-        owner[method] = function(...)
-            local function packed(...) return { n = select("#", ...), ... } end
-            local result = packed(original(...))
-            callback(...)
-            return unpack(result, 1, result.n)
-        end
-    end
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
     function env.C_Timer.NewTimer(delay, callback)
         assert(delay == 0, "native observation uses only next-tick coalescing")
         local timer = { callback = callback }

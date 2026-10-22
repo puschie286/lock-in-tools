@@ -1,47 +1,18 @@
 -- Overview presence and native party-action checks without the WoW UI or a live channel.
 local loadNotifications = dofile("tests/support/notifications.lua")
-local function loadModule(file, addon, environment)
-    local chunk, problem
-    if setfenv then
-        chunk, problem = loadfile(file)
-        assert(chunk, problem)
-        setfenv(chunk, environment)
-    else
-        chunk, problem = loadfile(file, "t", environment)
-        assert(chunk, problem)
-    end
-    chunk("LockInTools", addon)
-end
-
-local function copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, item in pairs(value) do result[key] = copy(item) end
-    return result
-end
-
-local function equal(left, right)
-    if type(left) ~= type(right) then return false end
-    if type(left) ~= "table" then return left == right end
-    for key, item in pairs(left) do if not equal(item, right[key]) then return false end end
-    for key in pairs(right) do if left[key] == nil then return false end end
-    return true
-end
+local helpers = dofile("tests/support/helpers.lua")
+local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
 
 local function newAddon(saved, readOnly, name, configure)
     local world = {
         now = 0, epoch = 2000000000, name = name or "Self", level = 24, xp = 420, xpMax = 1000, maxLevel = 60,
-        fingerprint = "first-group", connected = false, timers = {}, frames = {},
-        sent = {}, requests = {}, invites = {}, joins = {}, positions = {},
+        fingerprint = "first-group", connected = false, frames = {},
+        invites = {}, joins = {}, positions = {},
         grouped = false, raid = false, leader = false, assistant = false,
         members = 0, sameParty = {}, refreshes = 0,
     }
-    local function timer(delay, callback, repeating)
-        local result = { at = world.now + delay, callback = callback, interval = repeating and delay }
-        function result:Cancel() self.cancelled = true end
-        function result:IsCancelled() return self.cancelled == true end
-        world.timers[#world.timers + 1] = result
-        return result
+    local function rejectTimer()
+        error("Roster scheduling belongs to shared status")
     end
     local environment = setmetatable({
         GetTime = function() return world.now end,
@@ -81,9 +52,7 @@ local function newAddon(saved, readOnly, name, configure)
         },
         InviteUnit = function(name) world.invites[#world.invites + 1] = name end,
         C_Timer = {
-            NewTimer = function(delay, callback) return timer(delay, callback) end,
-            NewTicker = function(delay, callback) return timer(delay, callback, true) end,
-            After = function(delay, callback) return timer(delay, callback) end,
+            NewTimer = rejectTimer, NewTicker = rejectTimer, After = rejectTimer,
         },
         CreateFrame = function(kind)
             assert(kind == "Frame")
@@ -128,15 +97,11 @@ local function newAddon(saved, readOnly, name, configure)
     function addon:RegisterDataRequest(feature, request, response)
         error("Roster must not register separate discovery requests")
     end
-    function addon:SendData(feature, payload)
-        assert(feature == "roster")
-        world.sent[#world.sent + 1] = { at = world.now, payload = payload }
-        return world.connected
+    function addon:SendData()
+        error("Roster broadcasts belong to shared status")
     end
-    function addon:RequestData(feature, payload)
-        assert(feature == "roster")
-        world.requests[#world.requests + 1] = { at = world.now, payload = payload }
-        return world.connected
+    function addon:RequestData()
+        error("Roster discovery belongs to shared status")
     end
     if configure then configure(environment) end
     loadModule("Roster.lua", addon, environment)
@@ -159,25 +124,7 @@ local function newAddon(saved, readOnly, name, configure)
         end
     end
     function world:advance(seconds)
-        local target, callbacks = self.now + seconds, 0
-        while true do
-            local nextIndex, nextTimer
-            for index, entry in ipairs(self.timers) do
-                if not entry.cancelled and entry.at <= target and (not nextTimer or entry.at < nextTimer.at) then
-                    nextIndex, nextTimer = index, entry
-                end
-            end
-            if not nextTimer then break end
-            table.remove(self.timers, nextIndex)
-            self.now, callbacks = nextTimer.at, callbacks + 1
-            assert(callbacks < 200, "Roster timers must remain bounded")
-            nextTimer.callback(nextTimer)
-            if nextTimer.interval and not nextTimer.cancelled then
-                nextTimer.at = self.now + nextTimer.interval
-                self.timers[#self.timers + 1] = nextTimer
-            end
-        end
-        self.now = target
+        self.now = self.now + seconds
     end
     function world:peer(name, level, grouped, canInvite, full, sharing, stamp, sequence)
         return self:status(name, { level = level or 25, xpState = "unavailable", inParty = grouped == true,
@@ -225,8 +172,6 @@ do
     world:event("PLAYER_LEVEL_UP", 25)
     assert(world:find("self-testrealm").level == 25, "Local level changes appear immediately")
     world:advance(100)
-    assert(#world.sent == 0 and #world.requests == 0 and #world.timers == 0,
-        "Roster owns no timer, broadcasts or requests; shared status owns scheduling and discovery")
     world:peer("Remote-TestRealm", 30, false, true, false, false)
     assert(world:find("remote-testrealm").online)
     world:disconnect()
@@ -234,7 +179,6 @@ do
         "Losing the data connection cannot continue presenting remote players as active")
     world:connect()
     assert(not world:find("remote-testrealm").online, "Reconnection waits for current contact")
-    assert(#world.sent == 0 and #world.requests == 0, "Reconnect discovery belongs to shared status")
 end
 
 -- Native senders define identity; malformed packets and old ordering cannot refresh presence.
@@ -409,10 +353,8 @@ do
     assert(not addon:GetOverviewActionState("friend-testrealm").request)
     assert(not addon:PerformOverviewAction("friend-testrealm", "request"))
     addon:OnRosterLogout()
-    local sent, requests = #world.sent, #world.requests
     world:advance(100)
     assert(world.collectStatus() == nil and not world:peer("Friend-TestRealm", 31, true, true, false, false))
-    assert(#world.sent == sent and #world.requests == requests, "Logout stops presence and discovery")
     local saved = copy(addon.db)
     saved.schemaVersion = 999
     local before = copy(saved)
@@ -422,7 +364,6 @@ do
     guarded:OnRosterGroupChanged()
     clock:advance(100)
     assert(equal(before, saved), "Newer-schema data must remain byte-for-byte unchanged")
-    assert(#clock.sent == 0 and #clock.requests == 0)
     assert(not guarded:PerformOverviewAction("other-testrealm", "invite"))
 end
 
@@ -432,7 +373,7 @@ do
     world:login(); world:connect()
     world.xp = 0
     world:event("PLAYER_XP_UPDATE", "player")
-    assert(world:find("self-testrealm").xp == 0 and #world.sent == 0 and #world.requests == 0)
+    assert(world:find("self-testrealm").xp == 0)
     assert(world:status("Friend-TestRealm", { level = 31, xp = 125, xpMax = 500, xpState = "known" }))
     local friend = world:find("friend-testrealm")
     assert(friend.xp == 125 and friend.xpMax == 500 and not friend.xpStale

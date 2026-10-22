@@ -14,6 +14,7 @@ local function copy(value)
 end
 
 local function equal(left, right)
+    if left == right then return true end
     if type(left) ~= type(right) then return false end
     if type(left) ~= "table" then return left == right end
     for key, item in pairs(left) do if not equal(item, right[key]) then return false end end

@@ -1,32 +1,7 @@
 -- Position model checks use mocked native channels without the WoW map UI.
 local loadNotifications = dofile("tests/support/notifications.lua")
-local function loadModule(file, addon, environment)
-    local chunk, problem
-    if setfenv then
-        chunk, problem = loadfile(file)
-        assert(chunk, problem)
-        setfenv(chunk, environment)
-    else
-        chunk, problem = loadfile(file, "t", environment)
-        assert(chunk, problem)
-    end
-    chunk("LockInTools", addon)
-end
-
-local function copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, item in pairs(value) do result[key] = copy(item) end
-    return result
-end
-
-local function equal(left, right)
-    if type(left) ~= type(right) then return false end
-    if type(left) ~= "table" then return left == right end
-    for key, item in pairs(left) do if not equal(item, right[key]) then return false end end
-    for key in pairs(right) do if left[key] == nil then return false end end
-    return true
-end
+local helpers = dofile("tests/support/helpers.lua")
+local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
 
 local function newAddon(saved, readOnly, prepare)
     local world = {
@@ -34,10 +9,9 @@ local function newAddon(saved, readOnly, prepare)
         map = 37, x = 0.25, y = 0.75, samples = 0, refreshes = 0, sent = {},
         channels = {}, joinEnabled = false, sendAttempts = {},
     }
-    local function timer(delay, callback, repeating)
-        local result = { at = world.now + delay, callback = callback, interval = repeating and delay }
+    local function timer(delay, callback)
+        local result = { at = world.now + delay, callback = callback }
         function result:Cancel() self.cancelled = true end
-        function result:IsCancelled() return self.cancelled == true end
         world.timers[#world.timers + 1] = result
         return result
     end
@@ -45,7 +19,6 @@ local function newAddon(saved, readOnly, prepare)
         bit = false, bit32 = false,
         C_Timer = {
             NewTimer = function(delay, callback) return timer(delay, callback) end,
-            NewTicker = function(delay, callback) return timer(delay, callback, true) end,
             After = function(delay, callback) return timer(delay, callback) end,
         },
         GetTime = function() return world.now end,
@@ -160,10 +133,6 @@ local function newAddon(saved, readOnly, prepare)
             self.now, callbacks = nextTimer.at, callbacks + 1
             assert(callbacks < 200, "Position timers must remain bounded")
             nextTimer.callback(nextTimer)
-            if nextTimer.interval and not nextTimer.cancelled then
-                nextTimer.at = self.now + nextTimer.interval
-                self.timers[#self.timers + 1] = nextTimer
-            end
         end
         self.now = target
     end

@@ -1,16 +1,5 @@
 -- Load the actual embedded notification libraries into each isolated WoW mock.
-local function loadModule(file, addon, environment)
-    local chunk, problem
-    if setfenv then
-        chunk, problem = loadfile(file)
-        assert(chunk, problem)
-        setfenv(chunk, environment)
-    else
-        chunk, problem = loadfile(file, "t", environment)
-        assert(chunk, problem)
-    end
-    chunk("LockInTools", addon)
-end
+local loadModule = dofile("tests/support/helpers.lua").loadModule
 
 return function(addon, environment, captureOnly)
     local errors = {}
@@ -26,12 +15,10 @@ return function(addon, environment, captureOnly)
         end, environment.geterrorhandler()))
         if result[1] then return unpack(result, 2, result.n) end
     end
-    if loadstring and setfenv then
-        environment.loadstring = function(source, name)
-            local chunk, problem = loadstring(source, name)
-            if chunk then setfenv(chunk, environment) end
-            return chunk, problem
-        end
+    environment.loadstring = function(source, name)
+        local chunk, problem = loadstring(source, name)
+        if chunk then setfenv(chunk, environment) end
+        return chunk, problem
     end
     if type(environment.CreateFrame) ~= "function" then
         environment.CreateFrame = function(kind)

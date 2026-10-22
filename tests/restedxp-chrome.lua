@@ -1,5 +1,7 @@
 -- Chrome changes use native layout hooks, preserve the step viewport, and undo
 -- only their own frame changes. They never replace scripts or secure actions.
+local helpers = dofile("tests/support/helpers.lua")
+
 local function Points(frame)
     local result = {}
     for index = 1, frame:GetNumPoints() do result[index] = { frame:GetPoint(index) } end
@@ -185,17 +187,8 @@ local function Fixture(v2Enabled)
     function rxp.v2:UpdateGuideWindow() self:GetGuideWindow():SetSnapshot(false) end
     local addon = { db = { restedxpSkin = { hideChrome = false } }, restedxpSkinState = {} }
     local env = setmetatable({ InCombatLockdown = function() return world.combat end }, { __index = _G })
-    function env.hooksecurefunc(owner, method, callback)
-        world.hooks = world.hooks + 1
-        local original = owner[method]
-        owner[method] = function(...)
-            local result = { original(...) }
-            callback(...)
-            return unpack(result)
-        end
-    end
-    local chunk = assert(loadfile("RestedXPSkin.lua"))
-    setfenv(chunk, env)("LockInTools", addon)
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
+    helpers.loadModule("RestedXPSkin.lua", addon, env)
     function addon:IsRestedXPChromeHidden() return self.db.restedxpSkin.hideChrome == true end
     return addon, rxp, world
 end

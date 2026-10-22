@@ -1,19 +1,7 @@
 -- GameTooltip is shared with Blizzard and other addons; styling follows ownership.
-local function Copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, child in pairs(value) do result[key] = Copy(child) end
-    return result
-end
-
-local function Equal(left, right)
-    if left == right then return true end
-    if type(left) ~= type(right) then return false end
-    if type(left) ~= "table" then return left == right end
-    for key, value in pairs(left) do if not Equal(value, right[key]) then return false end end
-    for key in pairs(right) do if left[key] == nil then return false end end
-    return true
-end
+local helpers = dofile("tests/support/helpers.lua")
+local HookScript, RunScript = dofile("tests/support/scripts.lua")
+local Copy, Equal = helpers.copy, helpers.equal
 
 local function Points(frame)
     local points = {}
@@ -34,15 +22,15 @@ local function Content(tooltip)
 end
 
 local function Fixture(nilBackdrop, nineSlice)
-    local world = { appearanceWrites = 0, ownerWrites = 0, anchorWrites = 0, contentWrites = 0,
-        hooks = 0, shows = 0, hides = 0, createdTooltips = 0, combat = false }
+    local world = { ownerWrites = 0, anchorWrites = 0, contentWrites = 0,
+        hooks = 0, createdTooltips = 0, combat = false }
     local function Frame(parent, name)
         local frame = { parent = parent, name = name, forbidden = false, alpha = 0.7, shown = true, width = 240, height = 70 }
         function frame:GetParent() return self.parent end
         function frame:GetName() return self.name end
         function frame:IsForbidden() return self.forbidden end
         function frame:GetAlpha() return self.alpha end
-        function frame:SetAlpha(value) self.alpha = value; world.appearanceWrites = world.appearanceWrites + 1 end
+        function frame:SetAlpha(value) self.alpha = value end
         function frame:IsShown() return self.shown end
         function frame:GetWidth() return self.width end
         function frame:GetHeight() return self.height end
@@ -85,29 +73,28 @@ local function Fixture(nilBackdrop, nineSlice)
     function tooltip:GetBackdrop() return self.backdrop end
     function tooltip:SetBackdrop(value)
         self.backdrop, self.fill, self.border = Copy(value), { 1, 1, 1, 1 }, { 1, 1, 1, 1 }
-        world.appearanceWrites = world.appearanceWrites + 1
     end
     function tooltip:GetBackdropColor() assert(self.backdrop, "no fill color exists without a native backdrop"); return unpack(self.fill) end
     function tooltip:SetBackdropColor(...)
         assert(select("#", ...) == 4, "backdrop restoration needs complete fill RGBA")
-        self.fill = { ... }; world.appearanceWrites = world.appearanceWrites + 1
+        self.fill = { ... }
     end
     function tooltip:GetBackdropBorderColor() assert(self.backdrop, "no border color exists without a native backdrop"); return unpack(self.border) end
     function tooltip:SetBackdropBorderColor(...)
         assert(select("#", ...) == 4, "backdrop restoration needs complete border RGBA")
-        self.border = { ... }; world.appearanceWrites = world.appearanceWrites + 1
+        self.border = { ... }
     end
     function tooltip:CreateTexture(_, layer)
         local texture = { shown = true, alpha = 1, parent = self, layer = layer, points = {} }
         function texture:GetAlpha() return self.alpha end
-        function texture:SetAlpha(value) self.alpha = value; world.appearanceWrites = world.appearanceWrites + 1 end
+        function texture:SetAlpha(value) self.alpha = value end
         function texture:IsShown() return self.shown end
         function texture:IsVisible() return self.shown and self.parent:IsShown() end
         function texture:Show() self.shown = true end
         function texture:Hide() self.shown = false end
-        function texture:SetColorTexture(...) self.color = { ... }; world.appearanceWrites = world.appearanceWrites + 1 end
-        function texture:SetTexture(path) self.path = path; world.appearanceWrites = world.appearanceWrites + 1 end
-        function texture:SetVertexColor(...) self.color = { ... }; world.appearanceWrites = world.appearanceWrites + 1 end
+        function texture:SetColorTexture(...) self.color = { ... } end
+        function texture:SetTexture(path) self.path = path end
+        function texture:SetVertexColor(...) self.color = { ... } end
         function texture:GetVertexColor() return unpack(self.color or { 1, 1, 1, 1 }) end
         function texture:SetPoint(...) self.points[#self.points + 1] = { ... } end
         function texture:SetAllPoints(frame) self.allPoints = frame or self.parent end
@@ -132,16 +119,9 @@ local function Fixture(nilBackdrop, nineSlice)
     function tooltip:SetHyperlink(link) self.lines = { { link, "native hyperlink contents" } }; world.contentWrites = world.contentWrites + 1 end
     function tooltip:GetScript(name) return self.scripts[name] end
     function tooltip:SetScript(name, callback) self.scripts[name] = callback end
-    function tooltip:HookScript(name, callback)
-        self.scriptHooks[name] = self.scriptHooks[name] or {}
-        self.scriptHooks[name][#self.scriptHooks[name] + 1] = callback
-    end
-    function tooltip:RunScript(name, ...)
-        if self.scripts[name] then self.scripts[name](self, ...) end
-        for _, callback in ipairs(self.scriptHooks[name] or {}) do callback(self, ...) end
-    end
-    tooltip.scripts.OnShow = function() world.shows = world.shows + 1 end
-    tooltip.scripts.OnHide = function() world.hides = world.hides + 1 end
+    tooltip.HookScript, tooltip.RunScript = HookScript, RunScript
+    tooltip.scripts.OnShow = function() end
+    tooltip.scripts.OnHide = function() end
     function tooltip:IsShown() return self.shown end
     function tooltip:Show() self.shown = true; self:RunScript("OnShow") end
     function tooltip:Hide() self.shown = false; self:RunScript("OnHide") end
@@ -164,17 +144,9 @@ local function Fixture(nilBackdrop, nineSlice)
         end,
     }, { __index = _G })
     env._G = env
-    function env.hooksecurefunc(owner, method, callback)
-        world.hooks = world.hooks + 1
-        local original = assert(owner[method])
-        owner[method] = function(...)
-            local result = { original(...) }
-            callback(...)
-            return unpack(result)
-        end
-    end
-    setfenv(assert(loadfile("Theme.lua")), env)("LockInTools", addon)
-    setfenv(assert(loadfile("RestedXPSkin.lua")), env)("LockInTools", addon)
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
+    helpers.loadModule("Theme.lua", addon, env)
+    helpers.loadModule("RestedXPSkin.lua", addon, env)
     function world:Hover(owner)
         tooltip:SetOwner(owner, "ANCHOR_NONE", 4, 7)
         tooltip:ClearAllPoints()
@@ -189,7 +161,7 @@ local function Fixture(nilBackdrop, nineSlice)
     world.partyOwner, world.activeOwner, world.childOwner = Frame(party.frame), Frame(player.activeStepFrame.frame), Frame(player.childContainer.frame)
     world.worldPin, world.miniPin, world.unrelatedPin = worldPin, miniPin, unrelatedPin
     world.unrelated, world.falsePrefix = unrelated, Frame(nil, "RXPUnrelatedAddonButton")
-    world.Frame, world.tooltip = Frame, tooltip
+    world.Frame = Frame
     return addon, rxp, world, tooltip
 end
 

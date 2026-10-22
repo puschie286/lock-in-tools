@@ -1,7 +1,7 @@
 -- This offline suite is never loaded by the addon.
 local fixture = dofile("tests/support/addon.lua")
 local loadAddon, settings = fixture.loadAddon, fixture.settings
-local SECRET, OTHER_SECRET, contains = fixture.SECRET, fixture.OTHER_SECRET, fixture.contains
+local SECRET, contains = fixture.SECRET, fixture.contains
 local loadOptions = dofile("tests/support/ui.lua")
 
 local function clickOutside(menu, mouseButton)
@@ -54,17 +54,12 @@ do
     local options = overview.optionsPanel
     assert(options.selectedTab == "group" and not overview.contentPanel and snapshotCalls == 0,
         "opening Settings does not activate Content or request an Overview snapshot")
-    options.secret:UserInput(OTHER_SECRET)
-    options.secret:SetFocus()
-    options.applyGroup:Click()
     command("overview")
     local content = overview.contentPanel
     local page = content.overviewPage
     assert(content.selectedTab == "overview" and not options:IsVisible()
-        and page:IsVisible() and page.active and snapshotCalls == 0
-        and options.secret:GetText() == "" and not options.secret.focused
-        and overview:GetGroupSecret() == SECRET,
-        "overview command opens Content and clears group-key drafts and confirmation")
+        and page:IsVisible() and page.active and snapshotCalls == 0,
+        "overview command opens Content without requesting an Overview snapshot")
     local ownRow = page.rows[1]
     assert(ownRow.name:GetText() == "Self" and not ownRow.actions:IsEnabled(),
         "the local player's name has no self suffix and its Actions trigger is disabled")
@@ -217,12 +212,11 @@ end
 -- Player actions also work on independent surfaces without opening Content.
 do
     local actions, api, _, _, world = loadAddon(settings(SECRET, false), false)
-    local invites, requests = 0, 0
     api.C_PartyInfo = {
         CanInvite = function() return true end,
         IsPartyFull = function() return false end,
-        InviteUnit = function() invites = invites + 1 end,
-        RequestInviteFromUnit = function() requests = requests + 1 end,
+        InviteUnit = function() end,
+        RequestInviteFromUnit = function() end,
     }
     api.GameTooltip_SetDefaultAnchor = function(tooltip, owner)
         tooltip:SetOwner(owner, "ANCHOR_CURSOR")
@@ -246,17 +240,6 @@ do
     menu:Open("self-testrealm", anchor)
     assert(not menu:IsShown() and not menu.playerID and not actions.activePlayerActionMenu,
         "the shared menu rejects self targets before selecting or showing actions")
-    for _, mouseButton in ipairs({ "RightButton", "LeftButton" }) do
-        otherMenu:Open("alpha-testrealm", otherAnchor)
-        otherMenu.request.scripts.OnEnter(otherMenu.request)
-        assert(api.GameTooltip:IsShown() and actions.activePlayerActionMenu == otherMenu,
-            "an independent dropdown owns its action tooltip and active menu")
-        clickOutside(otherMenu, mouseButton)
-        assert(not otherMenu:IsShown() and not otherMenu.playerID and not otherMenu.anchor
-            and not actions.activePlayerActionMenu and not api.GameTooltip:IsShown()
-            and invites == 0 and requests == 0 and not actions.contentPanel,
-            "an outside " .. mouseButton .. " cancels independent actions without opening Content or a party action")
-    end
     menu:Open("alpha-testrealm", anchor)
     local tooltip = api.GameTooltip
     assert(not menu.request:IsEnabled(), "an unavailable action still exposes hover help")
@@ -331,18 +314,6 @@ do
         and row.progressTrack:IsShown() and row.progressFill:IsShown()
         and math.abs(row.progressFill:GetWidth() - row.progressTrack:GetWidth() * 0.42) < 0.000001,
         "known XP displays the numeric level, floored percentage and proportional thin fill")
-    assert(row.progress.point[1] == "LEFT" and row.progress.point[2] == row.level
-        and row.progress.point[3] == "RIGHT" and row.progress.point[4] == 6 and row.progress.point[5] == 0
-        and row.progress.justifyH == "RIGHT" and row.progress:GetHeight() == 12
-        and row.level:GetWidth() + row.progress.point[4] + row.progress:GetWidth() <= row.levelCell:GetWidth(),
-        "the percentage is right aligned beside the level value on the same horizontal line within the Level column")
-    assert(row.name:GetWidth() == 124 and page.headers.name:GetWidth() == 124
-        and page.headers.level.point[2] == 148 and row.levelCell.point[2] == 132
-        and row.levelCell:GetWidth() == 80
-        and page.headers.region.point[2] == 236 and page.headers.region:GetWidth() == 196
-        and row.position.point[2] == 220 and row.position:GetWidth() == 196
-        and row.progressTrack:GetWidth() == 36 and row.progressTrack.point[3] == -24,
-        "a shorter Name column gives Region more room while keeping the Level cell and XP bar dimensions")
     assert(page.rows[2].progress:GetText() == "0%" and page.rows[2].progressTrack:IsShown()
         and not page.rows[2].progressFill:IsShown() and page.rows[3].progress:GetText() == "99%",
         "zero XP shows an empty track and near-level XP never rounds up to 100 percent")

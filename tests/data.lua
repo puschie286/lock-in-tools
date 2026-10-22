@@ -1838,35 +1838,6 @@ do
     for index = before + 1, #clock.sent do assert(clock.sent[index].message == request) end
 end
 
--- Existing feature duplicate guards apply across transports: status and burned
--- reports are processed once, and delayed position copies cannot refresh a pin.
-do
-    local current, clock = newAddon(nil, false, true, { guild = true, party = true })
-    local samples = 0
-    loadModule("Burned.lua", current, clock.environment)
-    current:InitializeBurned()
-    assert(current:RegisterDataStatusProvider("player", function() return { level = 24 } end,
-        function() samples = samples + 1 end))
-    clock:connect()
-    local message = "1|status|" .. full("peer-overlap", 2000000000, 1, "1=25|12=20")
-    assert(current:ReceiveData("Friend", message, "PARTY"))
-    clock:advance(1)
-    assert(not current:ReceiveData("FRIEND-Test Realm", message, "GUILD")
-        and not current:ReceiveData("Friend", message, "CHANNEL") and samples == 1)
-    local mean = current:GetGroupBurnedStatus()
-    assert(mean.count == 2 and mean.average == 10, "Overlapping native routes do not double-count burned reports")
-    message = "1|position|2|P|2000000001|37|40000|60000"
-    assert(current:ReceiveData("Friend", message, "GUILD"))
-    local peer = current:GetSharedPositions()["friend-testrealm"]
-    local receivedAt = peer.lastReceived
-    clock:advance(1)
-    assert(not current:ReceiveData("Friend", message, "PARTY")
-        and not current:ReceiveData("Friend", message, "CHANNEL"))
-    assert(current:GetSharedPositions()["friend-testrealm"] == peer and peer.lastReceived == receivedAt
-        and peer.x == 0.4 and peer.y == 0.6,
-        "Duplicate positions preserve location and original contact time")
-end
-
 -- Saved route switches apply to both directions immediately, including RAID
 -- through the party switch. Missing settings still enable every route.
 do

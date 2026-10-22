@@ -1,4 +1,8 @@
 -- Native CheckButtons retain click/state ownership; the skin only draws an overlay.
+local helpers = dofile("tests/support/helpers.lua")
+local HookScript, RunScript = dofile("tests/support/scripts.lua")
+local Equal = helpers.equal
+
 local function CopyPoints(value)
     local result = {}
     for index, point in ipairs(value) do
@@ -6,15 +10,6 @@ local function CopyPoints(value)
         for coordinate, child in pairs(point) do result[index][coordinate] = child end
     end
     return result
-end
-
-local function Equal(left, right)
-    if left == right then return true end
-    if type(left) ~= type(right) then return false end
-    if type(left) ~= "table" then return left == right end
-    for key, value in pairs(left) do if not Equal(value, right[key]) then return false end end
-    for key in pairs(right) do if left[key] == nil then return false end end
-    return true
 end
 
 local function Fixture(v2Enabled)
@@ -105,14 +100,7 @@ local function Fixture(v2Enabled)
         function frame:GetRegions() return unpack(self.regions) end
         function frame:GetScript(name) return self.scripts[name] end
         function frame:SetScript(name, callback) self.scripts[name] = callback; Changed() end
-        function frame:HookScript(name, callback)
-            self.scriptHooks[name] = self.scriptHooks[name] or {}
-            self.scriptHooks[name][#self.scriptHooks[name] + 1] = callback
-        end
-        function frame:RunScript(name, ...)
-            if self.scripts[name] then self.scripts[name](self, ...) end
-            for _, callback in ipairs(self.scriptHooks[name] or {}) do callback(self, ...) end
-        end
+        frame.HookScript, frame.RunScript = HookScript, RunScript
         return frame
     end
     local rxp = { settings = { profile = { activeTheme = "LockInTools" } }, RXPFrame = { CurrentStepFrame = { framePool = {} } },
@@ -189,7 +177,6 @@ local function Fixture(v2Enabled)
         world.buttons[#world.buttons + 1] = button
         return row, button
     end
-    function world:NewRow() return NewRow() end
     function rxp:LoadActiveTheme() end
     function rxp.SetStep() end
     function rxp.RenderFrame()
@@ -213,17 +200,9 @@ local function Fixture(v2Enabled)
             return Frame(kind, parent)
         end,
     }, { __index = _G })
-    function env.hooksecurefunc(owner, method, callback)
-        world.hooks = world.hooks + 1
-        local original = assert(owner[method])
-        owner[method] = function(...)
-            local result = { original(...) }
-            callback(...)
-            return unpack(result)
-        end
-    end
-    setfenv(assert(loadfile("Theme.lua")), env)("LockInTools", addon)
-    setfenv(assert(loadfile("RestedXPSkin.lua")), env)("LockInTools", addon)
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
+    helpers.loadModule("Theme.lua", addon, env)
+    helpers.loadModule("RestedXPSkin.lua", addon, env)
     function world:Visual(button)
         local parts = {}
         local function Draw(frame)

@@ -1,5 +1,7 @@
 -- Changing transparency must touch backing layers only, never reload the guide
 -- or inherit opacity onto text, interactions, checkboxes or the resize controls.
+local helpers = dofile("tests/support/helpers.lua")
+
 local function Fixture()
     local world = { writes = 0, nativeCalls = 0, layouts = 0, hooks = 0, combat = false }
     local function Layer(alpha, kind)
@@ -78,16 +80,8 @@ local function Fixture()
     local addon = { db = { restedxpSkin = { enabled = true, backgroundTransparency = 0 } },
         restedxpScrollbarState = { [rxp] = { bars = { native = { track = track, thumb = thumb } } } } }
     local env = setmetatable({ InCombatLockdown = function() return world.combat end }, { __index = _G })
-    function env.hooksecurefunc(owner, method, callback)
-        world.hooks = world.hooks + 1
-        local original = owner[method]
-        owner[method] = function(...)
-            local result = { original(...) }
-            callback(...)
-            return unpack(result)
-        end
-    end
-    setfenv(assert(loadfile("RestedXPSkin.lua")), env)("LockInTools", addon)
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
+    helpers.loadModule("RestedXPSkin.lua", addon, env)
     function addon:RefreshRestedXPScrollbar()
         self.restedxpScrollbarState[rxp].bars.late = { track = Layer(), thumb = Layer() }
     end

@@ -262,7 +262,9 @@ do
     bobWorld.xp = 925
     assert(bob:SetBurnedStatus(90))
     bobWorld:advance(5)
-    deliver(bobWorld.statusSends, 5, 6, aliceEvent, "Bob")
+    deliver(bobWorld.statusSends, 5, 5, aliceEvent, "Bob")
+    aliceWorld:advance(1)
+    deliver(bobWorld.statusSends, 6, 6, aliceEvent, "BOB-Test Realm")
     bobRow, aliceCount = player(alice, "bob-testrealm")
     assert(bobRow.xp == 925 and aliceCount == 2
         and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 55
@@ -273,7 +275,11 @@ do
     end
     bobWorld:advance(1)
     assert(#bobWorld.dataSends == 2 and bobWorld.dataSends[1].message == bobWorld.dataSends[2].message)
-    deliver(bobWorld.dataSends, 1, 2, aliceEvent, "Bob")
+    deliver(bobWorld.dataSends, 1, 1, aliceEvent, "Bob")
+    local position = assert(alice:GetSharedPositions()["bob-testrealm"])
+    local receivedAt = position.lastReceived
+    aliceWorld:advance(1)
+    deliver(bobWorld.dataSends, 2, 2, aliceEvent, "BOB-Test Realm")
     assert(alice:GetSharedPositions()["bob-testrealm"].x == 0.6 and positionChanges == 2
         and alice:GetGroupBurnedStatus().count == 2,
         "Duplicate movement reports retain one position and do not affect status counts")
@@ -283,13 +289,21 @@ do
     assert(accepted)
     local state = alice.dataState
     local session, received, pending = state.status.session, state.status.received, state.pendingRequests[requestID]
-    local peer, position = alice.burnedState.peers["bob-testrealm"], alice:GetSharedPositions()["bob-testrealm"]
+    local peer = alice.burnedState.peers["bob-testrealm"]
     aliceWorld:completeJoin(alice:GetGroupDataChannelName(), 7)
     assert(alice:IsDataConnected() and state.routes.CHANNEL == "7"
         and state.status.session == session and state.status.received == received
         and state.pendingRequests[requestID] == pending and alice.burnedState.peers["bob-testrealm"] == peer
         and alice:GetSharedPositions()["bob-testrealm"] == position,
         "Adding global membership preserves live providers, wire ordering and pending requests")
+    for _, sent in ipairs({ bobWorld.statusSends[5], bobWorld.dataSends[1] }) do
+        aliceEvent("CHAT_MSG_ADDON", sent.prefix, sent.message, "CHANNEL", "BOB-Test Realm", nil, 0, 7,
+            alice:GetGroupDataChannelName())
+    end
+    assert(alice:GetSharedPositions()["bob-testrealm"] == position and position.lastReceived == receivedAt
+        and position.x == 0.6 and position.y == 0.2 and rosterChanges == 1 and burnedChanges == 1
+        and positionChanges == 2 and alice:GetGroupBurnedStatus().count == 2,
+        "Delayed copies across all routes preserve sender identity, coordinates and original contact time")
     aliceWorld:notice("WRONG_PASSWORD", alice:GetGroupDataChannelName())
     assert(alice:IsDataConnected() and not state.routes.CHANNEL and state.phase == "error"
         and state.status.session == session and state.status.received == received

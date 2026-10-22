@@ -13,6 +13,78 @@ local function InCombat()
     return type(InCombatLockdown) == "function" and InCombatLockdown()
 end
 
+local function WeakKeys()
+    return setmetatable({}, { __mode = "k" })
+end
+
+local function HookOnce(registry, owner, method, callback)
+    if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
+    local hooks = registry[owner] or {}
+    registry[owner] = hooks
+    if hooks[method] then return end
+    hooksecurefunc(owner, method, callback)
+    hooks[method] = true
+    return true
+end
+
+local function FeatureState(self, rxp, field, refreshMethod, initialize)
+    if not rxp or type(rxp.settings) ~= "table" or type(rxp.settings.profile) ~= "table" then return end
+    self[field] = self[field] or WeakKeys()
+    local state = self[field][rxp]
+    if not state then
+        state = initialize()
+        -- Each feature owns its hooks and recursion guard; refresh methods are
+        -- resolved at call time so later native discovery and wrappers still run.
+        state.hooks = WeakKeys()
+        state.refresh = function() self[refreshMethod](self, rxp) end
+        state.Hook = function(owner, method, callback)
+            return HookOnce(state.hooks, owner, method, callback or state.refresh)
+        end
+        self[field][rxp] = state
+    end
+    if not state.applying then return state, state.Hook, state.refresh end
+end
+
+local function Apply(state, action, ...)
+    state.applying = true
+    local success, problem = pcall(action, ...)
+    state.applying = false
+    if not success then error(problem, 0) end
+end
+
+local function SuppressDecoration(native, region, owner)
+    if not region or region == owner or type(region.GetAlpha) ~= "function" or type(region.SetAlpha) ~= "function" then return end
+    local alpha = region:GetAlpha()
+    if native[region] == nil or alpha ~= 0 then native[region] = alpha end
+    if alpha ~= 0 then region:SetAlpha(0) end
+end
+
+local function RestoreDecorations(native)
+    for region, alpha in pairs(native) do
+        -- Preserve later native writes; only undo artwork that is still suppressed.
+        if region:GetAlpha() == 0 then region:SetAlpha(alpha) end
+        native[region] = nil
+    end
+end
+
+local function FlatPanelTextures(frame)
+    local textures = {}
+    for index = 1, 5 do textures[index] = frame:CreateTexture(nil, index == 1 and "BACKGROUND" or "BORDER") end
+    textures[1]:SetAllPoints(frame)
+    textures[2]:SetPoint("TOPLEFT"); textures[2]:SetPoint("TOPRIGHT"); textures[2]:SetHeight(1)
+    textures[3]:SetPoint("BOTTOMLEFT"); textures[3]:SetPoint("BOTTOMRIGHT"); textures[3]:SetHeight(1)
+    textures[4]:SetPoint("TOPLEFT"); textures[4]:SetPoint("BOTTOMLEFT"); textures[4]:SetWidth(1)
+    textures[5]:SetPoint("TOPRIGHT"); textures[5]:SetPoint("BOTTOMRIGHT"); textures[5]:SetWidth(1)
+    return textures
+end
+
+local function PaintFlatPanel(textures, palette)
+    for index, texture in ipairs(textures) do
+        texture:SetColorTexture(unpack(index == 1 and palette.background or palette.border))
+        texture:Show()
+    end
+end
+
 local function Installation()
     local rxp = addon:GetRestedXPAddon()
     if not rxp then return nil, "Enable RestedXP to use the skin." end
@@ -118,17 +190,16 @@ end
 
 local function HookVisuals(rxp, state)
     if type(hooksecurefunc) ~= "function" then return end
+    local visuals = state.visuals[rxp]
+    if visuals then visuals.Refresh(); return end
+    -- Hooks outlive a refresh. Keep their callbacks and restoration snapshots
+    -- together so discovery cannot paint into a different set of snapshots.
+    visuals = { hooks = WeakKeys(), borderColors = WeakKeys() }
+    state.visuals[rxp] = visuals
     local function Hook(owner, method, callback)
-        if not owner or type(owner[method]) ~= "function" then return end
-        local methods = state.hooked[owner] or {}
-        state.hooked[owner] = methods
-        if not methods[method] then
-            hooksecurefunc(owner, method, callback)
-            methods[method] = true
-        end
+        return HookOnce(visuals.hooks, owner, method, callback)
     end
-    local palette, saved = addon.Theme:GetPalette(), nil
-    local borderColors = setmetatable({}, { __mode = "k" })
+    local palette, borderColors = addon.Theme:GetPalette(), visuals.borderColors
     local function PaintBorder(panel)
         if not panel or type(panel.GetBackdropBorderColor) ~= "function"
             or type(panel.SetBackdropBorderColor) ~= "function" then return end
@@ -137,13 +208,13 @@ local function HookVisuals(rxp, state)
     end
     local function Metadata()
         local frame = rxp.RXPFrame
-        if not frame or not frame.backdrop then return end
         if Overrides(rxp) then
-            if not saved then
-                saved = {}
+            if not frame or not frame.backdrop then return end
+            if not visuals.saved then
+                visuals.saved = {}
                 for _, key in ipairs({ "edge", "guideName" }) do
                     local backdrop = frame.backdrop[key]
-                    if backdrop then saved[key] = { edgeSize = backdrop.edgeSize, insets = backdrop.insets } end
+                    if backdrop then visuals.saved[key] = { edgeSize = backdrop.edgeSize, insets = backdrop.insets } end
                 end
             end
             for _, key in ipairs({ "edge", "guideName" }) do
@@ -153,17 +224,19 @@ local function HookVisuals(rxp, state)
                     backdrop.insets = { left = 1, right = 1, top = 1, bottom = 1 }
                 end
             end
-        elseif saved then
-            for _, key in ipairs({ "edge", "guideName" }) do
-                if frame.backdrop[key] and saved[key] then
-                    frame.backdrop[key].edgeSize, frame.backdrop[key].insets = saved[key].edgeSize, saved[key].insets
+        else
+            if visuals.saved and frame and frame.backdrop then
+                for _, key in ipairs({ "edge", "guideName" }) do
+                    if frame.backdrop[key] and visuals.saved[key] then
+                        frame.backdrop[key].edgeSize, frame.backdrop[key].insets = visuals.saved[key].edgeSize, visuals.saved[key].insets
+                    end
                 end
             end
             for panel, color in pairs(borderColors) do
                 panel:SetBackdropBorderColor(unpack(color))
                 borderColors[panel] = nil
             end
-            saved = nil
+            visuals.saved = nil
         end
     end
     local function ClassicVisuals()
@@ -198,32 +271,34 @@ local function HookVisuals(rxp, state)
         Attach(rxp.activeItemFrame)
         Attach(rxp.targeting and rxp.targeting.activeTargetFrame)
     end
-    Hook(rxp, "LoadActiveTheme", function()
+    local function ThemeLoaded()
         Metadata()
         addon:Notify("RESTEDXP_SKIN_CHANGED")
-    end)
-    Hook(rxp.RXPFrame, "UpdateVisuals", ClassicVisuals)
-    Hook(rxp, "SetupGuideWindow", ClassicVisuals)
-    Hook(rxp, "SetStep", StepVisuals)
-    Hook(rxp, "CreateActiveItemFrame", AuxiliaryVisuals)
-    Hook(rxp.targeting, "CreateTargetFrame", AuxiliaryVisuals)
-    Hook(rxp.targeting, "RenderTargetFrameBackground", AuxiliaryVisuals)
-    AuxiliaryVisuals()
+    end
     local function V2Visuals()
         local v2 = rxp.v2
         -- Do not acquire a disabled V2 widget just to style it.
         local window = v2 and v2.state and v2.state.guideWindow
-        if not window or state.windows[window] or type(window.UpdateSubTheme) ~= "function" then return end
+        if not window then return end
         local function Title()
             -- V2 hardcodes yellow here instead of reading theme.textColor.title.
             if Overrides(rxp) and window.title then window.title:SetTextColor(unpack(palette.accent)) end
         end
-        Hook(window, "UpdateSubTheme", Title)
-        state.windows[window] = true
-        Title()
+        if Hook(window, "UpdateSubTheme", Title) then Title() end
     end
-    Hook(rxp.v2, "UpdateGuideWindow", V2Visuals)
-    V2Visuals()
+    function visuals.Refresh()
+        Hook(rxp, "LoadActiveTheme", ThemeLoaded)
+        Hook(rxp.RXPFrame, "UpdateVisuals", ClassicVisuals)
+        Hook(rxp, "SetupGuideWindow", ClassicVisuals)
+        Hook(rxp, "SetStep", StepVisuals)
+        Hook(rxp, "CreateActiveItemFrame", AuxiliaryVisuals)
+        Hook(rxp.targeting, "CreateTargetFrame", AuxiliaryVisuals)
+        Hook(rxp.targeting, "RenderTargetFrameBackground", AuxiliaryVisuals)
+        AuxiliaryVisuals()
+        Hook(rxp.v2, "UpdateGuideWindow", V2Visuals)
+        V2Visuals()
+    end
+    visuals.Refresh()
 end
 
 local function RefreshTheme(rxp)
@@ -265,6 +340,16 @@ function addon:GetRestedXPSkinState()
     }
 end
 
+local function RefreshDecorations(self, rxp)
+    -- Geometry and new artwork precede opacity so newly created tracks fade too.
+    self:RefreshRestedXPChrome(rxp)
+    self:RefreshRestedXPScrollbar(rxp)
+    self:RefreshRestedXPCheckboxes(rxp)
+    self:RefreshRestedXPTooltips(rxp)
+    self:RefreshRestedXPMenus(rxp)
+    self:RefreshRestedXPTransparency(rxp)
+end
+
 function addon:RefreshRestedXPSkin()
     local state = self.restedxpSkinState
     if not state then return end
@@ -301,12 +386,7 @@ function addon:RefreshRestedXPSkin()
         if InCombat() then
             state.dirty = state.dirty or visualChange
             state.pending = selectionChange or visualChange or selected and state.chromeHidden ~= self:IsRestedXPChromeHidden()
-            if self.RefreshRestedXPChrome then self:RefreshRestedXPChrome(rxp) end
-            if self.RefreshRestedXPScrollbar then self:RefreshRestedXPScrollbar(rxp) end
-            if self.RefreshRestedXPCheckboxes then self:RefreshRestedXPCheckboxes(rxp) end
-            if self.RefreshRestedXPTooltips then self:RefreshRestedXPTooltips(rxp) end
-            if self.RefreshRestedXPMenus then self:RefreshRestedXPMenus(rxp) end
-            if self.RefreshRestedXPTransparency then self:RefreshRestedXPTransparency(rxp) end
+            RefreshDecorations(self, rxp)
             return
         end
         if enabled then
@@ -315,25 +395,18 @@ function addon:RefreshRestedXPSkin()
             profile.activeTheme = NAME
         elseif restore then
             if selected then
-                local previous = type(settings.previousThemes) == "table" and settings.previousThemes[key]
-                profile.activeTheme = type(previous) == "string" and previous or "RXP Blue"
+                profile.activeTheme = type(previousTheme) == "string" and previousTheme or "RXP Blue"
             end
-            if type(settings.previousThemes) == "table" then settings.previousThemes[key] = nil end
+            settings.previousThemes[key] = nil
             -- Other characters can still have a theme this option selected.
-            settings.restorePending = type(settings.previousThemes) == "table"
-                and next(settings.previousThemes) ~= nil or nil
+            settings.restorePending = next(settings.previousThemes) ~= nil or nil
         end
         -- Manual native selection remains valid when automatic selection is off.
         if selectionChange or visualChange then
             refreshing = true
             RefreshTheme(rxp)
         end
-        if self.RefreshRestedXPChrome then self:RefreshRestedXPChrome(rxp) end
-        if self.RefreshRestedXPScrollbar then self:RefreshRestedXPScrollbar(rxp) end
-        if self.RefreshRestedXPCheckboxes then self:RefreshRestedXPCheckboxes(rxp) end
-        if self.RefreshRestedXPTooltips then self:RefreshRestedXPTooltips(rxp) end
-        if self.RefreshRestedXPMenus then self:RefreshRestedXPMenus(rxp) end
-        if self.RefreshRestedXPTransparency then self:RefreshRestedXPTransparency(rxp) end
+        RefreshDecorations(self, rxp)
         state.profile, state.chromeHidden, state.dirty = profile, self:IsRestedXPChromeHidden(), nil
     end)
     if not success then
@@ -354,6 +427,7 @@ local function SetPreference(self, key, enabled)
     if type(enabled) ~= "boolean" then return false, "Choose whether to enable this setting." end
     if type(self.db.restedxpSkin) ~= "table" then self.db.restedxpSkin = {} end
     local settings = self.db.restedxpSkin
+    local changed = (settings[key] == true) ~= enabled
     if key == "enabled" then
         if not enabled and settings.enabled == true then settings.restorePending = true end
         if enabled then
@@ -375,7 +449,9 @@ local function SetPreference(self, key, enabled)
         -- Keep the legacy fields synchronized for earlier builds.
         settings.overrides, settings.modernScrollbar = enabled, enabled
     end
-    if self.restedxpSkinState then self.restedxpSkinState.dirty = true end
+    -- Chrome is a layout change. Repeated setters still resolve pending profile
+    -- restoration and failed applies, without forcing another native guide reload.
+    if key == "enabled" and changed and self.restedxpSkinState then self.restedxpSkinState.dirty = true end
     self:RefreshRestedXPSkin()
     return true
 end
@@ -424,9 +500,7 @@ end
 
 function addon:InitializeRestedXPSkin()
     if self.restedxpSkinState then return end
-    self.restedxpSkinState = {
-        hooked = setmetatable({}, { __mode = "k" }), windows = setmetatable({}, { __mode = "k" }),
-    }
+    self.restedxpSkinState = { visuals = WeakKeys() }
     self:RegisterGameEvents({ "ADDON_LOADED", "PLAYER_REGEN_ENABLED" }, function(_, event, name)
         if event == "PLAYER_REGEN_ENABLED" then
             if self.restedxpSkinState.pending then self:RefreshRestedXPSkin() end
@@ -462,14 +536,12 @@ local function ChromeCapable(frame, geometry)
         or type(frame.Hide) ~= "function" then return false end
     return not geometry or type(frame.GetNumPoints) == "function" and type(frame.GetPoint) == "function"
         and type(frame.ClearAllPoints) == "function" and type(frame.SetPoint) == "function"
-        and type(frame.GetHeight) == "function" and type(frame.SetHeight) == "function"
 end
 
-local function ChromeRemember(group, frame, points, height, shown, mouse, backdrop)
+local function ChromeRemember(group, frame, points, shown, mouse, backdrop)
     local record = group[frame]
     if not record then
-        record = { frame = frame, points = points, height = height, shown = shown,
-            mouse = mouse, backdrop = backdrop, original = {} }
+        record = { points = points, shown = shown, mouse = mouse, backdrop = backdrop, original = {} }
         group[frame] = record
     end
     -- A native layout may have run since the last application. Preserve its new
@@ -479,7 +551,6 @@ local function ChromeRemember(group, frame, points, height, shown, mouse, backdr
         local current = ChromePoints(frame)
         if not applied or not ChromePointsEqual(current, applied.points) then original.points = current end
     end
-    if height and (not applied or frame:GetHeight() ~= applied.height) then original.height = frame:GetHeight() end
     if shown and (not applied or frame:IsShown() ~= applied.shown) then original.shown = frame:IsShown() end
     if mouse and (not applied or frame:IsMouseEnabled() ~= applied.mouse) then original.mouse = frame:IsMouseEnabled() end
     if backdrop and (not applied or frame:GetBackdrop() ~= nil) then
@@ -490,14 +561,12 @@ local function ChromeRemember(group, frame, points, height, shown, mouse, backdr
             if type(frame.GetBackdropBorderColor) == "function" then original.border = { frame:GetBackdropBorderColor() } end
         end
     end
-    return record
 end
 
 local function ChromeApplied(group)
     for frame, record in pairs(group) do
         record.applied = {
             points = record.points and ChromePoints(frame),
-            height = record.height and frame:GetHeight(),
             shown = record.shown and frame:IsShown(),
             mouse = record.mouse and frame:IsMouseEnabled(),
         }
@@ -506,13 +575,12 @@ end
 
 local function ChromeRestore(group)
     for frame, record in pairs(group) do
-        ChromeRemember(group, frame, record.points, record.height, record.shown, record.mouse, record.backdrop)
+        ChromeRemember(group, frame, record.points, record.shown, record.mouse, record.backdrop)
         local original = record.original
         if record.points then
             frame:ClearAllPoints()
             for _, point in ipairs(original.points) do frame:SetPoint(unpack(point, 1, 5)) end
         end
-        if record.height then frame:SetHeight(original.height) end
         if record.backdrop then
             frame:SetBackdrop(original.backdrop)
             if original.fill and type(frame.SetBackdropColor) == "function" then frame:SetBackdropColor(unpack(original.fill)) end
@@ -528,7 +596,7 @@ end
 
 local function ChromeHide(group, region)
     if not ChromeCapable(region) then return end
-    ChromeRemember(group, region, false, false, true)
+    ChromeRemember(group, region, false, true)
     region:Hide()
 end
 
@@ -537,7 +605,7 @@ local function ChromeDecoration(group, frame)
     local mouse = type(frame.IsMouseEnabled) == "function" and type(frame.EnableMouse) == "function"
     local backdrop = type(frame.GetBackdrop) == "function" and type(frame.SetBackdrop) == "function"
     if mouse or backdrop then
-        ChromeRemember(group, frame, false, false, false, mouse, backdrop)
+        ChromeRemember(group, frame, false, false, mouse, backdrop)
         if mouse then frame:EnableMouse(false) end
         if backdrop then frame:SetBackdrop(nil) end
     end
@@ -555,19 +623,19 @@ local function ChromeClassic(rxp, state, hide, v2Enabled)
     ChromeDecoration(state.classic, footer)
     for _, key in ipairs({ "bg", "text", "icon", "classIcon" }) do ChromeHide(state.classic, header[key]) end
     for _, key in ipairs({ "bg", "text", "cog" }) do ChromeHide(state.classic, footer[key]) end
-    ChromeRemember(state.classic, content, true, false, false)
+    ChromeRemember(state.classic, content, true, false)
     content:ClearAllPoints()
     content:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -3)
     content:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -3, 3)
     local todo = frame.CurrentStepFrame
     if ChromeCapable(todo, true) then
         if todo.anchor == "BOTTOM" then
-            if state.classic[todo] then ChromeRemember(state.classic, todo, true, false, false) end
+            if state.classic[todo] then ChromeRemember(state.classic, todo, true, false) end
         else
             local attached = state.classic[todo] ~= nil
             for _, point in ipairs(ChromePoints(todo)) do attached = attached or point[2] == header end
             if attached then
-                ChromeRemember(state.classic, todo, true, false, false)
+                ChromeRemember(state.classic, todo, true, false)
                 todo:ClearAllPoints()
                 todo:SetPoint("BOTTOMLEFT", content, "TOPLEFT", 0, 2)
                 todo:SetPoint("BOTTOMRIGHT", content, "TOPRIGHT", 0, 2)
@@ -591,8 +659,8 @@ local function ChromeV2(window, group, hide)
         "settingsButton", "guideSelectButton", "closebutton", "footerBackground", "footerText" }) do
         ChromeHide(group, window[key])
     end
-    ChromeRemember(group, content, true, false, false)
-    ChromeRemember(group, steps, true, false, false)
+    ChromeRemember(group, content, true, false)
+    ChromeRemember(group, steps, true, false)
     content:ClearAllPoints()
     content:SetPoint("TOPLEFT", window.frame, "TOPLEFT", 0, 0)
     content:SetPoint("BOTTOMRIGHT", window.frame, "BOTTOMRIGHT", 0, 0)
@@ -604,24 +672,10 @@ local function ChromeV2(window, group, hide)
 end
 
 function addon:RefreshRestedXPChrome(rxp)
-    if not rxp or type(rxp.settings) ~= "table" or type(rxp.settings.profile) ~= "table" then return end
-    self.restedxpChromeState = self.restedxpChromeState or setmetatable({}, { __mode = "k" })
-    local state = self.restedxpChromeState[rxp]
-    if not state then
-        state = { classic = {}, windows = setmetatable({}, { __mode = "k" }),
-            hooks = setmetatable({}, { __mode = "k" }) }
-        self.restedxpChromeState[rxp] = state
-    end
-    if state.applying then return end
-    local function Refresh() self:RefreshRestedXPChrome(rxp) end
-    local function Hook(owner, method)
-        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
-        local hooks = state.hooks[owner] or {}
-        state.hooks[owner] = hooks
-        if hooks[method] then return end
-        hooksecurefunc(owner, method, Refresh)
-        hooks[method] = true
-    end
+    local state, Hook = FeatureState(self, rxp, "restedxpChromeState", "RefreshRestedXPChrome", function()
+        return { classic = {}, windows = WeakKeys() }
+    end)
+    if not state then return end
     Hook(rxp, "LoadActiveTheme")
     Hook(rxp, "RenderFrame")
     Hook(rxp, "SetupGuideWindow")
@@ -644,13 +698,10 @@ function addon:RefreshRestedXPChrome(rxp)
         return
     end
     local v2Enabled = v2 and type(v2.IsGuideWindowEnabled) == "function" and v2:IsGuideWindowEnabled()
-    state.applying = true
-    local success, problem = pcall(function()
+    Apply(state, function()
         ChromeClassic(rxp, state, hide, v2Enabled)
         for existing, group in pairs(state.windows) do ChromeV2(existing, group, hide and v2Enabled and existing == window) end
     end)
-    state.applying = false
-    if not success then error(problem, 0) end
 end
 
 -- Keep RXP's slider, callbacks and scroll range. The hidden-header shortcut
@@ -805,7 +856,7 @@ local function ScrollbarSpace(record, enabled, modern)
     if not enabled then ChromeRestore(record.spacing); return end
     -- FixScroll rewrites the inner viewport's anchors. Reserve space on its
     -- outer frame instead so the bar stays inside the window at zero overflow.
-    ChromeRemember(record.spacing, frame, true, false, false)
+    ChromeRemember(record.spacing, frame, true, false)
     local points = { { "TOPLEFT", parent, "TOPLEFT", 0, 0 },
         { "BOTTOMRIGHT", parent, "BOTTOMRIGHT", modern and -10 or -18, 0 } }
     if not ChromePointsEqual(ChromePoints(frame), points) then
@@ -816,23 +867,10 @@ local function ScrollbarSpace(record, enabled, modern)
 end
 
 function addon:RefreshRestedXPScrollbar(rxp)
-    if not rxp or type(rxp.settings) ~= "table" or type(rxp.settings.profile) ~= "table" then return end
-    self.restedxpScrollbarState = self.restedxpScrollbarState or setmetatable({}, { __mode = "k" })
-    local state = self.restedxpScrollbarState[rxp]
-    if not state then
-        state = { bars = {}, hooks = setmetatable({}, { __mode = "k" }) }
-        self.restedxpScrollbarState[rxp] = state
-    end
-    if state.applying then return end
-    local function Refresh() self:RefreshRestedXPScrollbar(rxp) end
-    local function Hook(owner, method, callback)
-        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
-        local hooks = state.hooks[owner] or {}
-        state.hooks[owner] = hooks
-        if hooks[method] then return end
-        hooksecurefunc(owner, method, callback or Refresh)
-        hooks[method] = true
-    end
+    local state, Hook, Refresh = FeatureState(self, rxp, "restedxpScrollbarState", "RefreshRestedXPScrollbar", function()
+        return { bars = {} }
+    end)
+    if not state then return end
     local function RepairAccess(record)
         for _, item in pairs({ record.container, record.content, record.control }) do
             if InCombat() and type(item.frame.IsProtected) == "function" and item.frame:IsProtected() then
@@ -842,10 +880,7 @@ function addon:RefreshRestedXPScrollbar(rxp)
         end
         -- Visibility retries must not repaint/reanchor the slider or run a
         -- guide layout on every native Hide/SetShown.
-        state.applying = true
-        local success, problem = pcall(ScrollbarAccess, record, record.accessActive)
-        state.applying = false
-        if not success then error(problem, 0) end
+        Apply(state, ScrollbarAccess, record, record.accessActive)
     end
     local function Find(scrollframe, slider, background, container, content, outer)
         if not scrollframe or not slider or type(slider.GetThumbTexture) ~= "function" then return end
@@ -977,8 +1012,7 @@ function addon:RefreshRestedXPScrollbar(rxp)
         if pending and self.restedxpSkinState then self.restedxpSkinState.pending = true end
         return
     end
-    state.applying = true
-    local success, problem = pcall(function()
+    Apply(state, function()
         local root, steps = rxp.RXPFrame, window and window.guideSteps
         Find(classic, classic and classic.ScrollBar, nil, root and root.BottomFrame, root and root.ScrollChild)
         Find(scroll and scroll.scrollframe, scroll and scroll.scrollbar, scroll and scroll.scrollbg,
@@ -995,8 +1029,6 @@ function addon:RefreshRestedXPScrollbar(rxp)
             ScrollbarAccess(record, accessible and current)
         end
     end)
-    state.applying = false
-    if not success then error(problem, 0) end
 end
 
 -- Opacity is a layer edit, not a theme reload. BackdropTemplate exposes these
@@ -1006,25 +1038,10 @@ local backdropPieces = { "Center", "TopEdge", "BottomEdge", "LeftEdge", "RightEd
     "TopLeftCorner", "TopRightCorner", "BottomLeftCorner", "BottomRightCorner" }
 
 function addon:RefreshRestedXPTransparency(rxp)
-    if not rxp or type(rxp.settings) ~= "table" or type(rxp.settings.profile) ~= "table" then return end
-    self.restedxpTransparencyState = self.restedxpTransparencyState or setmetatable({}, { __mode = "k" })
-    local state = self.restedxpTransparencyState[rxp]
-    if not state then
-        state = { original = setmetatable({}, { __mode = "k" }), applied = setmetatable({}, { __mode = "k" }),
-            fills = setmetatable({}, { __mode = "k" }), fillRoles = setmetatable({}, { __mode = "k" }),
-            hooks = setmetatable({}, { __mode = "k" }), footerRegions = setmetatable({}, { __mode = "k" }) }
-        self.restedxpTransparencyState[rxp] = state
-    end
-    if state.applying then return end
-    local function Refresh() self:RefreshRestedXPTransparency(rxp) end
-    local function Hook(owner, method, callback)
-        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
-        local hooks = state.hooks[owner] or {}
-        state.hooks[owner] = hooks
-        if hooks[method] then return end
-        hooksecurefunc(owner, method, callback or Refresh)
-        hooks[method] = true
-    end
+    local state, Hook = FeatureState(self, rxp, "restedxpTransparencyState", "RefreshRestedXPTransparency", function()
+        return { original = WeakKeys(), applied = WeakKeys(), fills = WeakKeys(), fillRoles = WeakKeys(), footerRegions = WeakKeys() }
+    end)
+    if not state then return end
     Hook(rxp, "LoadActiveTheme")
     Hook(rxp, "RenderFrame")
     Hook(rxp, "LoadGuide")
@@ -1087,11 +1104,8 @@ function addon:RefreshRestedXPTransparency(rxp)
             Hook(frame, "SetBackdropColor", function(_, _, _, _, nativeAlpha)
                 if state.applying then return end
                 if self.savedDataReadOnly or rxp.settings.profile.activeTheme ~= NAME then state.fills[frame] = nil; return end
-                state.applying = true
                 local baseline = type(nativeAlpha) == "number" and nativeAlpha > 0 and nativeAlpha or state.fillRoles[frame]
-                local success, problem = pcall(BackdropFill, frame, baseline)
-                state.applying = false
-                if not success then error(problem, 0) end
+                Apply(state, BackdropFill, frame, baseline)
             end)
         end
         for _, piece in ipairs(backdropPieces) do
@@ -1133,8 +1147,7 @@ function addon:RefreshRestedXPTransparency(rxp)
         Panel(frame.title, frame.v2 and common or ColorAlpha(legacy.background))
         Hook(frame, "UpdateVisuals")
     end
-    state.applying = true
-    local success, problem = pcall(function()
+    Apply(state, function()
         if factor == 1 then
             -- Also restore released/pooled regions no longer in the current rows.
             for region in pairs(state.original) do Layer(region) end
@@ -1208,20 +1221,11 @@ function addon:RefreshRestedXPTransparency(rxp)
         local scrollbarState = self.restedxpScrollbarState and self.restedxpScrollbarState[rxp]
         for _, bar in pairs(scrollbarState and scrollbarState.bars or {}) do Layer(bar.track) end
     end)
-    state.applying = false
-    if not success then error(problem, 0) end
 end
 
 -- Keep the native CheckButton and all of its state/input. Only its artwork is
 -- covered by an input-transparent child; in V2 the native skip preview stays on top.
 local checkboxTextures = { "Normal", "Pushed", "Highlight", "Disabled", "Checked", "DisabledChecked" }
-
-local function CheckboxNative(record, region)
-    if not region or type(region.GetAlpha) ~= "function" or type(region.SetAlpha) ~= "function" then return end
-    local alpha = region:GetAlpha()
-    if record.native[region] == nil or alpha ~= 0 then record.native[region] = alpha end
-    if alpha ~= 0 then region:SetAlpha(0) end
-end
 
 local function CheckboxPaint(record)
     if not record.active or record.painting then return end
@@ -1229,10 +1233,10 @@ local function CheckboxPaint(record)
     local button, visual, palette = record.button, record.visual, record.palette
     for _, name in ipairs(checkboxTextures) do
         local getter = button["Get" .. name .. "Texture"]
-        if type(getter) == "function" then CheckboxNative(record, getter(button)) end
+        if type(getter) == "function" then SuppressDecoration(record.native, getter(button), button) end
     end
     for _, name in ipairs({ "rxpBackground", "rxpBorder", "rxpCheckShort", "rxpCheckLong" }) do
-        CheckboxNative(record, button[name])
+        SuppressDecoration(record.native, button[name], button)
     end
     local enabled, checked = button:IsEnabled(), button:GetChecked()
     local hovered = record.hovered or button.rxpHovered
@@ -1253,10 +1257,7 @@ end
 local function CheckboxRestore(record)
     if not record.active then return end
     record.active = false
-    for region, alpha in pairs(record.native) do
-        if region:GetAlpha() == 0 then region:SetAlpha(alpha) end
-        record.native[region] = nil
-    end
+    RestoreDecorations(record.native)
     record.visual:Hide()
 end
 
@@ -1265,15 +1266,8 @@ local function CheckboxVisual(button)
     visual:SetAllPoints(button)
     visual:SetFrameLevel(button:GetFrameLevel() + 1)
     visual:EnableMouse(false)
-    visual.fill = visual:CreateTexture(nil, "BACKGROUND")
-    visual.fill:SetAllPoints(visual)
-    visual.edges = {}
-    for index = 1, 4 do visual.edges[index] = visual:CreateTexture(nil, "BORDER") end
-    local edges = visual.edges
-    edges[1]:SetPoint("TOPLEFT"); edges[1]:SetPoint("TOPRIGHT"); edges[1]:SetHeight(1)
-    edges[2]:SetPoint("BOTTOMLEFT"); edges[2]:SetPoint("BOTTOMRIGHT"); edges[2]:SetHeight(1)
-    edges[3]:SetPoint("TOPLEFT"); edges[3]:SetPoint("BOTTOMLEFT"); edges[3]:SetWidth(1)
-    edges[4]:SetPoint("TOPRIGHT"); edges[4]:SetPoint("BOTTOMRIGHT"); edges[4]:SetWidth(1)
+    local textures = FlatPanelTextures(visual)
+    visual.fill, visual.edges = textures[1], { unpack(textures, 2) }
     visual.check = {}
     for index, length in ipairs({ 3.5, 6 }) do
         local mark = visual:CreateTexture(nil, "OVERLAY")
@@ -1286,22 +1280,10 @@ local function CheckboxVisual(button)
 end
 
 function addon:RefreshRestedXPCheckboxes(rxp)
-    if not rxp or type(rxp.settings) ~= "table" or type(rxp.settings.profile) ~= "table" then return end
-    self.restedxpCheckboxState = self.restedxpCheckboxState or setmetatable({}, { __mode = "k" })
-    local state = self.restedxpCheckboxState[rxp]
-    if not state then
-        state = { buttons = setmetatable({}, { __mode = "k" }), hooks = setmetatable({}, { __mode = "k" }) }
-        self.restedxpCheckboxState[rxp] = state
-    end
-    if state.applying then return end
-    local function Hook(owner, method, callback)
-        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
-        local hooks = state.hooks[owner] or {}
-        state.hooks[owner] = hooks
-        if hooks[method] then return end
-        hooksecurefunc(owner, method, callback)
-        hooks[method] = true
-    end
+    local state, Hook, Refresh = FeatureState(self, rxp, "restedxpCheckboxState", "RefreshRestedXPCheckboxes", function()
+        return { buttons = WeakKeys() }
+    end)
+    if not state then return end
     local function Wanted()
         return self:IsRestedXPSkinEnabled() and rxp.settings.profile.activeTheme == NAME
     end
@@ -1320,7 +1302,7 @@ function addon:RefreshRestedXPCheckboxes(rxp)
         end
         if not wanted then if record then CheckboxRestore(record) end; return end
         if not record then
-            record = { button = button, visual = CheckboxVisual(button), native = setmetatable({}, { __mode = "k" }) }
+            record = { button = button, visual = CheckboxVisual(button), native = WeakKeys() }
             state.buttons[button] = record
             local function Paint() CheckboxPaint(record) end
             for _, method in ipairs({ "SetChecked", "Enable", "Disable", "SetEnabled" }) do Hook(button, method, Paint) end
@@ -1341,15 +1323,13 @@ function addon:RefreshRestedXPCheckboxes(rxp)
         end
         Rows(widget)
     end
-    local function Refresh() self:RefreshRestedXPCheckboxes(rxp) end
     Hook(rxp, "LoadActiveTheme", Refresh)
     Hook(rxp, "RenderFrame", Refresh)
     Hook(rxp, "SetStep", Refresh)
     Hook(rxp, "BindActiveStepElement", function(row) if row then Attach(row.button) end end)
     Hook(rxp.v2, "ReconcileActiveStepItems", Refresh)
     Hook(rxp.v2, "UpdateActiveStepTheme", Refresh)
-    state.applying = true
-    local success, problem = pcall(function()
+    Apply(state, function()
         if not Wanted() and not InCombat() then
             for _, record in pairs(state.buttons) do CheckboxRestore(record) end
             return
@@ -1367,8 +1347,6 @@ function addon:RefreshRestedXPCheckboxes(rxp)
             for _, record in pairs(state.buttons) do if record.active then Pending(); break end end
         end
     end)
-    state.applying = false
-    if not success then error(problem, 0) end
 end
 
 -- RXP uses the shared GameTooltip. Match exact addon-owned frame ancestry,
@@ -1429,10 +1407,7 @@ end
 local function TooltipRestore(tooltip, state)
     if not state.active then return end
     state.active = false
-    for region, alpha in pairs(state.native) do
-        if region:GetAlpha() == 0 then region:SetAlpha(alpha) end
-        state.native[region] = nil
-    end
+    RestoreDecorations(state.native)
     -- A new owner may already have supplied its own backdrop; preserve it.
     local legacy = state.legacy
     if legacy and not tooltip:GetBackdrop() and legacy.backdrop then
@@ -1444,39 +1419,15 @@ local function TooltipRestore(tooltip, state)
     for _, texture in ipairs(state.textures or {}) do texture:Hide() end
 end
 
-local function FlatPanelTextures(frame)
-    local textures = {}
-    for index = 1, 5 do textures[index] = frame:CreateTexture(nil, index == 1 and "BACKGROUND" or "BORDER") end
-    textures[1]:SetAllPoints(frame)
-    textures[2]:SetPoint("TOPLEFT"); textures[2]:SetPoint("TOPRIGHT"); textures[2]:SetHeight(1)
-    textures[3]:SetPoint("BOTTOMLEFT"); textures[3]:SetPoint("BOTTOMRIGHT"); textures[3]:SetHeight(1)
-    textures[4]:SetPoint("TOPLEFT"); textures[4]:SetPoint("BOTTOMLEFT"); textures[4]:SetWidth(1)
-    textures[5]:SetPoint("TOPRIGHT"); textures[5]:SetPoint("BOTTOMRIGHT"); textures[5]:SetWidth(1)
-    return textures
-end
-
 function addon:RefreshRestedXPTooltips(rxp)
     local tooltip = GameTooltip
-    if not rxp or not rxp.settings or not rxp.settings.profile or not tooltip
-        or type(tooltip.GetOwner) ~= "function" or type(tooltip.HookScript) ~= "function"
+    if not tooltip or type(tooltip.GetOwner) ~= "function" or type(tooltip.HookScript) ~= "function"
         or type(tooltip.CreateTexture) ~= "function" then return end
     if type(tooltip.IsForbidden) == "function" and tooltip:IsForbidden() then return end
-    self.restedxpTooltipState = self.restedxpTooltipState or setmetatable({}, { __mode = "k" })
-    local state = self.restedxpTooltipState[rxp]
-    if not state then
-        state = { native = setmetatable({}, { __mode = "k" }), hooks = setmetatable({}, { __mode = "k" }) }
-        self.restedxpTooltipState[rxp] = state
-    end
-    if state.applying then return end
-    local function Update() self:RefreshRestedXPTooltips(rxp) end
-    local function Hook(owner, method, callback)
-        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
-        local hooks = state.hooks[owner] or {}
-        state.hooks[owner] = hooks
-        if hooks[method] then return end
-        hooksecurefunc(owner, method, callback or Update)
-        hooks[method] = true
-    end
+    local state, Hook, Update = FeatureState(self, rxp, "restedxpTooltipState", "RefreshRestedXPTooltips", function()
+        return { native = WeakKeys() }
+    end)
+    if not state then return end
     if not state.scripts then
         tooltip:HookScript("OnShow", Update)
         tooltip:HookScript("OnHide", Update)
@@ -1513,16 +1464,12 @@ function addon:RefreshRestedXPTooltips(rxp)
         if self.restedxpSkinState then self.restedxpSkinState.pending = true end
         return
     end
-    state.applying = true
-    local success, problem = pcall(function()
+    Apply(state, function()
         if not wanted then TooltipRestore(tooltip, state); return end
         state.textures = state.textures or FlatPanelTextures(tooltip)
         state.active = true
         local function Suppress(region)
-            if not region or region == tooltip or type(region.GetAlpha) ~= "function" or type(region.SetAlpha) ~= "function" then return end
-            local alpha = region:GetAlpha()
-            if state.native[region] == nil or alpha ~= 0 then state.native[region] = alpha end
-            if alpha ~= 0 then region:SetAlpha(0) end
+            SuppressDecoration(state.native, region, tooltip)
         end
         Suppress(tooltip.NineSlice)
         Suppress(tooltip.BackdropContainer)
@@ -1539,47 +1486,27 @@ function addon:RefreshRestedXPTooltips(rxp)
             end
         end
         local palette = self.Theme:GetPalette()
-        for index, texture in ipairs(state.textures) do
-            texture:SetColorTexture(unpack(index == 1 and palette.background or palette.border))
-            texture:Show()
-        end
+        PaintFlatPanel(state.textures, palette)
     end)
-    state.applying = false
-    if not success then error(problem, 0) end
 end
 
 local function MenuRestore(record)
     if not record.active then return end
     record.active = false
-    for region, alpha in pairs(record.native) do
-        if region:GetAlpha() == 0 then region:SetAlpha(alpha) end
-        record.native[region] = nil
-    end
+    RestoreDecorations(record.native)
     for _, texture in ipairs(record.textures or {}) do texture:Hide() end
     for _, texture in pairs(record.highlights) do texture:Hide() end
 end
 
+local dropdownMethods = { "EasyMenu", "ToggleDropDownMenu", "UIDropDownMenu_CreateFrames", "UIDropDownMenu_Initialize" }
+
 function addon:RefreshRestedXPMenus(rxp)
-    if not rxp or not rxp.settings or not rxp.settings.profile then return end
-    self.restedxpMenuState = self.restedxpMenuState or setmetatable({}, { __mode = "k" })
-    local state = self.restedxpMenuState[rxp]
-    if not state then
-        state = { owners = setmetatable({}, { __mode = "k" }), panels = setmetatable({}, { __mode = "k" }),
-            hooks = setmetatable({}, { __mode = "k" }) }
-        self.restedxpMenuState[rxp] = state
-    end
-    if state.applying then return end
+    local state, Hook, Update = FeatureState(self, rxp, "restedxpMenuState", "RefreshRestedXPMenus", function()
+        return { owners = WeakKeys(), panels = WeakKeys() }
+    end)
+    if not state then return end
     local default = rxp.RXPFrame and rxp.RXPFrame.MenuFrame
     if default then state.owners[default] = true end
-    local function Update() self:RefreshRestedXPMenus(rxp) end
-    local function Hook(owner, method, callback)
-        if not owner or type(owner[method]) ~= "function" or type(hooksecurefunc) ~= "function" then return end
-        local hooks = state.hooks[owner] or {}
-        state.hooks[owner] = hooks
-        if hooks[method] then return end
-        hooksecurefunc(owner, method, callback or Update)
-        hooks[method] = true
-    end
     Hook(rxp, "ShowMenu", function(_, _, menuFrame)
         local owner = menuFrame or rxp.RXPFrame and rxp.RXPFrame.MenuFrame
         if owner then state.owners[owner] = true end
@@ -1588,13 +1515,13 @@ function addon:RefreshRestedXPMenus(rxp)
     Hook(rxp, "LoadActiveTheme")
     -- Both menu backends pool their lists across addons. Discover after native
     -- creation/toggling; submenus can open without another RXP ShowMenu call.
-    for _, method in ipairs({ "EasyMenu", "ToggleDropDownMenu", "UIDropDownMenu_CreateFrames", "UIDropDownMenu_Initialize" }) do
+    for _, method in ipairs(dropdownMethods) do
         Hook(_G, method)
     end
     if LibStub then
         local success, library = pcall(LibStub, "LibUIDropDownMenu-4.0", true)
         if success and type(library) == "table" then
-            for _, method in ipairs({ "EasyMenu", "ToggleDropDownMenu", "UIDropDownMenu_CreateFrames", "UIDropDownMenu_Initialize" }) do
+            for _, method in ipairs(dropdownMethods) do
                 Hook(library, method)
             end
         end
@@ -1609,8 +1536,7 @@ function addon:RefreshRestedXPMenus(rxp)
         if not frame or state.panels[frame] or type(frame.HookScript) ~= "function"
             or type(frame.CreateTexture) ~= "function" then return end
         if type(frame.IsForbidden) == "function" and frame:IsForbidden() then return end
-        state.panels[frame] = { frame = frame, native = setmetatable({}, { __mode = "k" }),
-            highlights = setmetatable({}, { __mode = "k" }) }
+        state.panels[frame] = { native = WeakKeys(), highlights = WeakKeys() }
         frame:HookScript("OnShow", Update)
         frame:HookScript("OnHide", Update)
         Hook(frame, "Show")
@@ -1619,8 +1545,7 @@ function addon:RefreshRestedXPMenus(rxp)
     end
     local enabled = rxp.settings.profile.activeTheme == NAME
         and (self:IsRestedXPSkinEnabled() or self:IsRestedXPChromeHidden())
-    state.applying = true
-    local success, problem = pcall(function()
+    Apply(state, function()
         for _, backend in ipairs({ { "DropDownList", "UIDROPDOWNMENU_MAXLEVELS" },
             { "L_DropDownList", "L_UIDROPDOWNMENU_MAXLEVELS" } }) do
             local levels = math.min(32, math.max(3, tonumber(_G[backend[2]]) or 3))
@@ -1640,10 +1565,7 @@ function addon:RefreshRestedXPMenus(rxp)
                     record.textures = record.textures or FlatPanelTextures(frame)
                     record.active = true
                     local function Suppress(region)
-                        if not region or region == frame or type(region.GetAlpha) ~= "function" or type(region.SetAlpha) ~= "function" then return end
-                        local alpha = region:GetAlpha()
-                        if record.native[region] == nil or alpha ~= 0 then record.native[region] = alpha end
-                        if alpha ~= 0 then region:SetAlpha(0) end
+                        SuppressDecoration(record.native, region, frame)
                     end
                     local name = type(frame.GetName) == "function" and frame:GetName()
                     Suppress(frame.Backdrop or name and _G[name .. "Backdrop"])
@@ -1651,10 +1573,7 @@ function addon:RefreshRestedXPMenus(rxp)
                     Suppress(frame.NineSlice)
                     for _, piece in ipairs(backdropPieces) do Suppress(frame[piece]) end
                     for _, group in ipairs({ "rxpBackground", "rxpBorder", "rxpShadow" }) do Suppress(frame[group]) end
-                    for index, texture in ipairs(record.textures) do
-                        texture:SetColorTexture(unpack(index == 1 and palette.background or palette.border))
-                        texture:Show()
-                    end
+                    PaintFlatPanel(record.textures, palette)
                     for index = 1, frame.numButtons or 0 do
                         local button = frame["Button" .. index] or name and _G[name .. "Button" .. index]
                         if button and type(button.CreateTexture) == "function" then
@@ -1681,6 +1600,4 @@ function addon:RefreshRestedXPMenus(rxp)
             end
         end
     end)
-    state.applying = false
-    if not success then error(problem, 0) end
 end

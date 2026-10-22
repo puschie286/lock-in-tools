@@ -1,19 +1,7 @@
 -- RestedXP uses shared dropdown pools; appearance must follow the exact owner.
-local function Copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, child in pairs(value) do result[key] = Copy(child) end
-    return result
-end
-
-local function Equal(left, right)
-    if left == right then return true end
-    if type(left) ~= type(right) then return false end
-    if type(left) ~= "table" then return left == right end
-    for key, child in pairs(left) do if not Equal(child, right[key]) then return false end end
-    for key in pairs(right) do if left[key] == nil then return false end end
-    return true
-end
+local helpers = dofile("tests/support/helpers.lua")
+local HookScript, RunScript = dofile("tests/support/scripts.lua")
+local Copy, Equal = helpers.copy, helpers.equal
 
 local function Points(frame)
     local points = {}
@@ -23,7 +11,7 @@ end
 
 local function Fixture(bundled, v2Enabled)
     local world = { combat = false, createdFrames = 0, nativeClicks = 0, checkedCalls = 0,
-        menuShows = 0, menuHides = 0, enters = 0, leaves = 0, callbacks = {}, lists = {}, hooks = 0 }
+        enters = 0, leaves = 0, callbacks = {}, lists = {}, hooks = 0 }
     local env = setmetatable({}, { __index = _G })
     env._G = env
     local Frame, Region
@@ -98,14 +86,7 @@ local function Fixture(bundled, v2Enabled)
         function frame:SetAllPoints(value) self.allPoints = value or self.parent end
         function frame:GetScript(name) return self.scripts[name] end
         function frame:SetScript(name, callback) self.scripts[name] = callback end
-        function frame:HookScript(name, callback)
-            self.scriptHooks[name] = self.scriptHooks[name] or {}
-            self.scriptHooks[name][#self.scriptHooks[name] + 1] = callback
-        end
-        function frame:RunScript(name, ...)
-            if self.scripts[name] then self.scripts[name](self, ...) end
-            for _, callback in ipairs(self.scriptHooks[name] or {}) do callback(self, ...) end
-        end
+        frame.HookScript, frame.RunScript = HookScript, RunScript
         function frame:Show() self.shown = true; self:RunScript("OnShow") end
         function frame:Hide() self.shown = false; self:RunScript("OnHide") end
         function frame:SetShown(value)
@@ -213,8 +194,8 @@ local function Fixture(bundled, v2Enabled)
         list.Backdrop, list.MenuBackdrop = Frame(list.name .. "Backdrop", list), Frame(list.name .. "MenuBackdrop", list)
         list.rxpBackground, list.rxpBorder, list.rxpShadow = Frame(nil, list), Frame(nil, list), Frame(nil, list)
         list.rxpBackground.alpha, list.rxpBorder.alpha, list.rxpShadow.alpha = 0.65, 0.75, 0.85
-        list.scripts.OnShow = function() world.menuShows = world.menuShows + 1 end
-        list.scripts.OnHide = function() world.menuHides = world.menuHides + 1 end
+        list.scripts.OnShow = function() end
+        list.scripts.OnHide = function() end
         self.lists[#self.lists + 1] = list
         return list
     end
@@ -298,20 +279,11 @@ local function Fixture(bundled, v2Enabled)
         return Frame(name, parent, kind)
     end
     env.GameFontHighlight = { GetFont = function() return "LockInToolsFont", 13, "" end }
-    function env.hooksecurefunc(owner, method, callback)
-        if type(owner) == "string" then owner, method, callback = env, owner, method end
-        world.hooks = world.hooks + 1
-        local original = assert(owner[method], tostring(method))
-        owner[method] = function(...)
-            local results = { original(...) }
-            callback(...)
-            return unpack(results)
-        end
-    end
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
     local addon = { db = { restedxpSkin = { enabled = false } }, restedxpSkinState = {} }
-    setfenv(assert(loadfile("Theme.lua")), env)("LockInTools", addon)
-    setfenv(assert(loadfile("RestedXPSkin.lua")), env)("LockInTools", addon)
-    world.env, world.Frame, world.rxp, world.lib, world.prefix = env, Frame, rxp, lib, prefix
+    helpers.loadModule("Theme.lua", addon, env)
+    helpers.loadModule("RestedXPSkin.lua", addon, env)
+    world.env, world.Frame, world.lib, world.prefix = env, Frame, lib, prefix
     world.otherOwner = Frame("OtherAddonMenu", env.UIParent)
     world.falsePrefixOwner = Frame("RXPG_UnrelatedAddonMenu", env.UIParent)
     function world:Menu()

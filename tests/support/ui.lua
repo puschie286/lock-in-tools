@@ -1,4 +1,7 @@
 -- Exercise the real options callbacks against strict native-widget stubs.
+local helpers = dofile("tests/support/helpers.lua")
+local loadModule = helpers.loadModule
+
 local function loadOptions(uiAddon, uiEnvironment)
     local createEventFrame = uiEnvironment.CreateFrame
     uiEnvironment.namedFrameCreations = {}
@@ -48,17 +51,8 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetMaxLetters(maximum) self.maxLetters = maximum end
     function methods:SetMaxBytes(maximum) self.maxBytes = maximum end
     function methods:GetMaxBytes() return self.maxBytes or 0 end
-    function methods:GetNumLines()
-        local lines = 0
-        for line in (self:GetText() .. "\n"):gmatch("([^\n]*)\n") do
-            lines = lines + math.max(1, math.ceil(#line / math.max(1, math.floor(self:GetWidth() / 8))))
-        end
-        return lines
-    end
     function methods:SetScrollChild(child) self.scrollChild = child end
-    function methods:UpdateScrollChildRect() self.scrollRectUpdates = (self.scrollRectUpdates or 0) + 1 end
     function methods:SetVerticalScroll(value) self.verticalScroll = value end
-    function methods:GetVerticalScroll() return self.verticalScroll or 0 end
     function methods:GetWidth() return self.width or (self.allPoints and self.allPoints:GetWidth()) or 0 end
     function methods:GetHeight() return self.height or (self.allPoints and self.allPoints:GetHeight()) or 0 end
     function methods:SetColorTexture(...)
@@ -152,7 +146,6 @@ local function loadOptions(uiAddon, uiEnvironment)
         end
         self.checkedTexture = texture
     end
-    function methods:GetCheckedTexture() return self.checkedTexture end
     function methods:SetDisabledCheckedTexture(texture) self.disabledCheckedTexture = texture end
     local function checkScript(widget, script)
         assert(widget.frameType ~= "EditBox" or (script ~= "OnEnable" and script ~= "OnDisable"),
@@ -257,28 +250,14 @@ local function loadOptions(uiAddon, uiEnvironment)
     uiEnvironment.UIParent, uiEnvironment.UISpecialFrames = makeWidget(), {}
     uiEnvironment._G = uiEnvironment
     uiEnvironment.tinsert = table.insert
+    local hookMethod = helpers.hooksecurefunc(uiEnvironment)
     uiEnvironment.hooksecurefunc = function(object, methodName, callback)
         assert(type(object) == "table" and type(methodName) == "string" and type(callback) == "function",
             "this harness supports named object method hooks")
-        local original = assert(object[methodName], "hooked methods must exist")
-        local function capture(...) return { n = select("#", ...), ... } end
-        object[methodName] = function(...)
-            local result = capture(original(...))
-            callback(...)
-            return unpack(result, 1, result.n)
-        end
+        return hookMethod(object, methodName, callback)
     end
     for _, file in ipairs({ "Theme.lua", "Overview.lua", "RankingOverlay.lua", "Options.lua" }) do
-        local chunk, problem
-        if setfenv then
-            chunk, problem = loadfile(file)
-            assert(chunk, problem)
-            setfenv(chunk, uiEnvironment)
-        else
-            chunk, problem = loadfile(file, "t", uiEnvironment)
-            assert(chunk, problem)
-        end
-        chunk("LockInTools", uiAddon)
+        loadModule(file, uiAddon, uiEnvironment)
     end
 end
 

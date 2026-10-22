@@ -1,15 +1,11 @@
 -- Skin integration uses RestedXP's public theme API; the native renderer stays in control.
-local function Copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, child in pairs(value) do result[key] = Copy(child) end
-    return result
-end
+local helpers = dofile("tests/support/helpers.lua")
+local Copy = helpers.copy
 
 local function Fixture(saved, options, native)
     options = options or {}
     local world = { available = options.available ~= false, combat = options.combat == true,
-        events = {}, notifications = {}, registered = 0, reloads = 0, conversions = 0, hooks = 0,
+        events = {}, registered = 0, reloads = 0, hooks = 0,
         renders = 0, guideReloads = 0, profileName = options.profileName or "Default", timers = {} }
     local addon = { initialized = true, ready = true, db = saved or {}, savedDataReadOnly = options.readOnly == true }
     local rxp = native or { themes = {}, settings = { profile = {
@@ -101,7 +97,6 @@ local function Fixture(saved, options, native)
     }
     function rxp.v2:IsGuideWindowEnabled() return self.enabled end
     function rxp.v2:ConvertThemes()
-        world.conversions = world.conversions + 1
         for name, theme in pairs(rxp.themes) do
             if not self.themes[name] or (theme.version or 1) >= (self.themes[name].version or 1) then
                 local converted = Copy(self.themes["RXP Blue V2"])
@@ -127,7 +122,6 @@ local function Fixture(saved, options, native)
         end
         return result
     end
-    function rxp.settings:GetCurrentProfile() return world.profileName end
     function rxp.settings.GetSettingsDB() return world.profileName end
     function rxp:LoadActiveTheme()
         self.activeTheme = self.themes[self.settings.profile.activeTheme] or self.themes["RXP Blue"]
@@ -146,7 +140,7 @@ local function Fixture(saved, options, native)
         rxp:ReloadGuide()
     end
     function rxp:ReloadGuide() world.guideReloads = world.guideReloads + 1 end
-    function rxp.SetupArrow() assert(not world.combat); world.arrows = (world.arrows or 0) + 1 end
+    function rxp.SetupArrow() assert(not world.combat) end
     function rxp.SetupGuideWindow()
         rxp.RXPFrame.GuideName.bg:SetTexture("native-banner")
         rxp.RXPFrame.Footer.bg:SetTexture("native-banner")
@@ -168,8 +162,8 @@ local function Fixture(saved, options, native)
     end
     rxp.v2.state = options.v2 and { guideWindow = guideWindow } or {}
     function rxp.v2:GetGuideWindow() return guideWindow end
-    function rxp.v2:UpdateGuideWindow() world.guideUpdates = (world.guideUpdates or 0) + 1 end
-    function rxp.v2:UpdateActiveStepTheme() world.stepUpdates = (world.stepUpdates or 0) + 1 end
+    function rxp.v2:UpdateGuideWindow() end
+    function rxp.v2:UpdateActiveStepTheme() end
     function rxp:ReloadTheme()
         if not self.settings.profile.enableThemeLiveReload then return end
         assert(not world.combat, "native visual refresh waits until combat ends")
@@ -201,17 +195,9 @@ local function Fixture(saved, options, native)
             assert(delay == 0, "native initialization is retried on the following tick")
             world.timers[#world.timers + 1] = callback
         end },
-        hooksecurefunc = function(owner, method, callback)
-            local original = assert(owner[method])
-            world.hooks = world.hooks + 1
-            owner[method] = function(...)
-                local result = { original(...) }
-                callback(...)
-                return unpack(result)
-            end
-        end,
     }, { __index = _G })
     env._G = env
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
     function addon:RegisterGameEvents(events, callback)
         local frame = {}
         for _, event in ipairs(events) do world.events[event] = callback end
@@ -219,7 +205,7 @@ local function Fixture(saved, options, native)
         function frame:UnregisterEvent(event) world.events[event] = nil end
         return frame
     end
-    function addon:Notify(event) world.notifications[#world.notifications + 1] = event end
+    function addon:Notify() end
     function world:fire(event, ...)
         if self.events[event] then self.events[event](addon, event, ...) end
     end
@@ -228,10 +214,7 @@ local function Fixture(saved, options, native)
         self.timers = {}
         for _, callback in ipairs(timers) do callback() end
     end
-    local function Load(path)
-        local chunk = assert(loadfile(path))
-        setfenv(chunk, env)("LockInTools", addon)
-    end
+    local function Load(path) helpers.loadModule(path, addon, env) end
     world.nativeV1, world.nativeV2 = Copy(rxp.themes["RXP Blue"]), Copy(rxp.v2.themes["RXP Blue V2"])
     Load("Theme.lua")
     Load("RestedXPAdapter.lua")
@@ -361,6 +344,49 @@ do
     assert(reloaded:SetRestedXPSkinEnabled(false) and rxp.settings.profile.activeTheme == "Custom")
 end
 
+for _, v2 in ipairs({ false, true }) do
+    for _, enabled in ipairs({ false, true }) do
+        local addon, world, rxp = Fixture(nil, { v2 = v2 })
+        rxp.settings.profile.activeTheme = "LockInTools"
+        rxp:ReloadTheme()
+        if enabled then assert(addon:SetRestedXPSkinEnabled(true)) end
+        local source, converted = rxp.themes.LockInTools, rxp.v2.themes.LockInTools
+        local renders, reloads, guideReloads, registrations = world.renders, world.reloads, world.guideReloads, world.registered
+        local function Unchanged()
+            assert(world.renders == renders and world.reloads == reloads and world.guideReloads == guideReloads
+                and world.registered == registrations,
+                "chrome edits and unchanged style preferences never render, reload guides or register themes")
+            assert(rxp.settings.profile.activeTheme == "LockInTools" and rxp.themes.LockInTools == source
+                and rxp.v2.themes.LockInTools == converted, "layout-only changes preserve native theme selection and tables")
+        end
+        for _, hidden in ipairs({ true, false, true, false }) do
+            assert(addon:SetRestedXPChromeHidden(hidden) and addon:IsRestedXPChromeHidden() == hidden)
+            assert(addon:SetRestedXPChromeHidden(hidden), "repeating the saved chrome preference succeeds")
+            assert(not addon:GetRestedXPSkinState().pending)
+            Unchanged()
+        end
+        assert(addon:SetRestedXPSkinEnabled(enabled))
+        assert(addon:SetRestedXPSkinOverridesEnabled(enabled))
+        assert(addon:SetRestedXPModernScrollbarEnabled(enabled))
+        Unchanged()
+        for _, hidden in ipairs({ true, false }) do
+            world.combat = true
+            assert(addon:SetRestedXPChromeHidden(hidden) and addon:SetRestedXPChromeHidden(hidden))
+            assert(addon:IsRestedXPChromeHidden() == hidden and addon:GetRestedXPSkinState().pending,
+                "combat saves the final chrome choice and keeps its layout change pending")
+            Unchanged()
+            world.combat = false
+            world:fire("PLAYER_REGEN_ENABLED")
+            assert(not addon:GetRestedXPSkinState().pending, "deferred chrome layout settles after combat")
+            Unchanged()
+        end
+        if enabled then
+            assert(addon:SetRestedXPSkinEnabled(false) and rxp.settings.profile.activeTheme == "LockInTools",
+                "lightweight edits preserve the restore target of a manually selected theme")
+        end
+    end
+end
+
 do
     local addon, _, rxp = Fixture()
     assert(addon:SetRestedXPSkinOverridesEnabled(true))
@@ -395,6 +421,55 @@ do
     rxp.targeting.RenderTargetFrameBackground()
     SameColor(nextItem.color, nextItem.nativeColor)
     SameColor(nextTarget.color, nextTarget.nativeColor)
+end
+
+for _, v2 in ipairs({ false, true }) do
+    local addon, _, rxp = Fixture(nil, { v2 = v2 })
+    rxp.settings.profile.activeTheme = "LockInTools"
+    rxp:ReloadTheme()
+    local step = rxp.SetStep(true)
+    local item = rxp.CreateActiveItemFrame()
+    local target = rxp.targeting.CreateTargetFrame()
+    local panels = { step, step.number, item, item.title, target, target.title }
+    for index, panel in ipairs(panels) do
+        panel.nativeColor = { index / 10, 0.35, 0.55, 0.8 }
+        panel:RestoreNativeBorder()
+    end
+    assert(addon:SetRestedXPSkinEnabled(true))
+    -- These hooks were installed while styling was off. Their snapshots must
+    -- survive later refreshes and must never capture an already styled border.
+    for _ = 1, 3 do addon:RefreshRestedXPSkin() end
+    for _, panel in ipairs({ item, item.title, target, target.title }) do
+        SameColor(panel.color, addon.Theme:GetPalette().border)
+    end
+    assert(addon:SetRestedXPSkinEnabled(false) and rxp.settings.profile.activeTheme == "LockInTools")
+    for _, panel in ipairs(panels) do SameColor(panel.color, panel.nativeColor) end
+    assert(addon:SetRestedXPSkinEnabled(true))
+    for _ = 1, 3 do
+        addon:RefreshRestedXPSkin()
+        rxp.SetStep(false)
+        item:UpdateVisuals()
+        target:UpdateVisuals()
+        rxp.targeting.RenderTargetFrameBackground()
+        for _, panel in ipairs(panels) do SameColor(panel.color, addon.Theme:GetPalette().border) end
+    end
+    local nextItem = rxp.CreateActiveItemFrame()
+    local nextTarget = rxp.targeting.CreateTargetFrame()
+    for _, panel in ipairs({ nextItem, nextItem.title, nextTarget, nextTarget.title }) do
+        panels[#panels + 1] = panel
+        SameColor(panel.color, addon.Theme:GetPalette().border)
+    end
+    addon:RefreshRestedXPSkin()
+    assert(addon:SetRestedXPSkinEnabled(false) and rxp.settings.profile.activeTheme == "LockInTools",
+        "opting out restores decorations without claiming a manually selected native theme")
+    for _, panel in ipairs(panels) do SameColor(panel.color, panel.nativeColor) end
+    item:UpdateVisuals()
+    target:UpdateVisuals()
+    nextItem:UpdateVisuals()
+    nextTarget:UpdateVisuals()
+    rxp.targeting.RenderTargetFrameBackground()
+    addon:RefreshRestedXPSkin()
+    for _, panel in ipairs(panels) do SameColor(panel.color, panel.nativeColor) end
 end
 
 do
@@ -570,6 +645,28 @@ do
 end
 
 do
+    local addon, world, rxp = Fixture()
+    assert(addon:SetRestedXPSkinEnabled(true) and not rxp.v2.state.guideWindow)
+    local writes = 0
+    local window = { title = {} }
+    function window.title:SetTextColor(...)
+        writes = writes + 1
+        self.color = { ... }
+    end
+    function window:UpdateSubTheme() self.title:SetTextColor(1, 0.82, 0) end
+    rxp.v2.enabled, rxp.v2.state.guideWindow = true, window
+    rxp.v2:UpdateGuideWindow()
+    SameColor(window.title.color, addon.Theme:GetPalette().accent)
+    assert(writes == 1, "a late-created V2 window receives its title style immediately")
+    local hooks = world.hooks
+    for _ = 1, 3 do rxp.v2:UpdateGuideWindow(); addon:RefreshRestedXPSkin() end
+    assert(world.hooks == hooks and writes == 1, "rediscovering the V2 window adds no hooks or title writes")
+    window:UpdateSubTheme()
+    SameColor(window.title.color, addon.Theme:GetPalette().accent)
+    assert(writes == 3, "native title redraws receive exactly one skin repaint")
+end
+
+do
     local saved = { restedxpSkin = { enabled = true, previousThemes = { Default = "Custom" } } }
     local snapshot = Copy(saved.restedxpSkin)
     local addon, world, rxp = Fixture(saved, { readOnly = true })
@@ -594,18 +691,6 @@ do
         "native failures report a generic skin problem without exposing native error details")
     assert(addon:SetRestedXPSkinEnabled(true) and addon:GetRestedXPSkinState().active,
         "users can retry the saved skin preference after a native failure")
-end
-
-do
-    local addon, _, _, Load = Fixture()
-    assert(addon:SetRestedXPSkinEnabled(true))
-    local preference = addon.db.restedxpSkin
-    addon.db.restedxp = { sourceBattleTag = "Source#1234", groups = { obsolete = "guide payload" } }
-    Load("RestedXP.lua")
-    addon:CleanupRestedXPData(true)
-    assert(addon.db.restedxpSkin == preference and addon:IsRestedXPSkinEnabled()
-        and addon.db.restedxp.sourceBattleTag == "Source#1234" and addon.db.restedxp.groups == nil,
-        "obsolete importer cleanup preserves the separate skin preference")
 end
 
 do
@@ -703,7 +788,9 @@ do
     addon.db.restedxp = { sourceBattleTag = "Source#1234", groups = { stale = "obsolete payload" } }
     Load("RestedXP.lua")
     assert(addon:CleanupRestedXPData(true) and addon.db.restedxpSkin == preference
-        and addon:GetRestedXPBackgroundTransparency() == 50 and addon:IsRestedXPModernScrollbarEnabled(),
+        and addon.db.restedxp.sourceBattleTag == "Source#1234" and addon.db.restedxp.groups == nil
+        and addon:GetRestedXPBackgroundTransparency() == 50 and addon:IsRestedXPSkinEnabled()
+        and addon:IsRestedXPModernScrollbarEnabled(),
         "importer cleanup preserves independent appearance preferences")
     world.available = true
     world:fire("ADDON_LOADED", "RXPGuides")

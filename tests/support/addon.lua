@@ -1,6 +1,8 @@
 -- This harness is never loaded by the addon.
 -- Server membership changes are asynchronous, as they are in the client.
 local loadNotifications = dofile("tests/support/notifications.lua")
+local helpers = dofile("tests/support/helpers.lua")
+local loadModule = helpers.loadModule
 local function isRosterMessage(message)
     return message:match("^1|roster|") or message:match("^1|[QR]|roster|")
 end
@@ -15,7 +17,7 @@ local function loadAddon(savedVariables, loggedIn)
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
         addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
         dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, statusSends = {}, guideSends = {}, prefixes = {},
-        resolverCalls = {}, callbacks = {}, hookCalls = {}, chatFrames = {}, removeCalls = {},
+        callbacks = {}, chatFrames = {}, removeCalls = {},
         optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
         level = 12, xp = 0, xpMax = 1000, maxLevel = 60,
@@ -35,19 +37,16 @@ local function loadAddon(savedVariables, loggedIn)
         return timer
     end
     local environment
-    local function capture(...) return { n = select("#", ...), ... } end
     local function newEditBox()
         local header = {}
         function header:SetText(text) self.text = text end
         function header:SetFormattedText(format, ...)
-            self.formattedCalls = (self.formattedCalls or 0) + 1
             self:SetText(string.format(format, ...))
         end
         function header:GetWidth() return #(self.text or "") end
         local box = { header = header }
         function box:SetChatType(chatType) self.chatType = chatType end
         function box:SetChannelTarget(target) self.channelTarget = target end
-        function box:GetHeader() return self.header end
         function box:UpdateHeader()
             if self.chatType ~= "CHANNEL" then return end
             local id, name = environment.GetChannelName(self.channelTarget)
@@ -90,14 +89,6 @@ local function loadAddon(savedVariables, loggedIn)
     function minimap:GetEffectiveScale() return self.scale end
     function minimap:GetCenter() return self.x, self.y end
     function minimap:GetFrameLevel() return 10 end
-    function minimap:HookScript(script, callback)
-        assert(script == "OnSizeChanged", "minimap only hooks size changes")
-        self.hooks[#self.hooks + 1] = callback
-    end
-    function minimap:SetSize(width, height)
-        self.width, self.height = width, height
-        for _, callback in ipairs(self.hooks) do callback(self, width, height) end
-    end
     local tooltip = { lines = {}, shown = false }
     function tooltip:SetOwner(owner, anchor) self.owner, self.anchor = owner, anchor end
     function tooltip:IsOwned(owner) return self.owner == owner end
@@ -106,39 +97,6 @@ local function loadAddon(savedVariables, loggedIn)
     function tooltip:Show() self.shown = true end
     function tooltip:Hide() self.shown = false end
     function tooltip:IsShown() return self.shown end
-    local function newMinimapButton(name, parent)
-        assert(name == "LockInToolsMinimapButton" and parent == minimap,
-            "the addon button uses a named native minimap child")
-        world.minimapButtonCreations = world.minimapButtonCreations + 1
-        local button = { name = name, parent = parent, scripts = {}, shown = true, textures = {} }
-        function button:SetSize(width, height) self.width, self.height = width, height end
-        function button:SetFrameStrata(strata) self.strata = strata end
-        function button:SetFrameLevel(level) self.level = level end
-        function button:RegisterForClicks(...) self.clicks = { ... } end
-        function button:RegisterForDrag(...) self.drags = { ... } end
-        function button:ClearAllPoints() self.point = nil end
-        function button:SetPoint(...) self.point = { ... } end
-        function button:SetHighlightTexture(texture) self.highlight = texture end
-        function button:SetScript(script, callback) self.scripts[script] = callback end
-        function button:GetScript(script) return self.scripts[script] end
-        function button:CreateTexture()
-            local texture = {}
-            function texture:SetSize(width, height) self.width, self.height = width, height end
-            function texture:SetPoint(...) self.point = { ... } end
-            function texture:SetAllPoints() self.allPoints = true end
-            function texture:SetTexture(path) self.path = path end
-            function texture:SetTexCoord(...) self.texCoord = { ... } end
-            button.textures[#button.textures + 1] = texture
-            return texture
-        end
-        function button:Click(mouseButton) self.scripts.OnClick(self, mouseButton) end
-        function button:Hide()
-            self.shown = false
-            if self.scripts.OnHide then self.scripts.OnHide(self) end
-        end
-        environment[name] = button
-        return button
-    end
     environment = setmetatable({
         LockInToolsDB = savedVariables,
         SlashCmdList = {},
@@ -189,10 +147,8 @@ local function loadAddon(savedVariables, loggedIn)
             ForEachChatFrame = function(callback)
                 for _, frame in ipairs(world.chatFrames) do callback(frame) end
             end,
-            ResolvePrefixedChannelName = function(...)
-                local arguments = capture(...)
-                world.resolverCalls[#world.resolverCalls + 1] = arguments
-                return arguments[1], "native-result", nil, "native-tail"
+            ResolvePrefixedChannelName = function(name)
+                return name, "native-result", nil, "native-tail"
             end,
         },
         EventRegistry = {
@@ -202,17 +158,6 @@ local function loadAddon(savedVariables, loggedIn)
                 callbacks[#callbacks + 1] = { callback = callback, owner = owner }
             end,
         },
-        hooksecurefunc = function(object, methodName, callback)
-            assert(type(object) == "table" and type(methodName) == "string" and type(callback) == "function",
-                "chat display uses named object method hooks")
-            local original = assert(object[methodName], "hooked methods must exist")
-            world.hookCalls[object] = (world.hookCalls[object] or 0) + 1
-            object[methodName] = function(...)
-                local result = capture(original(...))
-                callback(...)
-                return unpack(result, 1, result.n)
-            end
-        end,
         issecretvalue = function(value) return world.secretValue ~= nil and value == world.secretValue end,
         GetChannelName = function(identifier)
             local channel = channelByName(identifier)
@@ -288,8 +233,7 @@ local function loadAddon(savedVariables, loggedIn)
         end,
         IsLoggedIn = function() return loggedIn end,
         GetBuildInfo = function() return "1.60.1", "70374", "Oct 2026", 16001 end,
-        CreateFrame = function(frameType, name, parent)
-            if frameType == "Button" then return newMinimapButton(name, parent) end
+        CreateFrame = function(frameType)
             assert(frameType == "Frame", "options are not loaded in this harness")
             local frame = { events = {} }
             function frame:RegisterEvent(event) self.events[event] = true end
@@ -303,6 +247,12 @@ local function loadAddon(savedVariables, loggedIn)
         end,
     }, { __index = _G })
     environment._G = environment
+    local hookMethod = helpers.hooksecurefunc(environment)
+    environment.hooksecurefunc = function(object, methodName, callback)
+        assert(type(object) == "table" and type(methodName) == "string" and type(callback) == "function",
+            "chat display uses named object method hooks")
+        return hookMethod(object, methodName, callback)
+    end
     local addon = {}
     local _, prepareMinimap = dofile("tests/support/ui.lua")
     prepareMinimap(environment, world)
@@ -310,16 +260,7 @@ local function loadAddon(savedVariables, loggedIn)
     for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
         "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Burned.lua", "Position.lua", "Roster.lua", "Ranking.lua",
         "RestedXPCodec.lua", "RestedXPAdapter.lua", "RestedXP.lua", "Theme.lua", "RestedXPSkin.lua", "Minimap.lua", "Commands.lua" }) do
-        local chunk, problem
-        if setfenv then
-            chunk, problem = loadfile(file)
-            assert(chunk, problem)
-            setfenv(chunk, environment)
-        else
-            chunk, problem = loadfile(file, "t", environment)
-            assert(chunk, problem)
-        end
-        chunk("LockInTools", addon)
+        loadModule(file, addon, environment)
     end
     addon.OpenOptions = function() world.optionsOpened = world.optionsOpened + 1 end
     addon.OpenContent = function() world.contentOpened = world.contentOpened + 1 end
@@ -373,16 +314,6 @@ local function loadAddon(savedVariables, loggedIn)
         fire("ADDON_LOADED", "LockInTools")
         fire("PLAYER_LOGIN")
     end
-    function world:showEditBox(box)
-        for _, registration in ipairs(self.callbacks["ChatFrame.OnEditBoxShow"] or {}) do
-            registration.callback(registration.owner, box)
-        end
-    end
-    function world:renderChannelMessage(id, name, text)
-        local label = environment.ChatFrameUtil.ResolvePrefixedChannelName(id .. ". " .. name)
-        return "|Hchannel:CHANNEL:" .. id .. "|h[" .. label .. "]|h " .. text
-    end
-    world.newEditBox = newEditBox
     function world:newChatFrame() return newChatFrame() end
     world.fire, world.editBox = fire, editBox
     return addon, environment, messages, fire, world
@@ -405,5 +336,4 @@ end
 return {
     loadAddon = loadAddon, settings = settings, contains = contains,
     SECRET = SECRET, OTHER_SECRET = OTHER_SECRET,
-    isRosterMessage = isRosterMessage, isStatusMessage = isStatusMessage,
 }

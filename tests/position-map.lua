@@ -31,7 +31,7 @@ local function LoadMap()
         overviewPlayers = {}, rankingPlayers = {}, overviewReads = 0, rankingReads = 0,
         mapNames = { [101] = "Elwynn Forest" },
         groupUnits = {}, partyCount = 0, raidCount = 0, isRaid = false, unitNameReads = 0,
-        nativeConnected = {}, nativeSubgroup = {}, nativePositions = {}, nativePositionReads = 0, nativeUnitChecks = 0,
+        nativeConnected = {}, nativeSubgroup = {}, nativePositionReads = 0, nativeUnitChecks = 0,
         nativeFilters = { party = true, raid = true },
     }
     local environment = setmetatable({
@@ -74,12 +74,9 @@ local function LoadMap()
             local name = world.mapNames[mapID]
             if name then return { name = name } end
         end,
-        GetPlayerMapPosition = function(mapID, unit)
+        GetPlayerMapPosition = function()
             world.nativePositionReads = world.nativePositionReads + 1
-            local position = world.nativePositions[unit]
-            if position == false then return nil end
-            if position then return position end
-            if world.groupUnits[unit] then return Vector(0.25, 0.5) end
+            error("Native marker suppression must not query per-unit coordinates")
         end,
         GetMapRectOnMap = function(source, target)
             local rectangle = world.rectangles[source .. ":" .. target]
@@ -219,7 +216,6 @@ local function LoadMap()
                 function pin:IsMouseOver() return world.hoveredName == self.playerName end
                 function pin:GetEffectiveScale() return self.effectiveScale or self:GetMap().effectiveScale end
                 function pin:GetCenter()
-                    if self.centerUnavailable then return end
                     if self.centerX then return self.centerX, self.centerY end
                     local owner, scale = self:GetMap(), self:GetEffectiveScale()
                     return (owner.originX + self.x * owner.width * owner.zoom) / scale,
@@ -724,7 +720,6 @@ local function CheckOrgrimmarProjection()
     cityWorld.bounds[1454] = { -1000, -1400, 4000, 4600, continent = 1 }
     cityWorld.bounds[1411] = { -500, -2500, 2000, 6000, continent = 1 }
     cityWorld.rectangles["1454:1414"] = { 0.6, 0.64, 2 / 3, 43 / 60 }
-    cityWorld.mapAPI.GetMapPosFromWorldPos = function() return 1454, Vector(0.25, 0.5) end
     cityWorld:loadNativeMap(true)
     cityWorld.map.id = 1454
     local peer = { name = "Alice-Realm", map = 1454, x = 0.25, y = 0.5, online = true }
@@ -734,7 +729,7 @@ local function CheckOrgrimmarProjection()
     Near(cityWorld.map.pins[1].y, 0.5)
     cityWorld.map:changeMap(1411)
     assert(#cityWorld.map.pins == 1,
-        "Orgrimmar positions appear on Durotar even when the native inverse lookup selects the city")
+        "Orgrimmar positions with a reversed world axis appear on Durotar")
     Near(cityWorld.map.pins[1].x, 0.3)
     Near(cityWorld.map.pins[1].y, 0.575)
     peer.online = false
@@ -1026,7 +1021,6 @@ local function CheckNativeGroupPins()
     clock.groupUnits.party1, clock.partyCount = { "Alice", "" }, 1
     -- A stitched map can draw a party marker outside its underlying map even
     -- though the per-unit coordinate API returns no position for that map.
-    clock.nativePositions.party1 = false
     clock:fire("GROUP_ROSTER_UPDATE")
     assert(#clock.map.pins == 1 and FindPin(clock, otherRealm.name),
         "party joins hide the matching live pin even without an underlying-map unit projection")
@@ -1048,7 +1042,6 @@ local function CheckNativeGroupPins()
 
     clock.isRaid, clock.raidCount = true, 2
     clock.groupUnits = { raid1 = { "Self", "Realm" }, raid2 = { "Alice", "Realm" } }
-    clock.nativePositions.raid2 = false
     clock.nativeSubgroup.raid2 = false
     clock.nativeFilters.party = false
     clock:fire("GROUP_ROSTER_UPDATE")

@@ -1,4 +1,7 @@
 -- Native sliders and input callbacks remain responsible for all scrolling.
+local helpers = dofile("tests/support/helpers.lua")
+local HookScript, RunScript = dofile("tests/support/scripts.lua")
+
 local function Same(actual, expected)
     if type(actual) ~= "table" or type(expected) ~= "table" then return actual == expected end
     if #actual ~= #expected then return false end
@@ -36,15 +39,11 @@ local function Fixture(v2Enabled)
     end
     local function Button(slider, amount)
         local button = { shown = true, enabled = true, scripts = {}, scriptHooks = {} }
-        local function Dispatch(self, name)
-            if self.scripts[name] then self.scripts[name](self) end
-            for _, callback in ipairs(self.scriptHooks[name] or {}) do callback(self) end
-        end
         local function Visibility(self, value)
             local wasShown = self.shown
             self.shown = value == true
             world.mutations = world.mutations + 1
-            if self.shown and not wasShown then Dispatch(self, "OnShow") end
+            if self.shown and not wasShown then RunScript(self, "OnShow") end
         end
         function button:IsShown() return self.shown end
         function button:IsProtected() return false end
@@ -57,15 +56,12 @@ local function Fixture(v2Enabled)
         function button:SetEnabled(value)
             local wasEnabled = self.enabled
             self.enabled = value == true
-            if self.enabled ~= wasEnabled then Dispatch(self, self.enabled and "OnEnable" or "OnDisable") end
+            if self.enabled ~= wasEnabled then RunScript(self, self.enabled and "OnEnable" or "OnDisable") end
         end
         function button:Enable() self:SetEnabled(true) end
         function button:Disable() self:SetEnabled(false) end
         function button:GetScript(name) return self.scripts[name] end
-        function button:HookScript(name, callback)
-            self.scriptHooks[name] = self.scriptHooks[name] or {}
-            self.scriptHooks[name][#self.scriptHooks[name] + 1] = callback
-        end
+        button.HookScript = HookScript
         button.scripts.OnClick = function() slider:SetValue(slider:GetValue() + amount) end
         button.scripts.OnShow = function() world.arrowShows = (world.arrowShows or 0) + 1 end
         return button
@@ -85,14 +81,7 @@ local function Fixture(v2Enabled)
         function frame:ClearAllPoints() self.points = {}; world.containerLayouts = world.containerLayouts + 1 end
         function frame:SetPoint(...) self.points[#self.points + 1] = { ... }; world.containerLayouts = world.containerLayouts + 1 end
         function frame:GetScript(name) return self.scripts[name] end
-        function frame:HookScript(name, callback)
-            self.scriptHooks[name] = self.scriptHooks[name] or {}
-            self.scriptHooks[name][#self.scriptHooks[name] + 1] = callback
-        end
-        function frame:RunScript(name)
-            if self.scripts[name] then self.scripts[name](self) end
-            for _, callback in ipairs(self.scriptHooks[name] or {}) do callback(self) end
-        end
+        frame.HookScript, frame.RunScript = HookScript, RunScript
         local function Visibility(self, value)
             local previous = self.shown
             self.shown = value == true
@@ -124,14 +113,7 @@ local function Fixture(v2Enabled)
         function slider:GetMinMaxValues() return self.low, self.high end
         function slider:SetMinMaxValues(low, high) self.low, self.high = low, high end
         function slider:GetScript(name) return self.scripts[name] end
-        function slider:HookScript(name, callback)
-            self.scriptHooks[name] = self.scriptHooks[name] or {}
-            self.scriptHooks[name][#self.scriptHooks[name] + 1] = callback
-        end
-        function slider:RunScript(name, ...)
-            if self.scripts[name] then self.scripts[name](self, ...) end
-            for _, callback in ipairs(self.scriptHooks[name] or {}) do callback(self, ...) end
-        end
+        slider.HookScript, slider.RunScript = HookScript, RunScript
         function slider:IsShown() return self.shown end
         function slider:IsVisible() return self.shown and viewport:IsVisible() end
         function slider:GetParent() return viewport end
@@ -177,7 +159,7 @@ local function Fixture(v2Enabled)
             world.nativeUp = world.nativeUp + 1
             if button == "LeftButton" then slider.dragging = false end
         end
-        slider.scripts.OnShow = function() world.sliderShows = (world.sliderShows or 0) + 1 end
+        slider.scripts.OnShow = function() end
         slider.scripts.OnHide = function() world.sliderHides = (world.sliderHides or 0) + 1 end
         viewport.scripts.OnMouseWheel = function(_, direction)
             if not widget.noScroll then slider:SetValue(slider:GetValue() - direction * 45) end
@@ -283,16 +265,8 @@ local function Fixture(v2Enabled)
     function addon.Theme:GetPalette() return { surface = { 0.1, 0.15, 0.2, 1 }, accent = { 0.27, 0.65, 1 } } end
     local env = setmetatable({ InCombatLockdown = function() return world.combat end, CLOSE = "Close" }, { __index = _G })
     env._G = env
-    function env.hooksecurefunc(owner, method, callback)
-        world.hooks = world.hooks + 1
-        local original = owner[method]
-        owner[method] = function(...)
-            local result = { original(...) }
-            callback(...)
-            return unpack(result)
-        end
-    end
-    setfenv(assert(loadfile("RestedXPSkin.lua")), env)("LockInTools", addon)
+    env.hooksecurefunc = helpers.hooksecurefunc(env, function() world.hooks = world.hooks + 1 end)
+    helpers.loadModule("RestedXPSkin.lua", addon, env)
     return addon, rxp, world, classic
 end
 
