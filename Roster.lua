@@ -264,21 +264,22 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
         and (stamp < previous.stamp or (stamp == previous.stamp and sequence <= previous.sequence)) then
         return false
     end
+    level = level > 0 and level or nil
+    if kind ~= "known" then xp, maximum = nil, nil end
     local now = GetServerTime()
     local session = metadata and metadata.session
     local updatedAt = previous and previous.xpUpdatedAt
-    if not previous or previous.level ~= (level > 0 and level or nil) or previous.xpState ~= kind
-        or previous.xp ~= (kind == "known" and xp or nil) or previous.xpMax ~= (kind == "known" and maximum or nil)
+    if not previous or previous.level ~= level or previous.xpState ~= kind
+        or previous.xp ~= xp or previous.xpMax ~= maximum
         or previous.disconnected or previous.session ~= session or not peer or not peer.lastReceived
         or GetTime() - peer.lastReceived >= TIMEOUT then updatedAt = now end
-    state.progress[id] = { level = level > 0 and level or nil, xp = kind == "known" and xp or nil,
-        xpMax = kind == "known" and maximum or nil, xpState = kind, xpUpdatedAt = updatedAt,
+    state.progress[id] = { level = level, xp = xp, xpMax = maximum, xpState = kind, xpUpdatedAt = updatedAt,
         stamp = stamp, sequence = sequence, session = session, disconnected = false }
     if not peer then
         peer = { name = sender }
         state.peers[id] = peer
     end
-    peer.level, peer.seenAt, peer.lastReceived = level > 0 and level or nil, now, GetTime()
+    peer.level, peer.seenAt, peer.lastReceived = level, now, GetTime()
     peer.inParty, peer.canInvite, peer.partyFull, peer.sharing = flags.inParty, flags.canInvite, flags.partyFull, flags.sharing
     peer.statusSynchronized = true
     SavePeer(self, id, peer)

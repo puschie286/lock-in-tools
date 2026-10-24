@@ -413,48 +413,46 @@ function Provider:RefreshAllData(fromOnShow, incremental)
     end
     -- Release departed players first so their frames are available for new arrivals.
     for sender in pairs(self.pinsBySender) do
-        if not ValidPeer(peers[sender]) then self:RemovePeer(sender) end
+        if not peers[sender] then self:RemovePeer(sender) end
     end
     for sender in pairs(self.unmapped) do
-        if not ValidPeer(peers[sender]) then self.unmapped[sender] = nil end
+        if not peers[sender] then self.unmapped[sender] = nil end
     end
     for sender, peer in pairs(peers) do
-        if ValidPeer(peer) then
-            local pin, previous = self.pinsBySender[sender], keepMotion and self.positions[sender]
-            local sameCoordinates = previous and previous.sourceMap == peer.map
-                and previous.sourceX == peer.x and previous.sourceY == peer.y
-            local missing = self.unmapped[sender]
-            -- Off-map/temporarily unavailable geometry should not be retried for
-            -- every unrelated receive. Retry after a second or a native map refresh.
-            local waitForMap = missing and missing.map == peer.map and missing.x == peer.x and missing.y == peer.y
-                and now >= missing.at and now - missing.at < 1
-            local x, y
-            if sameCoordinates then x, y = previous.x, previous.y
-            elseif not waitForMap then x, y = PositionOnMap(peer, mapID) end
-            if x then
-                self.unmapped[sender] = nil
-                local class = not IsSecret(peer.class) and type(peer.class) == "string" and peer.class or nil
-                if pin and sameCoordinates and previous.name == peer.name and previous.online == (peer.online == true)
-                    and pin.playerClass == class then
-                    -- New status snapshots can replace the peer table without moving its pin.
-                    pin.positionPeer = peer
-                else
-                    local motion = NewMotion(peer, mapID, x, y, previous, now)
-                    self.positions[sender] = motion
-                    if pin then
-                        pin:UpdatePeer(peer.name, x, y, peer.online, class, motion, peer)
-                    else
-                        pin = map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, class, motion, self, sender, peer)
-                        self.pins[#self.pins + 1] = pin
-                        pin.providerIndex = #self.pins
-                        self.pinsBySender[sender] = pin
-                    end
-                end
+        local pin, previous = self.pinsBySender[sender], keepMotion and self.positions[sender]
+        local sameCoordinates = previous and previous.sourceMap == peer.map
+            and previous.sourceX == peer.x and previous.sourceY == peer.y
+        local missing = self.unmapped[sender]
+        -- Off-map/temporarily unavailable geometry should not be retried for
+        -- every unrelated receive. Retry after a second or a native map refresh.
+        local waitForMap = missing and missing.map == peer.map and missing.x == peer.x and missing.y == peer.y
+            and now >= missing.at and now - missing.at < 1
+        local x, y
+        if sameCoordinates then x, y = previous.x, previous.y
+        elseif not waitForMap then x, y = PositionOnMap(peer, mapID) end
+        if x then
+            self.unmapped[sender] = nil
+            local class = not IsSecret(peer.class) and type(peer.class) == "string" and peer.class or nil
+            if pin and sameCoordinates and previous.name == peer.name and previous.online == (peer.online == true)
+                and pin.playerClass == class then
+                -- New status snapshots can replace the peer table without moving its pin.
+                pin.positionPeer = peer
             else
-                if pin then self:RemovePeer(sender) end
-                if not waitForMap then
-                    self.unmapped[sender] = { map = peer.map, x = peer.x, y = peer.y, at = now }
+                local motion = NewMotion(peer, mapID, x, y, previous, now)
+                self.positions[sender] = motion
+                if pin then
+                    pin:UpdatePeer(peer.name, x, y, peer.online, class, motion, peer)
+                else
+                    pin = map:AcquirePin(PIN_TEMPLATE, peer.name, x, y, peer.online, class, motion, self, sender, peer)
+                    self.pins[#self.pins + 1] = pin
+                    pin.providerIndex = #self.pins
+                    self.pinsBySender[sender] = pin
                 end
+            end
+        else
+            if pin then self:RemovePeer(sender) end
+            if not waitForMap then
+                self.unmapped[sender] = { map = peer.map, x = peer.x, y = peer.y, at = now }
             end
         end
     end

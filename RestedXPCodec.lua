@@ -141,6 +141,5 @@ function Codec.Reencrypt(raw, sourceBattleTag, destinationBattleTag)
         offset = finish + 1
         Pause()
     end
-    if #blocks == 0 then return nil, "Guide export contains no compressed blocks." end
     return countText .. "|" .. concat(blocks) .. "|40000"
 end

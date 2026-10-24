@@ -907,7 +907,7 @@ do
         ranking:Notify("ROSTER_CHANGED")
         local moving, displaced = panel.rows[3], panel.rows[4]
         assert(moving.player == own and moving.rank:GetText() == "3" and moving.progress:GetText() == "70%"
-            and displaced.rank:GetText() == "4" and moving.layoutY == 68
+            and displaced.rank:GetText() == "4" and panel.rowMotion[own.id].target == 68
             and near(position(moving), 102) and near(position(displaced), 68)
             and moving.mouseEnabled and displaced.mouseEnabled and panel.rowAnimator.scripts.OnUpdate,
             "a rank swap updates logical slots and labels immediately while complete interactive rows start at their old positions")

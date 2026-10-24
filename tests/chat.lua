@@ -93,6 +93,30 @@ for _, notice in ipairs({ "WRONG_PASSWORD", "BANNED", "YOU_KICKED" }) do
     assert(#rejectedWorld.joinCalls == 1, notice .. " stops retries")
     assert(rejected:HasGroup() and type(rejected:GetChatStatusText()) == "string")
 end
+
+-- Native departures after a rejected join retain the failure until a manual retry.
+for _, event in ipairs({ "CHANNEL_LEFT", "YOU_LEFT" }) do
+    local rejected, _, _, _, rejectedWorld = loadAddon(settings(), false)
+    rejectedWorld:initialize()
+    rejectedWorld:advance(2)
+    rejectedWorld:notice("WRONG_PASSWORD", room, 0)
+    local failure = rejected.chatState.detail
+    local leaves = #rejectedWorld.leaveCalls
+    if event == "CHANNEL_LEFT" then
+        rejectedWorld.fire(event, 0, room)
+    else
+        rejectedWorld:notice(event, room, 0)
+    end
+    rejectedWorld.fire("CHANNEL_UI_UPDATE")
+    rejectedWorld.fire("PLAYER_ENTERING_WORLD", false, false)
+    rejectedWorld:advance(120)
+    assert(rejected.chatState.phase == "error" and type(failure) == "string"
+        and rejected:GetChatStatusText() == failure,
+        event .. " preserves the rejected join's failure instead of reporting an ordinary leave")
+    assert(#rejectedWorld.joinCalls == 1 and #rejectedWorld.leaveCalls == leaves,
+        event .. " neither restarts retries nor requests another native leave")
+end
+
 local pending, _, _, _, pendingWorld = loadAddon(settings(), false)
 pendingWorld:initialize()
 pendingWorld:advance(2)

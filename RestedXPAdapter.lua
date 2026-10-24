@@ -95,7 +95,7 @@ local function FlushSoon(job)
             Emit(job, "unknown")
             return
         end
-        local phase = job.phase or (job.aborted and "cancelled" or "importing")
+        local phase = job.phase or "importing"
         job.phase = nil
         if job.aborted and phase == "importing" then phase = "cancelled" end
         Emit(job, phase)

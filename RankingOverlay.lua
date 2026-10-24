@@ -262,7 +262,6 @@ local function SetMotionTarget(motion, target, alpha, animate)
 end
 
 local function BindRowMotion(panel, row, player, target, animate)
-    row.layoutY = target
     local motion = panel.rowMotion[player.id]
     if not motion then
         motion = { display = target + (animate and 12 or 0), alpha = animate and 0 or 1 }
@@ -753,7 +752,6 @@ function addon:SaveRankingPosition()
     local point, relativeTo, relativePoint, x, y = panel:GetPoint()
     if relativeTo and relativeTo ~= UIParent then return end
     local position = { point = point, relativePoint = relativePoint, x = x, y = y }
-    panel.runtimePosition = position
     return self:SetRankingPosition(position)
 end
 

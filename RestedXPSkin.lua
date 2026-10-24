@@ -328,15 +328,23 @@ function addon:GetRestedXPSkinState()
     local state = self.restedxpSkinState
     local enabled = self:IsRestedXPSkinEnabled()
     local active = rxp and Selected(rxp) == true or false
+    local status
+    if state and state.pending then
+        status = "The skin change will apply after combat."
+    elseif active then
+        status = "LockInTools theme is active."
+    elseif enabled and rxp then
+        status = "A different theme is selected in RestedXP."
+    elseif rxp then
+        status = "Choose the LockInTools theme in RestedXP."
+    else
+        status = "Enable RestedXP to choose the LockInTools theme."
+    end
     return {
         enabled = enabled, available = rxp ~= nil, active = active,
         pending = state and state.pending == true or false,
         problem = state and state.problem or problem,
-        status = state and state.pending and "The skin change will apply after combat."
-            or active and "LockInTools theme is active."
-            or enabled and rxp and "A different theme is selected in RestedXP."
-            or rxp and "Choose the LockInTools theme in RestedXP."
-            or "Enable RestedXP to choose the LockInTools theme.",
+        status = status,
     }
 end
 

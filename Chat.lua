@@ -238,8 +238,6 @@ function addon:JoinChatChannel(manual)
         self:FailChatJoin("WoW rejected the group chat join request. Use Join to try again.")
         return false
     end
-    state.ownedName = name
-
     -- Join completion arrives asynchronously; do not label a request as joined.
     if not state.failed and not state.paused and not self:ConfirmChatMembership() then
         self:ScheduleChatCheck(RETRY_DELAYS[state.attempts])
@@ -257,7 +255,6 @@ function addon:LeaveChatChannel()
     state.paused = true
     state.pending = false
     state.failed = false
-    state.ownedName = nil
     state.passwordSet = false
     self:SetChatPhase("paused")
     local name = self:GetGroupChannelName()
@@ -302,7 +299,7 @@ function addon:ResetChatForGroupSwitch()
     self:CancelChatTimer()
     local state = self.chatState
     state.attempts, state.pending, state.paused, state.failed = 0, false, false, false
-    state.ownedName, state.passwordSet = nil, false
+    state.passwordSet = false
     state.wanted = false
     self:SetChatPhase("idle")
 end
@@ -371,6 +368,18 @@ function addon:OnChatLogin()
     end
 end
 
+local function ChannelLeft(self)
+    local state = self.chatState
+    self:CancelChatTimer()
+    state.paused = true
+    state.pending = false
+    state.wanted = false
+    state.passwordSet = false
+    if not state.failed then
+        self:SetChatPhase("paused")
+    end
+end
+
 function addon:InitializeChat()
     self.chatState = { phase = "idle", attempts = 0 }
     self:InitializeChatDisplay()
@@ -387,15 +396,7 @@ function addon:InitializeChat()
             local _, name = ...
             if SameChannel(name, configuredName) then
                 -- CHANNEL_LEFT precedes removal from GetChannelName's results.
-                self:CancelChatTimer()
-                state.paused = true
-                state.pending = false
-                state.wanted = false
-                state.ownedName = nil
-                state.passwordSet = false
-                if not state.failed then
-                    self:SetChatPhase("paused")
-                end
+                ChannelLeft(self)
             end
         elseif event == "CHANNEL_PASSWORD_REQUEST" then
             local name = ...
@@ -411,15 +412,7 @@ function addon:InitializeChat()
             if TERMINAL_NOTICES[reason] then
                 self:FailChatJoin(TERMINAL_NOTICES[reason])
             elseif reason == "YOU_LEFT" then
-                self:CancelChatTimer()
-                state.paused = true
-                state.pending = false
-                state.wanted = false
-                state.ownedName = nil
-                state.passwordSet = false
-                if not state.failed then
-                    self:SetChatPhase("paused")
-                end
+                ChannelLeft(self)
             elseif reason == "YOU_JOINED" or reason == "YOU_CHANGED" then
                 -- A native /join or password prompt can complete a rejected join.
                 local channelID = GetChannelName(configuredName)

@@ -182,6 +182,60 @@ local function BindPreference(panel, checkbox, getter, setter)
     end)
 end
 
+local function CreateTransparencyControl(panel, page, prefix, title, getter, setter, available)
+    local help = CreateFrame("Frame", nil, page)
+    panel[prefix .. "TransparencyHelp"] = help
+    help:SetSize(308, 20)
+    help:EnableMouse(true)
+    local label = UI:Label(help, title, 12)
+    label:SetPoint("TOPLEFT", 0, 0)
+    local valueLabel = UI:Label(help, "0%", 12, "muted")
+    panel[prefix .. "TransparencyValue"] = valueLabel
+    valueLabel:SetPoint("TOPRIGHT", 0, 0)
+    local slider = CreateFrame("Slider", nil, page)
+    panel[prefix .. "TransparencySlider"] = slider
+    slider:SetSize(296, 20)
+    slider:SetOrientation("HORIZONTAL")
+    slider:EnableMouse(true)
+    slider:SetMinMaxValues(0, 100)
+    slider:SetValueStep(1)
+    if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
+    local track = slider:CreateTexture(nil, "BACKGROUND")
+    track:SetPoint("LEFT", 0, 0)
+    track:SetPoint("RIGHT", 0, 0)
+    track:SetHeight(4)
+    track:SetColorTexture(0.025, 0.035, 0.05, 1)
+    local thumb = slider:CreateTexture(nil, "ARTWORK")
+    thumb:SetSize(10, 18)
+    thumb:SetColorTexture(UI:GetAccentColor())
+    slider:SetThumbTexture(thumb)
+    local function ShowTransparency(value)
+        page.updatingTransparency = true
+        slider:SetValue(value)
+        valueLabel:SetText(string.format("%d%%", value))
+        page.updatingTransparency = nil
+    end
+    page.RefreshTransparency = function()
+        local editable = not addon.savedDataReadOnly and (not available or available())
+        slider:SetEnabled(editable)
+        help:SetAlpha(editable and 1 or 0.5)
+        thumb:SetAlpha(editable and 1 or 0.5)
+        ShowTransparency(getter())
+    end
+    slider:SetScript("OnValueChanged", function(widget, value)
+        if page.updatingTransparency then return end
+        local saved = getter()
+        if not widget:IsEnabled() or addon.savedDataReadOnly then ShowTransparency(saved); return end
+        value = math.min(100, math.max(0, math.floor(value + 0.5)))
+        ShowTransparency(value)
+        if value == saved then return end
+        local success, message = setter(value)
+        ShowTransparency(getter())
+        SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
+    end)
+    return help, slider
+end
+
 local function CreateDataControls(panel, page)
     panel.dataChannels = {}
     local heading = UI:Label(page, "Data channels", 14, "heading")
@@ -298,56 +352,11 @@ local function CreateRestedXPPage(panel)
         PreferenceLabel(page, checkbox, preference.label, preference.description, 276)
     end
 
-    panel.restedxpTransparencyHelp = CreateFrame("Frame", nil, page)
-    panel.restedxpTransparencyHelp:SetPoint("TOPLEFT", 356, -286)
-    panel.restedxpTransparencyHelp:SetSize(308, 20)
-    panel.restedxpTransparencyHelp:EnableMouse(true)
-    local transparencyLabel = UI:Label(panel.restedxpTransparencyHelp, "Transparency", 12)
-    transparencyLabel:SetPoint("TOPLEFT", 0, 0)
-    panel.restedxpTransparencyValue = UI:Label(panel.restedxpTransparencyHelp, "0%", 12, "muted")
-    panel.restedxpTransparencyValue:SetPoint("TOPRIGHT", 0, 0)
-    local slider = CreateFrame("Slider", nil, page)
-    panel.restedxpTransparencySlider = slider
+    local help, slider = CreateTransparencyControl(panel, page, "restedxp", "Transparency", RestedXPTransparency,
+        function(value) return addon:SetRestedXPBackgroundTransparency(value) end,
+        function() return type(addon.SetRestedXPBackgroundTransparency) == "function" end)
+    help:SetPoint("TOPLEFT", 356, -286)
     slider:SetPoint("TOPLEFT", 360, -314)
-    slider:SetSize(296, 20)
-    slider:SetOrientation("HORIZONTAL")
-    slider:EnableMouse(true)
-    slider:SetMinMaxValues(0, 100)
-    slider:SetValueStep(1)
-    if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
-    local track = slider:CreateTexture(nil, "BACKGROUND")
-    track:SetPoint("LEFT", 0, 0)
-    track:SetPoint("RIGHT", 0, 0)
-    track:SetHeight(4)
-    track:SetColorTexture(0.025, 0.035, 0.05, 1)
-    local thumb = slider:CreateTexture(nil, "ARTWORK")
-    thumb:SetSize(10, 18)
-    thumb:SetColorTexture(UI:GetAccentColor())
-    slider:SetThumbTexture(thumb)
-    local function ShowTransparency(value)
-        page.updatingTransparency = true
-        slider:SetValue(value)
-        panel.restedxpTransparencyValue:SetText(string.format("%d%%", value))
-        page.updatingTransparency = nil
-    end
-    page.RefreshTransparency = function()
-        local editable = not addon.savedDataReadOnly and type(addon.SetRestedXPBackgroundTransparency) == "function"
-        slider:SetEnabled(editable)
-        panel.restedxpTransparencyHelp:SetAlpha(editable and 1 or 0.5)
-        thumb:SetAlpha(editable and 1 or 0.5)
-        ShowTransparency(RestedXPTransparency())
-    end
-    slider:SetScript("OnValueChanged", function(widget, value)
-        if page.updatingTransparency then return end
-        local saved = RestedXPTransparency()
-        if not widget:IsEnabled() or addon.savedDataReadOnly then ShowTransparency(saved); return end
-        value = math.min(100, math.max(0, math.floor(value + 0.5)))
-        ShowTransparency(value)
-        if value == saved then return end
-        local success, message = addon:SetRestedXPBackgroundTransparency(value)
-        ShowTransparency(RestedXPTransparency())
-        SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
-    end)
     local transparencyHelp = "Fade LockInTools theme backgrounds and borders without fading text."
     OptionTooltip(page, panel.restedxpTransparencyHelp, "Transparency", transparencyHelp)
     OptionTooltip(page, slider, "Transparency", transparencyHelp)
@@ -466,7 +475,7 @@ local function CreateRestedXPPage(panel)
         end
         RefreshDraft()
     end
-    page.ClearDraft, page.RefreshDraft = ClearDraft, RefreshDraft
+    page.RefreshDraft = RefreshDraft
     page.GetExport = function() return raw end
     panel.restedxpImport:SetScript("OnClick", function()
         if buffer then return end
@@ -746,59 +755,11 @@ local function CreateOptionsPanel()
         "Add bright glow and animated flames to both burned meters at 70% and above. Turn this off to hide the effect.\n\n"
             .. "This preference saves across reloads and characters.")
 
-    panel.rankingTransparencyHelp = CreateFrame("Frame", nil, ranking)
-    panel.rankingTransparencyHelp:SetPoint("TOPLEFT", 16, -182)
-    panel.rankingTransparencyHelp:SetSize(308, 20)
-    panel.rankingTransparencyHelp:EnableMouse(true)
-    local transparencyLabel = UI:Label(panel.rankingTransparencyHelp, "Background transparency", 12)
-    transparencyLabel:SetPoint("TOPLEFT", 0, 0)
-    panel.rankingTransparencyValue = UI:Label(panel.rankingTransparencyHelp, "0%", 12, "muted")
-    panel.rankingTransparencyValue:SetPoint("TOPRIGHT", 0, 0)
-    local slider = CreateFrame("Slider", nil, ranking)
-    panel.rankingTransparencySlider = slider
+    local help, slider = CreateTransparencyControl(panel, ranking, "ranking", "Background transparency",
+        function() return addon:GetRankingSettings().backgroundTransparency or 0 end,
+        function(value) return addon:SetRankingBackgroundTransparency(value) end)
+    help:SetPoint("TOPLEFT", 16, -182)
     slider:SetPoint("TOPLEFT", 20, -210)
-    slider:SetSize(296, 20)
-    slider:SetOrientation("HORIZONTAL")
-    slider:EnableMouse(true)
-    slider:SetMinMaxValues(0, 100)
-    slider:SetValueStep(1)
-    if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
-    local track = slider:CreateTexture(nil, "BACKGROUND")
-    track:SetPoint("LEFT", 0, 0)
-    track:SetPoint("RIGHT", 0, 0)
-    track:SetHeight(4)
-    track:SetColorTexture(0.025, 0.035, 0.05, 1)
-    local thumb = slider:CreateTexture(nil, "ARTWORK")
-    thumb:SetSize(10, 18)
-    thumb:SetColorTexture(UI:GetAccentColor())
-    slider:SetThumbTexture(thumb)
-    local function SavedTransparency()
-        return addon:GetRankingSettings().backgroundTransparency or 0
-    end
-    local function ShowTransparency(value)
-        ranking.updatingTransparency = true
-        slider:SetValue(value)
-        panel.rankingTransparencyValue:SetText(string.format("%d%%", value))
-        ranking.updatingTransparency = nil
-    end
-    ranking.RefreshTransparency = function()
-        local editable = not addon.savedDataReadOnly
-        slider:SetEnabled(editable)
-        panel.rankingTransparencyHelp:SetAlpha(editable and 1 or 0.5)
-        thumb:SetAlpha(editable and 1 or 0.5)
-        ShowTransparency(SavedTransparency())
-    end
-    slider:SetScript("OnValueChanged", function(widget, value)
-        if ranking.updatingTransparency then return end
-        local saved = SavedTransparency()
-        if not widget:IsEnabled() or addon.savedDataReadOnly then ShowTransparency(saved); return end
-        value = math.min(100, math.max(0, math.floor(value + 0.5)))
-        ShowTransparency(value)
-        if value == saved then return end
-        local success, message = addon:SetRankingBackgroundTransparency(value)
-        ShowTransparency(SavedTransparency())
-        SetFeedback(panel, success and "" or (message or "Unable to change this setting."), not success)
-    end)
     local transparencyHelp = "Fade the ranking overlay's background and border while keeping player rows and meters readable.\n\n"
         .. "Changes apply immediately and save across reloads and characters."
     OptionTooltip(ranking, panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
