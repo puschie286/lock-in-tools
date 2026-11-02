@@ -101,7 +101,9 @@ local function ActionButton(menu, onResult, label, action, y)
         local playerID = menu.playerID
         menu:Hide()
         if not playerID then return end
-        local success, message = addon:PerformOverviewAction(playerID, action)
+        local success, message
+        if action == "map" then success, message = addon:ShowPlayerOnMap(playerID)
+        else success, message = addon:PerformOverviewAction(playerID, action) end
         if onResult then onResult(success, message) end
         menu:Refresh()
     end)
@@ -111,9 +113,12 @@ end
 local function RefreshActions(menu)
     local state = addon:GetOverviewActionState(menu.playerID)
     menu.invite.reason, menu.request.reason = state.inviteReason, state.requestReason
+    local showMap, mapReason = addon:GetPlayerMapActionState(menu.playerID)
+    menu.showMap.reason = mapReason
     menu.invite:SetEnabled(state.invite == true)
     menu.request:SetEnabled(state.request == true)
-    for _, button in ipairs({ menu.invite, menu.request }) do
+    menu.showMap:SetEnabled(showMap == true)
+    for _, button in ipairs({ menu.invite, menu.request, menu.showMap }) do
         if GameTooltip and GameTooltip:IsOwned(button) then
             GameTooltip:SetText(button.reason or button:GetText())
         end
@@ -128,12 +133,13 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     -- Buttons default to left clicks; either button should dismiss the backdrop.
     menu:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     menu:EnableMouseWheel(true)
-    menu.menu = UI:Section(menu, 0, 0, 170, 80, "")
+    menu.menu = UI:Section(menu, 0, 0, 170, 116, "")
     menu.menu:SetFrameLevel(menu:GetFrameLevel() + 1)
     menu.menu:SetClampedToScreen(true)
     menu.menu:EnableMouse(true)
     menu.invite = ActionButton(menu, onResult, "Invite", "invite", 8)
     menu.request = ActionButton(menu, onResult, "Request to join", "request", 44)
+    menu.showMap = ActionButton(menu, onResult, "Show on map", "map", 80)
     menu:SetScript("OnClick", function() menu:Hide() end)
     menu:SetScript("OnMouseWheel", function(_, delta)
         menu:Hide()
@@ -144,6 +150,7 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
         if addon.activePlayerActionMenu == menu then addon.activePlayerActionMenu = nil end
         HideTooltip(menu.invite)
         HideTooltip(menu.request)
+        HideTooltip(menu.showMap)
     end)
     parent:HookScript("OnHide", function() menu:Hide() end)
     function menu:Refresh()

@@ -387,6 +387,42 @@ local function ValidPeer(peer)
         and MapID(peer.map) and Coordinate(peer.x) and Coordinate(peer.y)
 end
 
+local function MapOpener()
+    if C_Map and type(C_Map.OpenWorldMap) == "function" then return C_Map.OpenWorldMap end
+    if type(OpenWorldMap) == "function" then return OpenWorldMap end
+end
+
+function addon:GetPlayerMapActionState(id)
+    if not ValidPeer(self:GetSharedPositions()[id]) then
+        return false, "No shared location is available for this player."
+    end
+    if not self:GetShowPlayerIcons() then
+        return false, "Enable 'Show player icons' in the world map filter first."
+    end
+    if not MapOpener() then return false, "The world map is unavailable in this client." end
+    return true
+end
+
+function addon:ShowPlayerOnMap(id)
+    local allowed, reason = self:GetPlayerMapActionState(id)
+    if not allowed then return false, reason end
+    -- Resolve again at click time; a menu can outlive its captured roster row.
+    local position = self:GetSharedPositions()[id]
+    local mapID = position.map
+    local ok = pcall(MapOpener(), mapID)
+    local map = WorldMapFrame
+    if not ok or not map or NativeValue(map.IsShown, map) ~= true
+        or NativeValue(map.GetMapID, map) ~= mapID then
+        return false, "Could not show this location. Open the world map and try again."
+    end
+    ok = pcall(function()
+        -- Bypass scale-ratio interpolation so unchanged zoom still replaces the old pan.
+        map:InstantPanAndZoom(map:GetCanvasScale(), position.x, position.y, true)
+    end)
+    if not ok then return false, "Could not bring this player into view. Open the world map and try again." end
+    return true
+end
+
 function Provider:RefreshAllData(fromOnShow, incremental)
     local map = self:GetMap()
     if not map:IsShown() or not self.addon:GetShowPlayerIcons() then self:RemoveAllData(); return end

@@ -1430,8 +1430,15 @@ do
         InviteUnit = function(name) invites[#invites + 1] = name end,
         RequestInviteFromUnit = function(name) requests[#requests + 1] = name end,
     }
+    local openedMaps = {}
+    api.C_Map.OpenWorldMap = function(map)
+        openedMaps[#openedMaps + 1] = map
+        api.WorldMapFrame = { IsShown = function() return true end, GetMapID = function() return map end,
+            GetCanvasScale = function() return 1 end, InstantPanAndZoom = function() end }
+    end
     world:initialize()
     world:completeJoin(ranking:GetGroupDataChannelName(), 7)
+    assert(ranking:ReceivePosition("Alpha-TestRealm", "2|P|" .. api.GetServerTime() .. "|38|25000|75000"))
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo" }) do
         assert(ranking:ReceivePlayerStatus(name .. "-TestRealm", {
             level = 30 - index, xp = 400, xpMax = 1000, xpState = "known",
@@ -1468,6 +1475,17 @@ do
     menu.invite:Click()
     assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and not menu:IsShown(),
         "the ranking invite uses the production permission check and complete player name")
+    menu = openMenu(first)
+    assert(menu.showMap:IsEnabled(), "right clicking a ranked player offers their shared map location")
+    menu.showMap:Click()
+    assert(#openedMaps == 1 and openedMaps[1] == 38 and not menu:IsShown()
+        and not ranking.mainPanel and not ranking.contentPanel and #invites == 1 and #requests == 0,
+        "ranking opens the selected player's map without creating Content or invoking party actions")
+    menu = openMenu(first)
+    assert(ranking:SetPositionSharing(false))
+    menu.showMap.scripts.OnClick(menu.showMap)
+    assert(#openedMaps == 1, "a stale ranking map action respects disabled position sharing")
+    assert(ranking:SetPositionSharing(true))
     menu = openMenu(first)
     world.level = 35
     world.fire("PLAYER_XP_UPDATE", "player")

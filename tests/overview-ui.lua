@@ -27,6 +27,12 @@ do
         assert(map == 37 or map == 38)
         return { name = map == 37 and "Elwynn Forest" or "Westfall" }
     end
+    local openedMaps = {}
+    api.C_Map.OpenWorldMap = function(map)
+        openedMaps[#openedMaps + 1] = map
+        api.WorldMapFrame = { IsShown = function() return true end, GetMapID = function() return map end,
+            GetCanvasScale = function() return 1 end, InstantPanAndZoom = function() end }
+    end
     overviewWorld:initialize()
     overviewWorld:completeJoin(overview:GetGroupDataChannelName(), 7)
     local now = api.GetServerTime()
@@ -99,6 +105,30 @@ do
     menu.request:Click()
     assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and #requests == 1 and requests[1] == "Bravo-TestRealm",
         "overview clicks invoke the real guarded native actions with complete names")
+    menu = openMenu(2)
+    assert(menu.showMap:IsEnabled(), "a player with a shared location offers Show on map")
+    menu.showMap.scripts.OnEnter(menu.showMap)
+    positions["alpha-testrealm"].map = 38
+    menu.showMap:Click()
+    assert(#openedMaps == 1 and openedMaps[1] == 38 and not menu:IsShown() and not api.GameTooltip:IsShown()
+        and #invites == 1 and #requests == 1,
+        "Show on map uses the current location and dismisses the menu and its tooltip without a party action")
+    positions["alpha-testrealm"].map = 37
+    menu = openMenu(3)
+    assert(not menu.showMap:IsEnabled() and menu.showMap.reason,
+        "players without a shared location get an explanation for the disabled map action")
+    menu.showMap.scripts.OnEnter(menu.showMap)
+    assert(api.GameTooltip:IsOwned(menu.showMap) and api.GameTooltip.text == menu.showMap.reason,
+        "disabled map actions expose their reason on hover")
+    clickOutside(menu, "RightButton")
+    assert(not api.GameTooltip:IsShown(), "dismissing the map action also clears disabled hover help")
+    menu = openMenu(2)
+    local previousPosition = positions["alpha-testrealm"]
+    positions["alpha-testrealm"] = nil
+    menu.showMap:Click()
+    assert(#openedMaps == 1 and content.feedback:GetText() ~= "",
+        "a location removed after opening the dropdown cannot be used by a stale enabled map action")
+    positions["alpha-testrealm"] = previousPosition
     -- Open while allowed, then change native eligibility before clicking.
     mayInvite = true
     menu = openMenu(2)

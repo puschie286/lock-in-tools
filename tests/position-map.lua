@@ -178,6 +178,17 @@ local function LoadMap()
         end
         function map:IsShown() return self.shown end
         function map:GetMapID() return self.id end
+        function map:GetCanvasScale() return self.zoom end
+        function map:InstantPanAndZoom(scale, x, y, ignoreScaleRatio)
+            -- Native same-scale interpolation keeps the old pan unless explicitly bypassed.
+            local ratio = ignoreScaleRatio and 0 or self.zoom / scale
+            x = x + ((self.panX or 0.5) - x) * ratio
+            y = y + ((self.panY or 0.5) - y) * ratio
+            local margin = 0.5 / scale
+            self.zoom = scale
+            self.panX = math.max(margin, math.min(1 - margin, x))
+            self.panY = math.max(margin, math.min(1 - margin, y))
+        end
         function map:AddDataProvider(provider)
             world.added = world.added + 1
             self.provider = provider
@@ -1198,4 +1209,110 @@ local function CheckNativeRaidRefreshCost()
 end
 CheckNativeRaidRefreshCost()
 
-print("PASS: map attachment/filter, compact player details, tooltip ownership, projection, movement and pooled lifecycle")
+local function CheckShowPlayerOnMap()
+    local mapped, clock = LoadMap()
+    local id, calls = "alice-realm", 0
+    local function OpenMap(mapID)
+        calls = calls + 1
+        if not clock.map then
+            clock:loadNativeMap(false)
+            clock:fire("ADDON_LOADED", "Blizzard_WorldMap")
+        end
+        if clock.map:GetMapID() ~= mapID then clock.map:changeMap(mapID) end
+        if not clock.map:IsShown() then clock.map:show() end
+    end
+    clock.mapAPI.OpenWorldMap = OpenMap
+    clock.environment.OpenWorldMap = function() error("prefer the namespaced map API") end
+    mapped.positions[id] = { name = "Alice-Realm", map = 102, x = 0.25, y = 0.5,
+        online = false, positionAvailable = false }
+    mapped:InitializePositionMap()
+    local allowed, reason = mapped:GetPlayerMapActionState(id)
+    assert(allowed and reason == nil and not clock.map and calls == 0,
+        "checking a retained location does not open or load the world map")
+    assert(mapped:ShowPlayerOnMap(id))
+    local pin = FindPin(clock, "Alice-Realm")
+    assert(clock.map:IsShown() and clock.map:GetMapID() == 102 and clock.added == 1 and calls == 1,
+        "the map action loads native map code and opens the retained location's source map")
+    Near(pin.x, 0.25)
+    Near(pin.y, 0.5)
+    CheckDot(pin, staleColor, false)
+
+    mapped.positions[id] = { name = "Alice-Realm", map = 103, x = 0.7, y = 0.9, online = true }
+    assert(mapped:ShowPlayerOnMap(id) and clock.map:GetMapID() == 103,
+        "the action resolves the current position instead of a menu-time snapshot")
+    pin = FindPin(clock, "Alice-Realm")
+    Near(pin.x, 0.7)
+    Near(pin.y, 0.9)
+    assert(mapped.db.position.sharing and mapped.db.position.showPlayerIcons,
+        "showing a location preserves sharing and visibility preferences")
+
+    local function PinInView()
+        local halfSpan = 0.5 / clock.map.zoom
+        return math.abs(pin.x - clock.map.panX) <= halfSpan
+            and math.abs(pin.y - clock.map.panY) <= halfSpan
+    end
+    clock.map.zoom, clock.map.panX, clock.map.panY = 4, 0.125, 0.125
+    assert(not PinInView(), "the selected player starts outside the already-open map's zoomed viewport")
+    assert(mapped:ShowPlayerOnMap(id))
+    assert(clock.map:GetMapID() == 103 and clock.map:IsShown() and PinInView(),
+        "showing a player on the same map immediately brings their pin inside the viewport")
+    Near(clock.map.zoom, 4)
+    Near(pin.x, 0.7)
+    Near(pin.y, 0.9)
+
+    local focusMap = clock.map.InstantPanAndZoom
+    clock.map.InstantPanAndZoom = function() error("native viewport unavailable") end
+    local focused, focusMessage = mapped:ShowPlayerOnMap(id)
+    assert(not focused and focusMessage == "Could not bring this player into view. Open the world map and try again.",
+        "a failed viewport update is reported instead of claiming the selected player is visible")
+    clock.map.InstantPanAndZoom = focusMap
+
+    local function Rejected(expected)
+        local before = calls
+        local available, disabledReason = mapped:GetPlayerMapActionState(id)
+        local success, message = mapped:ShowPlayerOnMap(id)
+        assert(not available and disabledReason == expected and not success and message == expected
+            and calls == before, "unavailable actions explain the reason without opening a map")
+    end
+    mapped.db.position.showPlayerIcons = false
+    Rejected("Enable 'Show player icons' in the world map filter first.")
+    assert(not mapped.db.position.showPlayerIcons, "the action never enables a hidden map filter")
+    mapped.db.position.showPlayerIcons = true
+    mapped.positions[id] = nil
+    Rejected("No shared location is available for this player.")
+    for _, position in ipairs({
+        { name = "Alice-Realm", map = 0, x = 0.25, y = 0.5 },
+        { name = "Alice-Realm", map = 102, x = 0 / 0, y = 0.5 },
+        { name = "Alice-Realm", map = 102, x = 0.25, y = 1.1 },
+    }) do
+        mapped.positions[id] = position
+        Rejected("No shared location is available for this player.")
+    end
+
+    mapped.positions[id] = { name = "Alice-Realm", map = 102, x = 0.25, y = 0.5 }
+    clock.mapAPI.OpenWorldMap = nil
+    clock.environment.OpenWorldMap = OpenMap
+    assert(mapped:ShowPlayerOnMap(id) and clock.map:GetMapID() == 102,
+        "clients without the namespaced opener use the native global API")
+    clock.environment.OpenWorldMap = nil
+    Rejected("The world map is unavailable in this client.")
+
+    local failure = "Could not show this location. Open the world map and try again."
+    clock.mapAPI.OpenWorldMap = function() error("native map unavailable") end
+    local success, message = mapped:ShowPlayerOnMap(id)
+    assert(not success and message == failure, "native opening errors become a visible action failure")
+    clock.mapAPI.OpenWorldMap = function() end
+    clock.map:hide()
+    success, message = mapped:ShowPlayerOnMap(id)
+    assert(not success and message == failure, "a native opener that leaves the map closed is not success")
+    clock.map:changeMap(103)
+    clock.map:show()
+    success, message = mapped:ShowPlayerOnMap(id)
+    assert(not success and message == failure, "an open map showing another region is not success")
+    clock.environment.WorldMapFrame = nil
+    success, message = mapped:ShowPlayerOnMap(id)
+    assert(not success and message == failure, "an absent native map frame is not success")
+end
+CheckShowPlayerOnMap()
+
+print("PASS: map attachment/filter, player map action, compact player details, tooltip ownership, projection, movement and pooled lifecycle")
