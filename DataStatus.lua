@@ -319,6 +319,8 @@ local function ScheduleStatus(self)
     if status.timer or not status.connected or not self:IsDataConnected() then return end
     status.timer = C_Timer.NewTimer(STATUS_INTERVAL, function()
         status.timer = nil
+        -- Rearm before working so an unexpected error cannot stop discovery.
+        ScheduleStatus(self)
         self:DataStatusTick()
     end)
 end

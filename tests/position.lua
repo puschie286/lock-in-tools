@@ -481,6 +481,71 @@ do
         "Valid coordinates resume immediately even when they match the last known position")
 end
 
+-- Native map failures report unavailable coordinates without stopping future samples.
+for _, failingCall in ipairs({ "GetBestMapForUnit", "GetPlayerMapPosition", "GetXY" }) do
+    local recovering, clock = newAddon()
+    clock:login()
+    clock:connect()
+    clock:advance(2)
+    assert(#clock.sent == 1 and fields(clock.sent[1].payload)[2] == "P")
+    local maps = clock.environment.C_Map
+    local bestMap, mapPosition = maps.GetBestMapForUnit, maps.GetPlayerMapPosition
+    local function Fail() error("Native map failure: " .. failingCall) end
+    if failingCall == "GetBestMapForUnit" then maps.GetBestMapForUnit = Fail
+    elseif failingCall == "GetPlayerMapPosition" then maps.GetPlayerMapPosition = Fail
+    else maps.GetPlayerMapPosition = function() return { GetXY = Fail } end end
+
+    clock:advance(2)
+    assert(#clock.sent == 2 and clock.sent[2].payload == "2|U|2000000004"
+        and recovering:GetPositionSnapshot() == "U",
+        failingCall .. " errors must withdraw coordinates instead of sharing the last good sample")
+    clock:advance(2)
+    assert(#clock.sent == 2, "Repeated native errors retain normal unavailable-sample suppression")
+
+    maps.GetBestMapForUnit, maps.GetPlayerMapPosition = bestMap, mapPosition
+    clock.x = 0.6
+    clock:advance(2)
+    assert(#clock.sent == 3 and clock.sent[3].payload == "2|P|2000000008|37|60000|75000",
+        failingCall .. " recovery must resume coordinate sends on the next scheduled sample")
+end
+
+-- Unexpected tick errors remain observable without permanently cancelling position work.
+do
+    local recovering, clock = newAddon()
+    clock:login()
+    clock:connect()
+    clock:advance(2)
+    local tick, calls = recovering.PositionTick, 0
+    function recovering:PositionTick()
+        calls = calls + 1
+        if calls == 1 then error("Unexpected position tick failure") end
+        return tick(self)
+    end
+    local ok, message = pcall(function() clock:advance(2) end)
+    assert(not ok and message:find("Unexpected position tick failure", 1, true),
+        "Unexpected errors must remain available to the client's error handler")
+    clock.x = 0.6
+    clock:advance(2)
+    assert(calls == 2 and #clock.sent == 2
+        and clock.sent[2].payload == "2|P|2000000006|37|60000|75000",
+        "The next scheduled tick must recover without reconnecting or changing preferences")
+
+    function recovering:PositionTick()
+        calls = calls + 1
+        self:SetPositionSharing(false)
+    end
+    clock:advance(2)
+    local samples = clock.samples
+    clock:advance(10)
+    assert(calls == 3 and clock.samples == samples and #clock.sent == 2,
+        "Disabling sharing inside a tick must cancel the already scheduled continuation")
+    assert(recovering:SetPositionSharing(true))
+    recovering.PositionTick = tick
+    clock:advance(2)
+    assert(#clock.sent == 3 and clock.sent[3].payload == "2|P|2000000020|37|60000|75000",
+        "Re-enabling sharing starts one fresh timer generation after cancellation")
+end
+
 -- Acceptance alone advances suppression; failures retry current data without a queue.
 do
     local retrying, clock = newAddon()

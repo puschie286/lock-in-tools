@@ -977,6 +977,62 @@ do
         and clock.sent[4].message:find("9=P,37,65000,75000", 1, true))
 end
 
+-- Native map errors cannot silence public status or replies while coordinates
+-- are unavailable, and both shared timers must recover without reconnecting.
+do
+    local current, clock, samples = positionStatusFixture({ level = 24 })
+    local native = clock.environment.C_Map.GetPlayerMapPosition
+    clock.environment.C_Map.GetPlayerMapPosition = function() error("Simulated map API failure") end
+
+    clock:advance(30)
+    assert(#clock.sent == 3 and clock.sent[2].message == "1|position|2|U|2000000002",
+        "A map exception reports unavailable coordinates instead of stopping movement checks")
+    assert(clock.sent[3].message:match("^1|status|5|F|[^|]+|2000000030|1|1=24|9=U$"),
+        "A map exception cannot suppress the player's complete public status heartbeat")
+    clock:advance(1)
+    assert(current:ReceiveData("Friend", "1|Q|status|map-failure|" .. full("peer", 2000000031, 1, "1=25")))
+    assert(#samples == 1 and samples[1].fields.level == "25"
+        and clock.sent[4].message:match("^1|R|status|map%-failure|friend%-testrealm|5|F|[^|]+|2000000031|1|1=24|9=U$"),
+        "Discovery still receives the requester and replies with core status during a map exception")
+    clock:advance(29)
+    assert(#clock.sent == 5
+        and clock.sent[5].message:match("^1|status|5|F|[^|]+|2000000060|1|1=24|9=U$")
+        and current.dataState.status.timer and current.positionState.timer,
+        "Repeated map exceptions cannot stop either shared timer")
+
+    clock.environment.C_Map.GetPlayerMapPosition, clock.x = native, 0.6
+    clock:advance(2)
+    assert(clock.sent[6].message == "1|position|2|P|2000000062|37|60000|75000",
+        "Fresh coordinates resume automatically after the native map API recovers")
+    clock:advance(28)
+    assert(#clock.sent == 7
+        and clock.sent[7].message:match("^1|status|5|F|[^|]+|2000000090|1|1=24|9=P,37,60000,75000$"),
+        "Later public heartbeats include recovered coordinates without reconnecting")
+end
+
+-- Unexpected callback errors remain visible without cancelling future status
+-- work; the next tick must publish the current sample after the error clears.
+do
+    local values = { level = 24 }
+    local current, clock = statusFixture(values)
+    local tick = current.DataStatusTick
+    current.DataStatusTick = function() error("Simulated status callback failure") end
+    local ok, problem = pcall(function() clock:advance(5) end)
+    assert(not ok and problem:find("Simulated status callback failure", 1, true),
+        "Unexpected status errors must still reach the native error handler")
+    assert(current.dataState.status.timer and #clock.sent == 1,
+        "An interrupted status callback leaves its next tick scheduled")
+    current.DataStatusTick, values.level = tick, 25
+    clock:advance(5)
+    assert(#clock.sent == 2
+        and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000010|2|1=25$"),
+        "The next scheduled status tick publishes the latest values after recovery")
+    clock:advance(30)
+    assert(#clock.sent == 3
+        and clock.sent[3].message:match("^1|status|5|F|[^|]+|2000000040|2|1=25$"),
+        "Automatic recovery preserves the normal status heartbeat")
+end
+
 -- Status captures server time once for both the envelope and the coordinate
 -- sample. Integer wire values decode to normalized Lua coordinates.
 do

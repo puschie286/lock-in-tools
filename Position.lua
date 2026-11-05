@@ -186,11 +186,9 @@ function addon:UpdatePositionTimer()
     local generation = state.generation
     local function Tick()
         if state.generation ~= generation or not Active(self) then return end
-        state.timer = nil
+        -- Keep the next tick alive even if this one raises an unexpected error.
+        state.timer = C_Timer.NewTimer(INTERVAL, Tick)
         self:PositionTick()
-        if state.generation == generation and Active(self) then
-            state.timer = C_Timer.NewTimer(INTERVAL, Tick)
-        end
     end
     state.timer = C_Timer.NewTimer(INTERVAL, Tick)
 end
@@ -269,7 +267,10 @@ local function CurrentSample(self, stamp)
     if not Number(stamp, 0, MAX_POSITION_STAMP, true) then return nil end
     local state = self.positionState
     if not state.sample or state.sample.stamp ~= stamp then
-        local map, x, y = Sample()
+        -- Failed native map lookups mean unavailable coordinates, including in
+        -- status attachments; they must not prevent player-status broadcasts.
+        local ok, map, x, y = pcall(Sample)
+        if not ok then map = nil end
         if map then
             x = math.floor(x * COORDINATE_SCALE + 0.5)
             y = math.floor(y * COORDINATE_SCALE + 0.5)
