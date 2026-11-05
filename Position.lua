@@ -55,7 +55,6 @@ end
 
 local function Active(self)
     return self.positionState and self.ready and self:HasDataGroup()
-        and not (self.IsGroupSwitching and self:IsGroupSwitching())
         and self.db.position.sharing and not self.savedDataReadOnly
 end
 
@@ -107,9 +106,7 @@ function addon:InitializePositions()
     if type(settings.keepLastKnown) ~= "boolean" then settings.keepLastKnown = true end
     if type(settings.showPlayerIcons) ~= "boolean" then settings.showPlayerIcons = true end
     if type(settings.peers) ~= "table" then settings.peers = {} end
-    local fingerprint = self:GetGroupFingerprint()
-    if settings.groupFingerprint ~= fingerprint or not settings.keepLastKnown then settings.peers = {} end
-    settings.groupFingerprint = fingerprint
+    if not settings.keepLastKnown then settings.peers = {} end
     self.positionState = { peers = {}, latest = {}, classes = {}, generation = 0 }
     for sender, peer in pairs(settings.peers) do
         local name = type(peer) == "table" and SavedName(peer.name, sender)
@@ -241,16 +238,6 @@ function addon:SetPositionRetention(enabled)
     return true
 end
 
-function addon:OnPositionGroupChanged()
-    if not self.positionState then return end
-    self.positionState.peers, self.positionState.latest, self.positionState.classes = {}, {}, {}
-    ResetSendState(self)
-    self.db.position.peers = {}
-    self.db.position.groupFingerprint = self:GetGroupFingerprint()
-    self:UpdatePositionTimer()
-    Refresh(self)
-end
-
 local function Sample()
     if not C_Map or not C_Map.GetBestMapForUnit or not C_Map.GetPlayerMapPosition then return nil end
     local map = C_Map.GetBestMapForUnit("player")
@@ -380,7 +367,7 @@ end
 function addon:GetPositionStatusText(concise)
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
     if not self.db.position.sharing then return "Off." end
-    if not self:HasDataGroup() then return "Join a guild or a LockInTools group first." end
+    if not self:HasDataGroup() then return "Join a guild, party or raid with sharing enabled first." end
     if not self:IsDataConnected() then return "On. Waiting for a group connection." end
     if self.positionState.lastSendSucceeded == false then return "On. Group connection unavailable." end
     return concise and "On." or "On. Movement checks every 2 seconds; idle refresh with player status."

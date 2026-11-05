@@ -48,13 +48,7 @@ local function HideTooltip(widget)
     if GameTooltip and GameTooltip:IsOwned(widget) then GameTooltip:Hide() end
 end
 
-local function HidePageTooltips(page)
-    for _, widget in ipairs(page.tooltipOwners or {}) do HideTooltip(widget) end
-end
-
-local function OptionTooltip(page, widget, title, description)
-    page.tooltipOwners = page.tooltipOwners or {}
-    page.tooltipOwners[#page.tooltipOwners + 1] = widget
+local function OptionTooltip(widget, title, description)
     if widget.SetMotionScriptsWhileDisabled then widget:SetMotionScriptsWhileDisabled(true) end
     widget:HookScript("OnEnter", function()
         if not GameTooltip then return end
@@ -80,14 +74,8 @@ local function PreferenceLabel(page, checkbox, text, description, width)
         label:SetAlpha(enabled and 1 or 0.5)
     end)
     checkbox.labelButton = button
-    OptionTooltip(page, checkbox, text, description)
-    OptionTooltip(page, button, text, description)
-end
-
-local function RefreshKeyAction(panel)
-    local hasDraft = panel.secret:GetText():find("%S") ~= nil
-    local editable = not addon.savedDataReadOnly
-    panel.applyGroup:SetEnabled(editable and hasDraft)
+    OptionTooltip(checkbox, text, description)
+    OptionTooltip(button, text, description)
 end
 
 local function CreateView()
@@ -125,55 +113,6 @@ local function ShowPanel(panel)
     window:Raise()
 end
 
-local function ResetConfirmation(panel)
-    panel.pendingSecret = nil
-    panel.confirmLeave = false
-    panel.applyGroup:SetText("Use key")
-    panel.leaveGroup:SetText("Leave group")
-end
-
-local function ClearKeyDraft(panel)
-    panel.secret:ClearFocus()
-    panel.secret:SetText("")
-end
-
-local function ClearGroupKeys(panel)
-    HidePageTooltips(panel.pages.group)
-    ClearKeyDraft(panel)
-    panel.pages.group.showingKeys = false
-    panel.ownSecret:SetText("")
-    panel.ownSecret:ClearFocus()
-    ResetConfirmation(panel)
-end
-
-local function ApplyGroup(panel)
-    local secret = panel.secret:GetText():match("^%s*(.-)%s*$")
-    if secret:match("^%s*$") then
-        SetFeedback(panel, "Enter a group key first.", true)
-        return
-    end
-
-    if addon:HasGroup() and secret:lower() ~= addon:GetGroupSecret():lower()
-        and panel.pendingSecret ~= secret then
-        ResetConfirmation(panel)
-        panel.pendingSecret = secret
-        panel.applyGroup:SetText("Confirm switch")
-        SetFeedback(panel, "Click Confirm switch to change your group for all LockInTools features.", true)
-        return
-    end
-
-    local success, message = addon:SetGroupSecret(secret)
-    if not success then
-        ResetConfirmation(panel)
-        SetFeedback(panel, message or "Unable to save the group key.", true)
-        return
-    end
-
-    ResetConfirmation(panel)
-    ClearKeyDraft(panel)
-    SetFeedback(panel, "Group saved.", false)
-end
-
 local function BindPreference(panel, checkbox, getter, setter)
     checkbox:SetScript("OnClick", function(button)
         local success, message = setter(addon, button:GetChecked() and true or false)
@@ -182,7 +121,7 @@ local function BindPreference(panel, checkbox, getter, setter)
     end)
 end
 
-local function CreateTransparencyControl(panel, page, prefix, title, getter, setter, available)
+local function CreateTransparencyControl(panel, page, prefix, title, getter, setter)
     local help = CreateFrame("Frame", nil, page)
     panel[prefix .. "TransparencyHelp"] = help
     help:SetSize(308, 20)
@@ -216,7 +155,7 @@ local function CreateTransparencyControl(panel, page, prefix, title, getter, set
         page.updatingTransparency = nil
     end
     page.RefreshTransparency = function()
-        local editable = not addon.savedDataReadOnly and (not available or available())
+        local editable = not addon.savedDataReadOnly
         slider:SetEnabled(editable)
         help:SetAlpha(editable and 1 or 0.5)
         thumb:SetAlpha(editable and 1 or 0.5)
@@ -239,34 +178,33 @@ end
 local function CreateDataControls(panel, page)
     panel.dataChannels = {}
     local heading = UI:Label(page, "Data channels", 14, "heading")
-    heading:SetPoint("TOPLEFT", 16, -224)
+    heading:SetPoint("TOPLEFT", 16, -52)
 
     local channels = {
         { "party", "Party / raid", "Send and receive data with players in your current party or raid." },
         { "guild", "Guild", "Send and receive data with players in your guild." },
-        { "global", "Global channel", "Send and receive data through the additional global channel using your configured group key." },
     }
     for index, entry in ipairs(channels) do
         local channel = entry[1]
         local checkbox = UI:Checkbox(page)
-        checkbox:SetPoint("TOPLEFT", 12 + (index - 1) * 220, -250)
+        checkbox:SetPoint("TOPLEFT", 12, -78 - (index - 1) * 36)
         checkbox:SetSize(28, 28)
         panel.dataChannels[channel] = checkbox
         BindPreference(panel, checkbox, function() return addon:GetDataChannelEnabled(channel) end,
             function(_, enabled) return addon:SetDataChannelEnabled(channel, enabled) end)
         PreferenceLabel(page, checkbox, entry[2], entry[3]
             .. " Turning this off stops sending and receiving through this channel.\n\n"
-            .. "Changes apply immediately and save across reloads and characters.", 172)
+            .. "Changes apply immediately and save across reloads and characters.", 260)
     end
 
     panel.dataStatusHelp = CreateFrame("Frame", nil, page)
-    panel.dataStatusHelp:SetPoint("TOPLEFT", 16, -294)
-    panel.dataStatusHelp:SetSize(648, 72)
+    panel.dataStatusHelp:SetPoint("TOPLEFT", 16, -158)
+    panel.dataStatusHelp:SetSize(308, 112)
     panel.dataStatusHelp:EnableMouse(true)
     panel.dataStatus = UI:Label(page, "", 12, "muted")
     panel.dataStatus:SetPoint("TOPLEFT", panel.dataStatusHelp, "TOPLEFT", 0, 0)
-    panel.dataStatus:SetSize(648, 72)
-    OptionTooltip(page, panel.dataStatusHelp, "Data status", function() return addon:GetDataStatusText() end)
+    panel.dataStatus:SetSize(308, 112)
+    OptionTooltip(panel.dataStatusHelp, "Data status", function() return addon:GetDataStatusText() end)
 end
 
 local function GuideText(value)
@@ -282,12 +220,6 @@ local RESTEDXP_APPEARANCE_PREFERENCES = {
         description = "Right-click the scrollbar for guides; use /rxp for settings." },
 }
 
-local function RestedXPTransparency()
-    local value = type(addon.GetRestedXPBackgroundTransparency) == "function"
-        and addon:GetRestedXPBackgroundTransparency() or 0
-    return math.min(100, math.max(0, math.floor(value + 0.5)))
-end
-
 local function CreateRestedXPPage(panel)
     local page = UI:Section(panel, 20, 116, 680, 414, "RestedXP")
     panel.pages.restedxp = page
@@ -302,7 +234,7 @@ local function CreateRestedXPPage(panel)
     panel.restedxpBattleTag:SetSize(648, 30)
     panel.restedxpBattleTag:SetMaxLetters(128)
     panel.restedxpBattleTag:SetMaxBytes(128)
-    OptionTooltip(page, panel.restedxpBattleTag, "Export's source BattleTag",
+    OptionTooltip(panel.restedxpBattleTag, "Export's source BattleTag",
         "BattleTag this export was created for.")
 
     local exportLabel = UI:Label(page, "Guide export", 12, "muted")
@@ -342,24 +274,19 @@ local function CreateRestedXPPage(panel)
         checkbox:SetPoint("TOPLEFT", 12, -282 - (index - 1) * 32)
         checkbox:SetSize(28, 28)
         BindPreference(panel, checkbox,
-            function() return type(addon[getter]) == "function" and addon[getter](addon) == true end,
-            function(_, enabled)
-                if type(addon[setter]) ~= "function" then
-                    return false, "RestedXP styling is unavailable. Reload LockInTools and try again."
-                end
-                return addon[setter](addon, enabled)
-            end)
+            function() return addon[getter](addon) == true end,
+            function(_, enabled) return addon[setter](addon, enabled) end)
         PreferenceLabel(page, checkbox, preference.label, preference.description, 276)
     end
 
-    local help, slider = CreateTransparencyControl(panel, page, "restedxp", "Transparency", RestedXPTransparency,
-        function(value) return addon:SetRestedXPBackgroundTransparency(value) end,
-        function() return type(addon.SetRestedXPBackgroundTransparency) == "function" end)
+    local help, slider = CreateTransparencyControl(panel, page, "restedxp", "Transparency",
+        function() return addon:GetRestedXPBackgroundTransparency() end,
+        function(value) return addon:SetRestedXPBackgroundTransparency(value) end)
     help:SetPoint("TOPLEFT", 356, -286)
     slider:SetPoint("TOPLEFT", 360, -314)
     local transparencyHelp = "Fade LockInTools theme backgrounds and borders without fading text."
-    OptionTooltip(page, panel.restedxpTransparencyHelp, "Transparency", transparencyHelp)
-    OptionTooltip(page, slider, "Transparency", transparencyHelp)
+    OptionTooltip(panel.restedxpTransparencyHelp, "Transparency", transparencyHelp)
+    OptionTooltip(slider, "Transparency", transparencyHelp)
 
     panel.restedxpSkinStatus = UI:Label(page, "", 12, "muted")
     panel.restedxpSkinStatus:SetPoint("TOPLEFT", 16, -380)
@@ -484,7 +411,7 @@ local function CreateRestedXPPage(panel)
         addon:RefreshOptions()
     end)
     page:SetScript("OnShow", function()
-        local state = type(addon.GetRestedXPState) == "function" and addon:GetRestedXPState() or {}
+        local state = addon:GetRestedXPState()
         panel.restedxpBattleTag:SetText(type(state.sourceBattleTag) == "string" and state.sourceBattleTag or "")
     end)
     page:SetScript("OnHide", function() page.actionError = nil; ClearDraft() end)
@@ -494,17 +421,15 @@ end
 local function RefreshRestedXP(panel)
     local page = panel.pages.restedxp
     if not page or not page:IsVisible() then return end
-    local state = type(addon.GetRestedXPState) == "function" and addon:GetRestedXPState() or {}
+    local state = addon:GetRestedXPState()
     page.readOnly, page.busy, page.canImport = addon.savedDataReadOnly or state.readOnly, state.busy, state.canImport == true
     local notice = not state.installed and "RestedXP is required. Install and enable RestedXP to import guides."
         or state.problem or (not state.loaded and "Enable RestedXP to import guides.") or ""
     panel.restedxpNotice:SetText(GuideText(notice))
-    local skin = type(addon.GetRestedXPSkinState) == "function" and addon:GetRestedXPSkinState() or {}
+    local skin = addon:GetRestedXPSkinState()
     for _, preference in ipairs(RESTEDXP_APPEARANCE_PREFERENCES) do
-        panel[preference.field]:SetChecked(type(addon[preference.getter]) == "function"
-            and addon[preference.getter](addon) == true)
-        panel[preference.field]:SetEnabled(not addon.savedDataReadOnly
-            and type(addon[preference.setter]) == "function")
+        panel[preference.field]:SetChecked(addon[preference.getter](addon) == true)
+        panel[preference.field]:SetEnabled(not addon.savedDataReadOnly)
     end
     page.RefreshTransparency()
     panel.restedxpSkinStatus:SetText(GuideText(skin.problem or skin.status))
@@ -519,184 +444,8 @@ end
 local function CreateOptionsPanel()
     local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
-    local group = UI:Section(panel, 20, 116, 680, 414, "Your group")
-    panel.pages.group = group
-
-    panel.groupStatus = UI:Label(group, "", 13, "muted")
-    panel.groupStatus:SetPoint("TOPLEFT", 16, -46)
-    panel.groupStatus:SetWidth(648)
-
-    panel.groupInfo = UI:Button(group, "Group info")
-    panel.groupInfo:SetPoint("TOPRIGHT", -16, -12)
-    panel.groupInfo:SetSize(100, 28)
-    OptionTooltip(group, panel.groupInfo, "Group info", function()
-        local text = "One key connects all your characters and every LockInTools feature.\n\n"
-            .. "Friends must be on the same realm and faction."
-        local fingerprint = addon:GetGroupFingerprint()
-        if addon:IsGroupSwitching() then
-            text = text .. "\n\nLeaving the previous group before connecting."
-        elseif fingerprint then
-            text = text .. "\n\nGroup ID: " .. fingerprint
-                .. "\nCompare this ID with a friend to check that you share a group."
-        end
-        return text
-    end)
-
-    local introduction = UI:Label(group, "Share your key or use a friend's to connect.", 14)
-    introduction:SetPoint("TOPLEFT", 16, -74)
-    introduction:SetWidth(648)
-
-    local ownLabel = UI:Label(group, "Share your key", 13, "muted")
-    ownLabel:SetPoint("TOPLEFT", 16, -108)
-
-    panel.ownSecret = UI:EditBox(group)
-    panel.ownSecret:SetPoint("TOPLEFT", 16, -132)
-    panel.ownSecret:SetSize(500, 34)
-    panel.ownSecret:SetAutoFocus(false)
-    panel.ownSecret:SetScript("OnTextChanged", function(editBox)
-        local secret = group.showingKeys and addon:GetGroupSecret() or ""
-        if editBox:GetText() ~= secret then editBox:SetText(secret) end
-    end)
-    panel.ownSecret:SetScript("OnEditFocusGained", function(editBox) editBox:HighlightText() end)
-    panel.ownSecret:SetScript("OnEscapePressed", function(editBox) editBox:ClearFocus() end)
-    panel.ownSecret:SetScript("OnEnterPressed", function(editBox) editBox:ClearFocus() end)
-
-    panel.selectKey = UI:Button(group, "Select key")
-    panel.selectKey:SetPoint("TOPLEFT", 528, -132)
-    panel.selectKey:SetSize(132, 34)
-    panel.selectKey:SetScript("OnClick", function()
-        panel.ownSecret:SetFocus()
-        panel.ownSecret:HighlightText()
-    end)
-    OptionTooltip(group, panel.ownSecret, "Your saved key",
-        "Share this key with friends to invite them. This field is for copying; it cannot change your group.")
-    OptionTooltip(group, panel.selectKey, "Select key", "Select your saved key, then press Ctrl+C to copy it.")
-
-    local copyHint = UI:Label(group, "Select key, then press Ctrl+C to copy.", 12, "muted")
-    copyHint:SetPoint("TOPLEFT", 16, -174)
-
-    panel.newKeyLabel = UI:Label(group, "Join a group", 13, "muted")
-    panel.newKeyLabel:SetPoint("TOPLEFT", 16, -216)
-
-    panel.secret = UI:EditBox(group)
-    panel.secret:SetPoint("TOPLEFT", 16, -240)
-    panel.secret:SetSize(500, 34)
-    panel.secret:SetAutoFocus(false)
-    panel.secret:SetScript("OnEscapePressed", function(editBox)
-        editBox:ClearFocus()
-    end)
-    panel.secret:SetScript("OnEnterPressed", function()
-        ApplyGroup(panel)
-    end)
-    panel.secret:SetScript("OnTextChanged", function(_, userInput)
-        RefreshKeyAction(panel)
-        if userInput then
-            ResetConfirmation(panel)
-            SetFeedback(panel)
-        end
-    end)
-
-    panel.applyGroup = UI:Button(group, "Use key", "primary")
-    panel.applyGroup:SetSize(132, 34)
-    panel.applyGroup:SetPoint("TOPLEFT", 528, -240)
-    panel.applyGroup:SetScript("OnClick", function()
-        ApplyGroup(panel)
-    end)
-    OptionTooltip(group, panel.secret, "Group key", "Enter a friend's key, or generate a key for a new group.")
-    OptionTooltip(group, panel.applyGroup, "Use key",
-        "Save the entered key for every LockInTools feature. Switching groups requires confirmation.")
-
-    panel.createGroup = UI:Button(group, "Generate key")
-    panel.createGroup:SetSize(132, 30)
-    panel.createGroup:SetPoint("TOPLEFT", 16, -286)
-    panel.createGroup:SetScript("OnClick", function()
-        ResetConfirmation(panel)
-        local key, message = addon:GenerateGroupKey()
-        if not key then
-            SetFeedback(panel, message or "Unable to create a group key.", true)
-            return
-        end
-
-        panel.secret:SetText(key)
-        panel.secret:SetFocus()
-        panel.secret:HighlightText()
-        SetFeedback(panel, "New key ready. Click Use key to save it.", false)
-    end)
-    OptionTooltip(group, panel.createGroup, "Generate key",
-        "Prepare a key for a new group. Your current group stays active until you choose Use key and confirm any switch.")
-
-    panel.leaveGroup = UI:Button(group, "Leave group", "danger")
-    panel.leaveGroup:SetSize(132, 30)
-    panel.leaveGroup:SetPoint("TOPRIGHT", -20, -336)
-    panel.leaveGroup:SetScript("OnClick", function()
-        if not panel.confirmLeave then
-            ResetConfirmation(panel)
-            panel.confirmLeave = true
-            panel.leaveGroup:SetText("Confirm leave")
-            SetFeedback(panel, "Click Confirm leave to remove this group from every LockInTools feature.", true)
-            return
-        end
-
-        local success, message = addon:LeaveGroup()
-        ResetConfirmation(panel)
-        if not success then
-            SetFeedback(panel, message or "Unable to leave the group.", true)
-            return
-        end
-
-        ClearKeyDraft(panel)
-        SetFeedback(panel, "Group removed. You can rejoin with its key.", false)
-    end)
-    OptionTooltip(group, panel.leaveGroup, "Leave group",
-        "Remove this group from every LockInTools feature and clear its cached players. You can rejoin with the same key. Confirmation is required.")
-
-    group:SetScript("OnShow", function()
-        group.showingKeys = true
-        addon:RefreshOptions()
-    end)
-    group:SetScript("OnHide", function() ClearGroupKeys(panel) end)
-
     local sharing = UI:Section(panel, 20, 116, 680, 414, "Sharing")
     panel.pages.sharing = sharing
-    local chatHeading = UI:Label(sharing, "Shared chat", 14, "heading")
-    chatHeading:SetPoint("TOPLEFT", 16, -52)
-
-    panel.autoJoin = UI:Checkbox(sharing)
-    panel.autoJoin:SetPoint("TOPLEFT", 12, -78)
-    panel.autoJoin:SetSize(28, 28)
-    BindPreference(panel, panel.autoJoin, function() return addon.db.chat.autoJoin end, addon.SetChatAutoJoin)
-    PreferenceLabel(sharing, panel.autoJoin, "Join automatically on login",
-        "Join your group's chat when you log in. Enabling this also connects now; disabling it keeps an existing chat connection.", 260)
-
-    panel.chatStatusHelp = CreateFrame("Frame", nil, sharing)
-    panel.chatStatusHelp:SetPoint("TOPLEFT", 16, -158)
-    panel.chatStatusHelp:SetSize(308, 48)
-    panel.chatStatusHelp:EnableMouse(true)
-    panel.status = UI:Label(sharing, "", 12, "muted")
-    panel.status:SetPoint("TOPLEFT", panel.chatStatusHelp, "TOPLEFT", 0, 0)
-    panel.status:SetWidth(308)
-    OptionTooltip(sharing, panel.chatStatusHelp, "Chat status", function() return addon:GetChatStatusText() end)
-
-    panel.join = UI:Button(sharing, "Join chat")
-    panel.join:SetSize(96, 32)
-    panel.join:SetPoint("TOPLEFT", 16, -118)
-    panel.join:SetScript("OnClick", function()
-        SetFeedback(panel)
-        addon:JoinChatChannel(true)
-    end)
-    OptionTooltip(sharing, panel.join, "Join chat",
-        "Connect or retry your group's chat channel. Friends need the same group key, realm and faction. This does not change your login preference.")
-
-    panel.leave = UI:Button(sharing, "Leave chat")
-    panel.leave:SetSize(96, 32)
-    panel.leave:SetPoint("LEFT", panel.join, "RIGHT", 8, 0)
-    panel.leave:SetScript("OnClick", function()
-        SetFeedback(panel)
-        addon:LeaveChatChannel()
-    end)
-    OptionTooltip(sharing, panel.leave, "Leave chat",
-        "Leave chat and pause reconnection for this session. Your group, position sharing and login preference stay unchanged.")
-
     local positionHeading = UI:Label(sharing, "Shared positions", 14, "heading")
     positionHeading:SetPoint("TOPLEFT", 356, -52)
 
@@ -706,8 +455,8 @@ local function CreateOptionsPanel()
     BindPreference(panel, panel.positionSharing, function() return addon.db.position.sharing end,
         addon.SetPositionSharing)
     PreferenceLabel(sharing, panel.positionSharing, "Enable position sharing",
-        "Send and receive your group's locations. Turning this off hides player icons and stops position exchange.\n\n"
-            .. "Friends need the same group key, realm and faction. Shared chat can stay disconnected.", 260)
+        "Send and receive locations through enabled party, raid and guild data channels. "
+            .. "Turning this off hides player icons and stops position exchange.", 260)
 
     panel.positionRetention = UI:Checkbox(sharing)
     panel.positionRetention:SetPoint("TOPLEFT", 352, -114)
@@ -725,7 +474,7 @@ local function CreateOptionsPanel()
     panel.positionStatus = UI:Label(sharing, "", 12, "muted")
     panel.positionStatus:SetPoint("TOPLEFT", panel.positionStatusHelp, "TOPLEFT", 0, 0)
     panel.positionStatus:SetWidth(308)
-    OptionTooltip(sharing, panel.positionStatusHelp, "Position status", function()
+    OptionTooltip(panel.positionStatusHelp, "Position status", function()
         return addon:GetPositionStatusText() .. "\n\nTo hide player icons while sharing continues, use the world map's LockInTools filter."
     end)
     CreateDataControls(panel, sharing)
@@ -733,7 +482,7 @@ local function CreateOptionsPanel()
     local ranking = UI:Section(panel, 20, 116, 680, 414, "Player ranking")
     panel.pages.ranking = ranking
     local rankingIntroduction = UI:Label(ranking,
-        "Compare your group's level and XP progress while you play.", 14)
+        "Compare players' level and XP progress while you play.", 14)
     rankingIntroduction:SetPoint("TOPLEFT", 16, -50)
     rankingIntroduction:SetWidth(648)
 
@@ -743,7 +492,7 @@ local function CreateOptionsPanel()
     BindPreference(panel, panel.rankingEnabled, function() return addon:GetRankingSettings().enabled end,
         addon.SetRankingEnabled)
     PreferenceLabel(ranking, panel.rankingEnabled, "Show ranking overlay",
-        "Show the top five characters, plus your own rank when outside the top five. Chat and position sharing can stay off.\n\n"
+        "Show the top five characters, plus your own rank when outside the top five. Position sharing can stay off.\n\n"
             .. "This preference saves across reloads and characters.")
 
     panel.rankingBurningEffect = UI:Checkbox(ranking)
@@ -762,8 +511,8 @@ local function CreateOptionsPanel()
     slider:SetPoint("TOPLEFT", 20, -210)
     local transparencyHelp = "Fade the ranking overlay's background and border while keeping player rows and meters readable.\n\n"
         .. "Changes apply immediately and save across reloads and characters."
-    OptionTooltip(ranking, panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
-    OptionTooltip(ranking, slider, "Background transparency", transparencyHelp)
+    OptionTooltip(panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
+    OptionTooltip(slider, "Background transparency", transparencyHelp)
 
     local playerData = UI:Section(panel, 20, 116, 680, 414, "Player data")
     panel.pages.playerData = playerData
@@ -804,17 +553,15 @@ local function CreateOptionsPanel()
         SetFeedback(panel, success and "Player data cleared. Active players can appear again as updates arrive."
             or (message or "Unable to clear player data."), not success)
     end)
-    OptionTooltip(playerData, panel.clearPlayerData, "Clear all player data",
+    OptionTooltip(panel.clearPlayerData, "Clear all player data",
         "Remove all cached player history and last-known positions. Confirmation is required.\n\n"
             .. "Active players can appear again through fresh updates, and your current character remains visible. "
-            .. "Your group key, preferences and personal Burned status stay saved.")
+            .. "Your preferences and personal Burned status stay saved.")
     playerData:SetScript("OnHide", ResetPlayerDataConfirmation)
 
     CreateRestedXPPage(panel)
 
     for _, page in pairs(panel.pages) do
-        local tooltipPage = page
-        page:HookScript("OnHide", function() HidePageTooltips(tooltipPage) end)
         page.feedback = UI:Label(page, "", 13)
         page.feedback:SetPoint("BOTTOMLEFT", 16, 16)
         page.feedback:SetSize(648, 26)
@@ -822,24 +569,20 @@ local function CreateOptionsPanel()
 
     local function SelectTab(name)
         -- Keep existing callers of the former pages opening the combined controls.
-        if name == "chat" or name == "position" or name == "data" then name = "sharing" end
+        if name == "position" or name == "data" then name = "sharing" end
         if not panel.pages[name] then return end
         if panel.selectedTab == name then return end
-        if panel.selectedTab == "group" then
-            ClearGroupKeys(panel)
-        end
         panel.selectedTab = name
         panel.feedback = panel.pages[name].feedback
         for category, page in pairs(panel.pages) do
             if category == name then page:Show() else page:Hide() end
             UI:SetTabSelected(panel.tabs[category], category == name)
         end
-        group.showingKeys = name == "group" and panel:IsVisible()
         SetFeedback(panel)
         addon:RefreshOptions()
     end
     panel.SelectTab = SelectTab
-    local categories = { { "group", "Group", 88 }, { "sharing", "Sharing", 104 },
+    local categories = { { "sharing", "Sharing", 104 },
         { "ranking", "Ranking", 96 }, { "playerData", "Player data", 116 }, { "restedxp", "RestedXP", 110 } }
     local tabX = 20
     for _, category in ipairs(categories) do
@@ -851,7 +594,7 @@ local function CreateOptionsPanel()
         panel.tabs[name] = tab
         tabX = tabX + category[3] + 10
     end
-    SelectTab("group")
+    SelectTab("sharing")
 
     panel.content = UI:Button(panel, "Content")
     panel.content:SetPoint("TOPRIGHT", -54, -12)
@@ -859,20 +602,11 @@ local function CreateOptionsPanel()
     panel.content:SetScript("OnClick", function() addon:OpenContent() end)
 
     panel:SetScript("OnShow", function()
-        ResetConfirmation(panel)
-        ClearKeyDraft(panel)
-        group.showingKeys = panel.selectedTab == "group"
-        panel.autoJoin:SetChecked(addon.db.chat.autoJoin)
         panel.positionSharing:SetChecked(addon.db.position.sharing)
         panel.positionRetention:SetChecked(addon.db.position.keepLastKnown)
         SetFeedback(panel)
         addon:RefreshOptions()
     end)
-    panel:SetScript("OnHide", function()
-        for _, page in pairs(panel.pages) do HidePageTooltips(page) end
-        ClearGroupKeys(panel)
-    end)
-
     return panel
 end
 
@@ -882,26 +616,10 @@ function addon:RefreshOptions()
         return
     end
 
-    local hasGroup, switching = self:HasGroup(), self:IsGroupSwitching()
-    panel.groupStatus:SetText(switching and "Leaving previous group..." or hasGroup and "Group configured"
-        or (self.invalidGroupSecret and "Saved key needs replacing" or "No group yet"))
-    panel.newKeyLabel:SetText(hasGroup and "Use a different key" or "Join a group")
-    panel.status:SetText("Status: " .. self:GetChatStatusText(true))
     panel.positionStatus:SetText("Sharing: " .. self:GetPositionStatusText(true))
     panel.dataStatus:SetText(self:GetDataStatusText())
 
-    local secret = panel.pages.group.showingKeys and self:GetGroupSecret() or ""
-    if panel.ownSecret:GetText() ~= secret then panel.ownSecret:SetText(secret) end
-    panel.ownSecret:SetEnabled(secret ~= "")
-    panel.selectKey:SetEnabled(secret ~= "")
-
-    -- Status events must preserve the group key being edited.
     local editable = not self.savedDataReadOnly
-    panel.secret:SetEnabled(editable)
-    RefreshKeyAction(panel)
-    panel.createGroup:SetEnabled(editable)
-    panel.leaveGroup:SetEnabled(editable and hasGroup)
-    panel.autoJoin:SetEnabled(editable)
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
     panel.playerDataCleanup:SetChecked(self:GetPlayerDataCleanupEnabled())
@@ -917,14 +635,9 @@ function addon:RefreshOptions()
     panel.rankingBurningEffect:SetChecked(ranking.burningEffect)
     panel.rankingBurningEffect:SetEnabled(editable)
     panel.pages.ranking.RefreshTransparency()
-    panel.join:SetEnabled(self.ready and hasGroup and not switching)
-    panel.leave:SetEnabled(self.ready and hasGroup and not switching)
     RefreshRestedXP(panel)
     if not editable then
-        ClearKeyDraft(panel)
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
-    elseif self.invalidGroupSecret and panel.selectedTab == "group" then
-        SetFeedback(panel, "Your saved key is invalid. Enter a friend's key or generate a new one.", true)
     end
 end
 
@@ -979,8 +692,6 @@ local function RefreshContentFeedback(self)
     if not panel or not self.initialized then return end
     if self.savedDataReadOnly then
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
-    elseif self.invalidGroupSecret then
-        SetFeedback(panel, "Your saved key is invalid. Open Settings > Group to replace it.", true)
     end
 end
 
@@ -996,25 +707,10 @@ function addon:OpenContent()
         return
     end
 
-    local problem
-    -- Initial setup is separate from current sharing preferences: a keyless
-    -- guild user must not acquire a key just by disabling Guild or reopening.
-    if self.db.setupComplete ~= true and not self:HasGroup() and not self:HasGuild()
-        and not self.invalidGroupSecret and not self.savedDataReadOnly then
-        local key
-        key, problem = self:GenerateGroupKey()
-        if key then
-            local success
-            success, problem = self:SetGroupSecret(key)
-            if success then problem = nil end
-        end
-    end
-
     if not self.contentPanel then self.contentPanel = CreateContentPanel() end
     ShowPanel(self.contentPanel)
     self:RefreshContent()
-    if problem then SetFeedback(self.contentPanel, problem, true) end
-    if not problem and not self.invalidGroupSecret and not self.savedDataReadOnly then
+    if not self.savedDataReadOnly then
         self.db.setupComplete = true
     end
 end
@@ -1024,7 +720,6 @@ function addon:OpenWelcome()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "CHAT_CHANGED", "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED" }) do
+for _, notification in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
 end
-addon:RegisterNotification("GROUP_CHANGED", function() RefreshContentFeedback(addon) end)

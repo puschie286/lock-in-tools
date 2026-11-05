@@ -63,14 +63,6 @@ local function Busy(rxp)
     return frame and type(frame.GetScript) == "function" and frame:GetScript("OnUpdate") ~= nil
 end
 
-local messages = {
-    importing = "Importing guides in RestedXP...",
-    completed = "RestedXP completed the import.",
-    failed = "RestedXP reported an import error. Check its import window.",
-    cancelled = "The RestedXP import was cancelled or replaced.",
-    unknown = "RestedXP import progress is unavailable. Check its import window.",
-}
-
 local function Detach(job)
     if job.timer then job.timer:Cancel(); job.timer = nil end
     if tracking == job then tracking = nil end
@@ -83,7 +75,7 @@ local function Emit(job, phase)
     job.lastPhase, job.lastCurrent, job.lastTotal = phase, current, total
     if phase ~= "importing" then Detach(job) end
     -- Callback failures must never interrupt RestedXP's native worker.
-    pcall(job.callback, phase, current, total, messages[phase])
+    pcall(job.callback, phase, current, total)
 end
 
 local function FlushSoon(job)

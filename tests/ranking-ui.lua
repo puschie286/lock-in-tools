@@ -1,7 +1,7 @@
 -- This offline suite is never loaded by the addon.
 local fixture = dofile("tests/support/addon.lua")
 local loadAddon, settings = fixture.loadAddon, fixture.settings
-local SECRET, OTHER_SECRET, contains = fixture.SECRET, fixture.OTHER_SECRET, fixture.contains
+local SECRET = fixture.SECRET
 local loadOverlay = dofile("tests/support/ui.lua")
 
 local function placed(window, parent, point, relativePoint, x, y)
@@ -18,7 +18,7 @@ end
 -- Visibility is independent of the main window and dismissal survives subsequent data events.
 do
     local saved = settings(SECRET, false)
-    local ranking, api, messages, _, world = loadAddon(saved, false)
+    local ranking, api, _, _, world = loadAddon(saved, false)
     world:initialize()
     loadOverlay(ranking, api)
     local command = api.SlashCmdList.LOCKINTOOLS
@@ -48,18 +48,15 @@ do
         "the overlay close button saves disabled and stops refresh work")
     ranking:Notify("ROSTER_CHANGED")
     ranking:Notify("DATA_CHANGED")
-    ranking:Notify("GROUP_CHANGED")
     ranking:Notify("BURNED_CHANGED")
     ranking:RefreshRankingOverlay()
     assert(not panel:IsShown() and not panel.scripts.OnUpdate,
-        "status, connection and group events cannot reopen a dismissed overlay")
+        "status and connection events cannot reopen a dismissed overlay")
     command("ranking on")
     assert(panel:IsVisible() and saved.ranking.enabled and panel.header.mouseEnabled,
         "the explicit on command immediately shows ranking with its Shift-drag header available")
     command("ranking off")
     assert(not saved.ranking.enabled and not panel:IsShown(), "the explicit off command hides and persists ranking")
-    assert(not contains(messages, SECRET) and not contains(messages, OTHER_SECRET),
-        "ranking visibility never logs group keys")
 end
 
 -- Transparency fades window decoration independently of foreground content and other windows.
@@ -102,15 +99,14 @@ do
     end
     decorationAlpha(0.5)
     foregroundVisible()
-    local statusSends, rosterSends, dataSends = #world.statusSends, #world.rosterSends, #world.dataSends
+    local statusSends, dataSends = #world.statusSends, #world.dataSends
     for _, value in ipairs({ 100, 0, 50, 100 }) do
         slider:SetValue(value)
         decorationAlpha(1 - value / 100)
         foregroundVisible()
         assert(saved.ranking.backgroundTransparency == value and panel:IsVisible()
             and ranking.rankingOverlay == panel and panel.rows[1] == first and panel.rows[2] == second
-            and #world.statusSends == statusSends and #world.rosterSends == rosterSends
-            and #world.dataSends == dataSends,
+            and #world.statusSends == statusSends and #world.dataSends == dataSends,
             "dragging updates the existing overlay immediately without changing group traffic")
     end
     panel.CloseButton:Click()
@@ -139,6 +135,7 @@ do
     local ranking, api, _, _, world = loadAddon(saved, false)
     local shiftDown = false
     api.IsShiftKeyDown = function() return shiftDown end
+    world.guild = true
     world:initialize()
     loadOverlay(ranking, api)
     assert(ranking:SetRankingEnabled(true))
@@ -265,8 +262,8 @@ do
     local saved = settings(SECRET, false)
     saved.burned = { status = 20 }
     local ranking, api, _, _, world = loadAddon(saved, false)
+    world.guild = true
     world:initialize()
-    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
     loadOverlay(ranking, api)
     assert(ranking:SetRankingEnabled(true))
     local panel = ranking.rankingOverlay
@@ -277,7 +274,7 @@ do
         return setBurned(self, value)
     end
     local function sends()
-        return #world.dataSends + #world.statusSends + #world.rosterSends + #world.guideSends
+        return #world.dataSends + #world.statusSends
     end
     personal.scripts.OnMouseDown(personal, "LeftButton")
     personal.scripts.OnMouseUp(personal, "LeftButton")
@@ -349,8 +346,8 @@ do
     local saved = settings(SECRET, false)
     saved.burned = { status = 69 }
     local ranking, api, _, _, world = loadAddon(saved, false)
+    world.guild = true
     world:initialize()
-    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
     loadOverlay(ranking, api)
     local groupState = { average = 69.9, count = 2 }
     ranking.GetGroupBurnedStatus = function() return groupState end
@@ -392,7 +389,7 @@ do
             and meter.fill:GetWidth() == meter:GetWidth() * fraction
     end
     local function sends()
-        return #world.dataSends + #world.statusSends + #world.rosterSends + #world.guideSends
+        return #world.dataSends + #world.statusSends
     end
 
     groupState.average = 70
@@ -521,7 +518,7 @@ do
     loadOverlay(ranking, api)
     assert(ranking:SetRankingEnabled(true))
     local personal = ranking.rankingOverlay.personalBurned
-    assert(not ranking:HasGroup() and personal:IsEnabled()
+    assert(not ranking:IsDataConnected() and personal:IsEnabled()
         and personal:GetValue() == 19 and saved.burned.status == 19,
         "personal burned status remains editable without a group and opening preserves a saved value between fixed points")
     personal:SetValue(67)
@@ -575,8 +572,7 @@ do
         row("Echo", 5, 24, 500, 1000), own,
     }
     players[1].name, own.name = "Alpha-RemoteRealm", "Self-HomeRealm"
-    local state = { players = players, own = own, connected = true, grouped = true,
-        awaiting = 2, stale = 2, inactive = 4 }
+    local state = { players = players, own = own, connected = true, grouped = true }
     players[1].stale, players[4].stale = true, true
     ranking.GetPlayerRanking = function() return state end
     assert(ranking:SetRankingEnabled(true))
@@ -600,7 +596,6 @@ do
         "maximum level and percentages omit stale prefixes while saved rows stay dim and near-level XP stays below 100 percent")
     players[1], own.rank = own, 1
     state.players = { own }
-    state.stale, state.awaiting = 0, 0
     ranking:Notify("ROSTER_CHANGED")
     assert(panel.rows[1].player == own and panel.rows[1].highlight:IsShown()
         and panel.rows[1].name:GetText() == "Self"
@@ -620,7 +615,7 @@ do
             "unused pooled rows clear names, targets, ranks, progress and highlighting")
     end
     own.xp, own.xpMax, own.xpState, own.rank = nil, nil, "unavailable", nil
-    state.players, state.awaiting, state.stale = {}, 1, 0
+    state.players = {}
     ranking:RefreshRankingOverlay()
     assert(panel.ownRow:IsShown() and panel.ownRow.player == own
         and panel.ownRow.progress:GetText() == "Waiting for XP"
@@ -628,8 +623,8 @@ do
         and not panel.ownRow.rank:GetText():find("%d") and not panel.ownRow.progressTrack:IsShown(),
         "missing local XP uses the first row without duplicate empty messages or an invented rank")
     state.grouped, state.own = false, nil
-    ranking:Notify("GROUP_CHANGED")
-    assert(panel.empty:IsShown() and panel.empty:GetText():find("group", 1, true)
+    ranking:Notify("ROSTER_CHANGED")
+    assert(panel.empty:IsShown() and panel.empty:GetText():find("guild", 1, true)
         and not panel.rows[1]:IsShown() and not panel.rows[1].player,
         "leaving the group clears all player rows while leaving the chosen overlay visible")
 end
@@ -693,7 +688,7 @@ do
     assert(first.progress:GetText() == "65%" and near(first.progressFill:GetWidth(), width),
         "a second gain retargets from the visible fill without jumping to the previous target")
     local beforeReads = reads
-    local beforeSends = #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends
+    local beforeSends = #world.statusSends + #world.dataSends
     local timerCalls, after, newTimer = 0, api.C_Timer.After, api.C_Timer.NewTimer
     api.C_Timer.After = function(...) timerCalls = timerCalls + 1; return after(...) end
     api.C_Timer.NewTimer = function(...) timerCalls = timerCalls + 1; return newTimer(...) end
@@ -704,7 +699,7 @@ do
     assert(near(first.progressFill:GetWidth(), 174 * 0.65) and not first.progressGain:IsShown()
         and not panel.xpAnimator.scripts.OnUpdate and descendants(panel) == regions
         and reads == beforeReads and timerCalls == 0
-        and #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends == beforeSends,
+        and #world.statusSends + #world.dataSends == beforeSends,
         "animation frames reuse regions, finish long frames once and never read rankings, schedule timers or send status")
     own.xp = 651
     ranking:RefreshRankingOverlay()
@@ -855,7 +850,7 @@ do
         "a direct hide and refresh also discard unfinished motion and establish a current baseline")
 end
 
--- Row motion and XP follow player identity across leaders, the own row and group changes.
+-- Row motion and XP follow player identity across leaders, the own row and roster changes.
 do
     local function near(actual, expected) return math.abs(actual - expected) < 0.000001 end
     local function position(widget) return -select(5, widget:GetPoint()) end
@@ -928,7 +923,7 @@ do
         assert(near(position(moving), movingY) and near(position(displaced), displacedY),
             "unchanged full repaints and the standings timer preserve visible ranking positions")
         local reads = state.reads
-        local sends = #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends
+        local sends = #world.statusSends + #world.dataSends
         local timerCalls, after, newTimer = 0, api.C_Timer.After, api.C_Timer.NewTimer
         api.C_Timer.After = function(...) timerCalls = timerCalls + 1; return after(...) end
         api.C_Timer.NewTimer = function(...) timerCalls = timerCalls + 1; return newTimer(...) end
@@ -941,7 +936,7 @@ do
             and not panel.rowAnimator.scripts.OnUpdate and not moving.motionBacking:IsShown()
             and state.reads == reads and timerCalls == 0
             and descendants(panel) == regions
-            and #world.statusSends + #world.rosterSends + #world.dataSends + #world.guideSends == sends,
+            and #world.statusSends + #world.dataSends == sends,
             "rows settle at exactly 700 ms without allocation, ranking reads, timers or group traffic")
     end
 
@@ -1093,10 +1088,11 @@ do
             and descendants(panel) == regions and not panel.rowAnimator.scripts.OnUpdate,
             "finished exits release their snapshots and reuse the fixed ghost pool without allocating rows")
         state.grouped, state.players, state.own = false, {}, nil
-        ranking:Notify("GROUP_CHANGED")
+        ranking:Notify("ROSTER_CHANGED")
+        panel.rowAnimator:AdvanceFrame(1)
         assert(count(panel.xpProgress) == 0 and not panel.xpAnimator.scripts.OnUpdate
             and count(panel.rowMotion) == 0 and not panel.rowAnimator.scripts.OnUpdate,
-            "leaving a group clears both presentation states and animation callbacks")
+            "empty standings release both presentation states and animation callbacks")
     end
 
     do
@@ -1169,12 +1165,14 @@ do
         panel.xpAnimator:AdvanceFrame(0.1)
         own.xp, own.rank, players[2].rank = 800, 2, 3
         state.players = { players[1], own, players[2], players[3] }
-        ranking:Notify("GROUP_CHANGED")
+        ranking:Notify("ROSTER_CHANGED")
+        panel.rowAnimator:AdvanceFrame(1)
+        panel.xpAnimator:AdvanceFrame(1)
         assert(near(position(panel.rows[2]), 34) and not panel.rowAnimator.scripts.OnUpdate
             and activeGhosts(panel) == 0 and count(panel.xpProgress) == 4
             and near(panel.rows[2].progressFill:GetWidth(), 174 * 0.8)
             and not panel.rows[2].progressGain:IsShown() and not panel.xpAnimator.scripts.OnUpdate,
-            "switching groups resets positions and active XP gains even when player identities overlap")
+            "updated standings settle positions and active XP gains for the same player identities")
         own.xp, own.rank, players[1].rank = 900, 1, 2
         state.players = { own, players[1], players[2], players[3] }
         ranking:RefreshRankingOverlay()
@@ -1184,11 +1182,12 @@ do
         assert(panel.moving and not panel.rowAnimator.scripts.OnUpdate and near(position(panel.rows[1]), 0),
             "starting a Shift drag settles unfinished row motion before moving the overlay")
         panel.rows[1].scripts.OnDragStop(panel.rows[1])
-        state.switching = true
-        ranking:Notify("GROUP_CHANGED")
+        state.grouped, state.players, state.own = false, {}, nil
+        ranking:Notify("ROSTER_CHANGED")
+        panel.rowAnimator:AdvanceFrame(1)
         assert(count(panel.rowMotion) == 0 and activeGhosts(panel) == 0
             and not panel.rowAnimator.scripts.OnUpdate,
-            "unavailable standings during group switching clear all row animation state")
+            "empty standings release all row animation state")
     end
 end
 
@@ -1197,8 +1196,8 @@ end
 do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world.level = 24
+    world.guild = true
     world:initialize()
-    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
     api.C_Map.GetMapInfo = function(map)
         return { name = map == 37 and "Elwynn Forest" or "Westfall" }
     end
@@ -1419,7 +1418,7 @@ end
 -- Ranking targets current players without constructing Content; row reuse clears old interactions.
 do
     local saved = settings(SECRET, false)
-    local ranking, api, messages, _, world = loadAddon(saved, false)
+    local ranking, api, _, _, world = loadAddon(saved, false)
     local invites, requests, mayInvite, grouped = {}, {}, true, false
     local shiftDown = false
     api.IsShiftKeyDown = function() return shiftDown end
@@ -1436,8 +1435,8 @@ do
         api.WorldMapFrame = { IsShown = function() return true end, GetMapID = function() return map end,
             GetCanvasScale = function() return 1 end, InstantPanAndZoom = function() end }
     end
+    world.guild = true
     world:initialize()
-    world:completeJoin(ranking:GetGroupDataChannelName(), 7)
     assert(ranking:ReceivePosition("Alpha-TestRealm", "2|P|" .. api.GetServerTime() .. "|38|25000|75000"))
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo" }) do
         assert(ranking:ReceivePlayerStatus(name .. "-TestRealm", {
@@ -1523,14 +1522,12 @@ do
     panel.rows[2].scripts.OnDragStart(panel.rows[2], "LeftButton")
     panel:SetPoint("TOPLEFT", api.UIParent, "TOPLEFT", 145, -75)
     assert(panel.moving and panel.dragHandle == panel.rows[2], "a player row owns its active Shift drag")
-    assert(ranking:LeaveGroup())
-    assert(not menu:IsShown() and not tooltip:IsShown() and not panel.rows[1]:IsShown()
+    assert(ranking:ClearPlayerData())
+    assert(not menu:IsShown() and not tooltip:IsShown() and panel.rows[1].player.isSelf
         and not panel.moving and not panel.dragHandle
         and saved.ranking.position.point == "TOPLEFT" and saved.ranking.position.x == 145
         and saved.ranking.position.y == -75,
-        "removing a dragged player after a group change stops and saves movement and clears old interactions")
-    assert(not contains(messages, SECRET) and not contains(messages, OTHER_SECRET),
-        "ranking action feedback never logs group credentials")
+        "clearing a dragged player stops and saves movement and clears old interactions")
 end
 
 -- Shift movement saves account-wide placement without disabling player interaction.
@@ -1543,6 +1540,7 @@ do
     api.IsShiftKeyDown = function() return shiftDown end
     loadOverlay(ranking, api)
     assert(not ranking.rankingOverlay, "saved visibility waits for initialization and login")
+    world.guild = true
     world:initialize()
     local panel = ranking.rankingOverlay
     assert(panel and panel:IsVisible() and placed(panel, api.UIParent, "TOPLEFT", "TOPLEFT", 140, -90)

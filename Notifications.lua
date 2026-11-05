@@ -2,7 +2,6 @@ local _, addon = ...
 local AceEvent = LibStub("AceEvent-3.0")
 local bus = AceEvent:Embed({})
 local PREFIX = "LockInTools:"
-local depth, pending, order = 0, {}, {}
 
 function addon:RegisterGameEvents(events, callback)
     local listener = AceEvent:Embed({})
@@ -20,27 +19,5 @@ function addon:RegisterNotification(name, callback)
 end
 
 function addon:Notify(name, ...)
-    if depth > 0 then
-        if not pending[name] then order[#order + 1] = name end
-        pending[name] = { n = select("#", ...), ... }
-        return
-    end
     bus:SendMessage(PREFIX .. name, ...)
-end
-
-function addon:BeginNotificationBatch()
-    depth = depth + 1
-end
-
-function addon:EndNotificationBatch(discard)
-    assert(depth > 0, "No notification batch is open")
-    if discard then pending, order = {}, {} end
-    depth = depth - 1
-    if depth > 0 then return end
-    local messages, names = pending, order
-    pending, order = {}, {}
-    for _, name in ipairs(names) do
-        local args = messages[name]
-        bus:SendMessage(PREFIX .. name, unpack(args, 1, args.n))
-    end
 end

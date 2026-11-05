@@ -70,8 +70,8 @@ local function enableTracking(world, rxp, importer, env)
         self.timers = {}
         for _, timer in ipairs(timers) do if not timer.cancelled then timer.callback() end end
     end
-    function world:callback(phase, current, total, message)
-        self.events[#self.events + 1] = { phase = phase, current = current, total = total, message = message }
+    function world:callback(phase, current, total)
+        self.events[#self.events + 1] = { phase = phase, current = current, total = total }
     end
     return function(...) world:callback(...) end
 end
@@ -193,8 +193,8 @@ do
     importer:UpdateImportStatusHistory("private native parse detail", true)
     importer:UpdateImportStatusHistory(rxp.locale.Get("Guides Loaded Successfully"), false)
     world:tick()
-    assert(#world.events == 2 and world.events[2].phase == "failed"
-        and not world.events[2].message:find("private", 1, true), "native errors following abort take priority without exposing payload details")
+    assert(#world.events == 2 and world.events[2].phase == "failed",
+        "native errors following abort take priority over cancellation and later success")
     assert(world.aborts == 1, "tracking never invokes or repeats the native abort")
     assert(addon:ForwardRestedXPImport("next export", callback))
     world:tick()

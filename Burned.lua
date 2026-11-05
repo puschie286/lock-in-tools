@@ -9,7 +9,7 @@ end
 
 local function Active(self)
     return self.initialized and self.ready and self.burnedState and not self.burnedState.stopped
-        and not self.savedDataReadOnly and self:HasDataGroup() and not self:IsGroupSwitching()
+        and not self.savedDataReadOnly and self:HasDataGroup()
 end
 
 local function Refresh(self)
@@ -133,7 +133,6 @@ function addon:InitializeBurned()
     end, function(sender, fields, stamp, sequence, metadata)
         return self:ReceiveBurnedStatus(sender, fields, stamp, sequence, metadata)
     end, function() ResetPeers(self) end)
-    self:RegisterNotification("GROUP_CHANGED", function() ResetPeers(self) end)
     self.burnedEvents = self:RegisterGameEvents({ "PLAYER_LOGOUT" }, function(self)
         self.burnedState.stopped = true
         ResetPeers(self)

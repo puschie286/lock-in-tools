@@ -1,8 +1,8 @@
 # LockInTools
 
 - World of Warcraft Forever addon using Lua 5.1, native WoW APIs/UI and selected bundled libraries; no build step, separately installed runtime dependencies or backend.
-- `Core.lua`: startup/settings; `Crypto.lua`/`Group.lua`: group keys/credentials; `Chat.lua`: native chat; `Options.lua`/`Commands.lua`: welcome, settings and commands.
-- Features share one account-wide group key in `LockInToolsDB`. Preserve migrations, legacy keys and newer-schema read-only behavior. Never log group keys.
+- `Core.lua`: startup/settings; `DataChannel.lua`/`Data.lua`/`DataStatus.lua`: native guild and party/raid sharing; `Options.lua`/`Commands.lua`: content, settings and commands.
+- Settings and player history are account-wide in `LockInToolsDB`. Preserve migrations, player history and newer-schema read-only behavior. Sharing uses native guild, party and raid routes without group keys or custom channels.
 - `LockInTools.toc` defines metadata and load order. Register new addon files there; keep tests out. Use `/reload` for existing Lua edits; restart WoW after manifest additions.
 - Keep `README.md` focused on development setup.
 - Keep non-obvious behavior constraints beside the relevant code or regression tests, and manual in-game checks in `tests/testing.md`.

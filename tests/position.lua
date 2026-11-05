@@ -1,4 +1,4 @@
--- Position model checks use mocked native channels without the WoW map UI.
+-- Position model checks use mocked native guild addon messages without the WoW map UI.
 local loadNotifications = dofile("tests/support/notifications.lua")
 local helpers = dofile("tests/support/helpers.lua")
 local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
@@ -7,7 +7,7 @@ local function newAddon(saved, readOnly, prepare)
     local world = {
         now = 0, epoch = 2000000000, timers = {}, messages = {}, name = "Self",
         map = 37, x = 0.25, y = 0.75, samples = 0, refreshes = 0, sent = {},
-        channels = {}, joinEnabled = false, sendAttempts = {},
+        guild = true, sendAttempts = {},
     }
     local function timer(delay, callback)
         local result = { at = world.now + delay, callback = callback }
@@ -32,15 +32,11 @@ local function newAddon(saved, readOnly, prepare)
             RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1 },
             SendAddonMessageResult = { Success = 0, InvalidChatType = 1 },
         },
-        JoinTemporaryChannel = function(name)
-            if world.joinEnabled then world.channels[name] = 1 end
-        end,
-        LeaveChannelByName = function(name) world.channels[name] = nil end,
-        GetChannelName = function(name) return world.channels[name] or 0 end,
+        IsInGuild = function() return world.guild end,
         C_ChatInfo = {
             RegisterAddonMessagePrefix = function() return 0 end,
             SendAddonMessage = function(prefix, wire, distribution, target)
-                assert(prefix == "LockInToolsData" and distribution == "CHANNEL" and target == "1")
+                assert(prefix == "LockInToolsData" and distribution == "GUILD" and target == nil)
                 local packet = { at = world.now, wire = wire, payload = wire:match("^1|position|(.*)$") }
                 world.sendAttempts[#world.sendAttempts + 1] = packet
                 if world.sendThrows then error("Native send failed") end
@@ -73,7 +69,7 @@ local function newAddon(saved, readOnly, prepare)
     environment._G = environment
     world.environment = environment
     local addon = {
-        db = saved or { schemaVersion = 3, group = { secret = "otter-4827" } },
+        db = saved or { schemaVersion = 4 },
         initialized = true, ready = false, savedDataReadOnly = readOnly,
     }
     function addon:Print(message) world.messages[#world.messages + 1] = message end
@@ -91,11 +87,10 @@ local function newAddon(saved, readOnly, prepare)
     addon:RegisterNotification("POSITION_CONTACT_CHANGED", function()
         if addon.RefreshOverview then addon:RefreshOverview() end
     end)
-    for _, file in ipairs({ "Crypto.lua", "Group.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua" }) do
+    for _, file in ipairs({ "DataChannel.lua", "Data.lua", "DataStatus.lua", "Position.lua" }) do
         loadModule(file, addon, environment)
     end
     if prepare then prepare(world, addon, environment) end
-    addon:InitializeGroup()
     addon:InitializeData()
     -- Keep this suite focused on position behavior. Full native snapshot exchange
     -- is covered in data.lua; class callbacks are exercised directly below.
@@ -111,7 +106,7 @@ local function newAddon(saved, readOnly, prepare)
     -- Test convenience adapter: all shared-data receives still enter through
     -- the native event path with WoW's prefix and distribution arguments.
     function addon:ReceiveData(sender, wire)
-        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), wire, "CHANNEL", sender)
+        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), wire, "GUILD", sender)
     end
     function world:login()
         addon.ready = true
@@ -145,17 +140,13 @@ local function newAddon(saved, readOnly, prepare)
         return "2|U|" .. tostring(timestamp or self.epoch + math.floor(self.now))
     end
     function world:disconnect()
-        self.joinEnabled = false
-        local name = addon:GetGroupDataChannelName()
-        self.channels[name] = nil
-        if addon.ready then addon:OnDataEvent("CHANNEL_LEFT", 1, name) end
+        self.guild = false
+        if addon.ready then addon:OnDataEvent("PLAYER_GUILD_UPDATE", "player") end
     end
     function world:connect()
         if addon:IsDataConnected() then self:disconnect() end
-        self.joinEnabled = true
-        local name = addon:GetGroupDataChannelName()
-        if addon.ready then addon:JoinDataChannel(true)
-        elseif name then self.channels[name] = 1 end
+        self.guild = true
+        if addon.ready then addon:OnDataEvent("PLAYER_GUILD_UPDATE", "player") end
     end
     return addon, world
 end
@@ -166,10 +157,9 @@ local function fields(payload)
     return result
 end
 
--- Missing preferences enable sharing, retention and icons without changing group/schema data.
+-- Missing preferences enable sharing, retention and icons without changing schema data.
 local addon, world = newAddon()
-local fingerprint = addon:GetGroupFingerprint()
-assert(addon.db.schemaVersion == 3 and addon.db.group.secret == "otter-4827")
+assert(addon.db.schemaVersion == 4)
 assert(addon.db.position.sharing == true and addon.db.position.keepLastKnown == true)
 assert(addon:GetShowPlayerIcons() == true and addon.db.position.showPlayerIcons == true)
 assert(addon.db.position.showTrails == nil and addon.db.position.trailLength == nil,
@@ -275,7 +265,7 @@ local saved = copy(addon.db)
 local reloaded, reloadWorld = newAddon(copy(saved))
 reloadWorld:login()
 assert(reloaded:GetSharedPositions()["friend-testrealm"].x == retainedX,
-    "Retained locations survive a reload with the same group")
+    "Retained locations survive a reload")
 reloadWorld:advance(20)
 assert(reloaded:GetSharedPositions()["friend-testrealm"].x == retainedX)
 reloaded:SetPositionSharing(false)
@@ -322,6 +312,7 @@ do
 end
 -- Disabling retention clears persisted locations and removes runtime positions after 60 seconds.
 addon, world = newAddon()
+addon.dataState.nativeAvailable = false
 world:login()
 addon:SetPositionSharing(true)
 addon:ReceivePosition("Friend", world:position(37, 0.3, 0.7))
@@ -345,35 +336,21 @@ assert(next(addon:GetSharedPositions()) == nil,
 local ephemeralReload = newAddon(copy(addon.db))
 assert(next(ephemeralReload:GetSharedPositions()) == nil)
 
--- Group changes and leaving cannot reveal the previous group's retained locations.
+-- Leaving the last native audience hides retained positions until membership returns.
 addon, world = newAddon(copy(saved))
 world:login()
-world:connect()
 assert(addon:GetSharedPositions()["friend-testrealm"])
-world.joinEnabled = false
-addon:SetGroupSecret("other-group")
-assert(next(addon:GetSharedPositions()) == nil, "Switching immediately hides old locations")
-world:advance(0)
-assert(next(addon:GetSharedPositions()) == nil and next(addon.db.position.peers) == nil)
-assert(addon.db.position.groupFingerprint ~= fingerprint)
-world:advance(2)
-assert(#world.sent == 0 and not addon:IsDataConnected(), "Changing groups disconnects the previous data backend")
+world:disconnect()
+assert(next(addon:GetSharedPositions()) == nil and addon.db.position.peers["friend-testrealm"],
+    "Losing the audience hides locations while retaining saved history")
+world:advance(20)
+assert(#world.sent == 0 and not addon:IsDataConnected())
 world:connect()
 world:advance(2)
-assert(#world.sent == 1, "A new group connection sends current data without replaying old samples")
-addon:ReceivePosition("Newfriend", world:position(37, 0.1, 0.9))
-addon:LeaveGroup()
-local sentBefore = #world.sent
-world:advance(20)
-assert(next(addon:GetSharedPositions()) == nil and next(addon.db.position.peers) == nil and #world.sent == sentBefore)
+assert(#world.sent == 1 and addon:GetSharedPositions()["friend-testrealm"],
+    "A native reconnection restores retained locations and sends only current coordinates")
 
--- A mismatched persisted group is discarded before any old location is displayed.
-local mismatched = copy(saved)
-mismatched.position.groupFingerprint = "different-group"
-addon = newAddon(mismatched)
-assert(next(addon:GetSharedPositions()) == nil and next(addon.db.position.peers) == nil)
-
--- Read-only settings and an invalid group remain intact and cannot start sharing.
+-- Read-only settings remain intact and cannot start sharing.
 local readOnlySaved = copy(saved)
 local original = copy(readOnlySaved)
 addon, world = newAddon(readOnlySaved, true)
@@ -386,14 +363,6 @@ addon:ReceivePosition("Friend", world:position(37, 0.9, 0.1))
 world:advance(20)
 assert(equal(readOnlySaved, original), "Position initialization and setters must preserve read-only data")
 assert(#world.sent == 0 and next(addon:GetSharedPositions()) == nil)
-local invalid = copy(saved)
-invalid.group.secret = "invalid group!"
-addon, world = newAddon(invalid)
-world:connect()
-world:login()
-world:advance(20)
-assert(invalid.group.secret == "invalid group!" and #world.sent == 0 and next(addon:GetSharedPositions()) == nil)
-
 -- Unchanged serialized coordinates stay suppressed; only movement sends separate packets.
 do
     local stationary, clock = newAddon()
@@ -662,7 +631,7 @@ do
     clock.environment.issecretvalue = function(value) return value == secret end
     assert(clock.classProvider.collect() == nil)
 end
--- Class metadata can precede positions, but never renews coordinate timestamps or survives a group change.
+-- Class metadata can precede positions without renewing coordinate timestamps.
 do
     local classes, clock = newAddon()
     clock:login()
@@ -681,11 +650,11 @@ do
     clock:class("Friend", "SHAMAN")
     assert(classes.db.position.peers["friend-testrealm"].class == "SHAMAN" and peer.stamp == stamp)
     classes:SetPositionSharing(true)
-    classes:SetGroupSecret("class-isolation-group")
-    clock:advance(0)
-    assert(next(classes.positionState.classes) == nil and next(classes.db.position.peers) == nil)
-    assert(classes:ReceivePosition("Friend", clock:position(37, 0.2, 0.8)))
-    assert(classes:GetSharedPositions()["friend-testrealm"].class == nil)
+    clock:disconnect()
+    assert(next(classes:GetSharedPositions()) == nil)
+    clock:connect()
+    assert(classes:GetSharedPositions()["friend-testrealm"].class == "SHAMAN",
+        "Native reconnection preserves retained class metadata without renewing coordinates")
 end
 -- Optional saved classes survive reload without extending location lifetime or discarding legacy coordinates.
 do

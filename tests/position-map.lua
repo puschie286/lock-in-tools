@@ -374,7 +374,7 @@ assert(world.map.pins[1] == pin and world.acquired == 1, "movement retains the e
 
 addon.positions = {}
 addon:RefreshPositionPins()
-assert(#world.map.pins == 0, "an empty visible model removes pins after disabling or changing group")
+assert(#world.map.pins == 0, "an empty visible model removes pins after disabling sharing or clearing player data")
 addon.positions.alice = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5 }
 world.map.shown = false
 local before = world.created
@@ -396,9 +396,9 @@ early.db.position.showPlayerIcons = true
 early:Notify("POSITIONS_CHANGED")
 assert(#earlyWorld.map.pins == 1, "position notifications refresh the loaded map without an options view")
 early.positions = {}
-early:Notify("GROUP_CHANGED")
+early:Notify("POSITIONS_CHANGED")
 assert(#earlyWorld.map.pins == 0 and #earlyWorld.notificationErrors == 0,
-    "group cleanup notifications independently remove old map pins")
+    "cleared position data independently removes old map pins")
 
 local filtered, filterWorld = LoadMap()
 filterWorld:loadNativeMap(true)
@@ -701,10 +701,10 @@ local function CheckTooltipLifecycle()
     hovered = FindPin(lifecycleWorld, peer.name)
     lifecycleWorld:hover(hovered)
     lifecycle.positions = {}
-    lifecycle:Notify("GROUP_CHANGED")
+    lifecycle:Notify("POSITIONS_CHANGED")
     assert(not tooltip:IsShown() and #lifecycleWorld.map.pins == 0 and not hovered.hovered
         and hovered.provider == nil and hovered:GetScript("OnUpdate") == nil,
-        "group cleanup releases tooltip ownership and pooled player state")
+        "clearing positions releases tooltip ownership and pooled player state")
 
     lifecycle.positions.bob = { name = "Bob-Realm", map = 101, x = 0.2, y = 0.4, online = true }
     lifecycle:RefreshPositionPins()
@@ -719,9 +719,9 @@ local function CheckTooltipLifecycle()
     lifecycle.db.position.showPlayerIcons = false
     lifecycle:Notify("POSITION_VISIBILITY_CHANGED")
     lifecycle.positions = {}
-    lifecycle:Notify("GROUP_CHANGED")
+    lifecycle:Notify("POSITIONS_CHANGED")
     assert(tooltip:IsShown() and tooltip:IsOwned(foreignOwner) and tooltip.hideCount == beforeHide,
-        "map hiding, filtering and group changes leave unrelated tooltips intact")
+        "map hiding, filtering and clearing positions leave unrelated tooltips intact")
 end
 CheckTooltipLifecycle()
 

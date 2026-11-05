@@ -28,7 +28,7 @@ function addon:InitializeRanking()
     local database = self.savedDataReadOnly and type(LockInToolsDB) == "table" and LockInToolsDB or self.db
     local saved = type(database.ranking) == "table" and database.ranking or {}
     local settings = self.savedDataReadOnly and {} or saved
-    settings.enabled, settings.locked = saved.enabled == true, saved.locked ~= false
+    settings.enabled = saved.enabled == true
     settings.burningEffect = saved.burningEffect ~= false
     settings.backgroundTransparency = Transparency(saved.backgroundTransparency) or 0
     local savedPosition = saved.position
@@ -44,15 +44,6 @@ end
 
 function addon:GetRankingSettings()
     return self.rankingSettings
-end
-
-function addon:GetRankingHelpText()
-    return "Rank: higher level first, then exact XP progress; equal progress shares a rank.\n"
-        .. "XP %: progress toward the next level. MAX: confirmed maximum level.\n"
-        .. "Dimmed progress: last saved values, which may have changed; these values still count in the ranking.\n"
-        .. "Awaiting XP: no usable level and XP report yet (new discovery, older saved data or a level-up). "
-        .. "These characters have no rank until progress is available.\n"
-        .. "Hover a player for exact XP and location; right-click for Invite or Request to join."
 end
 
 local function Age(stamp)
@@ -135,14 +126,6 @@ function addon:SetRankingEnabled(enabled)
     return true
 end
 
-function addon:SetRankingLocked(locked)
-    local success, message = Editable(self, locked)
-    if not success then return false, message end
-    self.rankingSettings.locked = locked
-    self:Notify("RANKING_CHANGED")
-    return true
-end
-
 function addon:SetRankingBurningEffect(enabled)
     local success, message = Editable(self, enabled)
     if not success then return false, message end
@@ -217,12 +200,11 @@ local function SameProgress(player, previous)
 end
 
 function addon:GetPlayerRanking(overviewPlayers)
-    local result = { players = {}, awaiting = 0, stale = 0, inactive = 0,
-        connected = false, grouped = false, switching = false }
+    local result = { players = {}, connected = false, grouped = false }
     if not self.initialized or not self.ready then return result end
-    result.grouped, result.switching = self:HasDataGroup(), self:IsGroupSwitching()
+    result.grouped = self:HasDataGroup()
     result.connected = self:IsDataConnected()
-    if not result.grouped or result.switching then return result end
+    if not result.grouped then return result end
     local cached, ranked = self.rankingOrderCache, {}
     local changed = cached == nil
     for _, player in ipairs(overviewPlayers or self:GetOverviewPlayers()) do
@@ -231,13 +213,10 @@ function addon:GetPlayerRanking(overviewPlayers)
             or player.xpStale == true or player.statusSynchronized == false)
         row.xpStale = row.stale
         if player.isSelf then result.own = row end
-        if not player.online then result.inactive = result.inactive + 1 end
-        if not Complete(player) then result.awaiting = result.awaiting + 1
-        else
+        if Complete(player) then
             result.players[#result.players + 1] = row
             ranked[row.id] = row
             if not cached or not SameProgress(row, cached.progress[row.id]) then changed = true end
-            if row.stale then result.stale = result.stale + 1 end
         end
     end
     if cached and #result.players ~= #cached.order then changed = true end
@@ -284,6 +263,6 @@ function addon:GetPlayerTooltipPlayers()
     return players
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "ROSTER_CHANGED", "DATA_CHANGED" }) do
+for _, notification in ipairs({ "ROSTER_CHANGED", "DATA_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon.rankingTooltipCache = nil end)
 end

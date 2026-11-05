@@ -169,12 +169,6 @@ local function SameStatus(left, right)
     return true
 end
 
-local function CopyStatus(fields)
-    local copy = {}
-    for name, value in pairs(fields) do copy[name] = value end
-    return copy
-end
-
 local function NamedStatus(fields)
     local named = {}
     for id, value in pairs(fields) do
@@ -298,15 +292,10 @@ local function ProcessStatus(self, sender, message, requested)
     end
     peer.session, peer.fields = message.session, message.fields
     peer.revision, peer.stamp = message.revision, message.stamp
-    local metadata = { kind = "full", session = message.session, revision = message.revision,
-        hasBaseline = true, coherent = true, synchronized = true }
     for _, name in ipairs(status.providerNames) do
         local provider = status.providers[name]
-        if provider.contact then pcall(provider.contact, sender, message.stamp, CopyStatus(metadata)) end
-    end
-    for _, name in ipairs(status.providerNames) do
-        local provider = status.providers[name]
-        pcall(provider.receive, sender, NamedStatus(message.fields), message.stamp, message.revision, CopyStatus(metadata))
+        pcall(provider.receive, sender, NamedStatus(message.fields), message.stamp, message.revision,
+            { session = message.session })
     end
     if message.position and self.ReceivePositionSnapshot then
         self:ReceivePositionSnapshot(sender, message.position, message.stamp)
@@ -348,12 +337,11 @@ end
 
 -- Polling, change suppression and join snapshots belong to the data protocol,
 -- so adding a provider does not add another wire feature or another scheduler.
-function addon:RegisterDataStatusProvider(name, collect, receive, connectionChanged, contact)
+function addon:RegisterDataStatusProvider(name, collect, receive, connectionChanged)
     local state = self.dataState
     if not state then return false, "Group data is still loading." end
     if not ValidProviderName(name) or type(collect) ~= "function" or type(receive) ~= "function"
-        or (connectionChanged ~= nil and type(connectionChanged) ~= "function")
-        or (contact ~= nil and type(contact) ~= "function") then
+        or (connectionChanged ~= nil and type(connectionChanged) ~= "function") then
         return false, "Invalid status provider registration."
     end
     if state.status and state.status.providers[name] then return false, "Status provider already registered." end
@@ -363,7 +351,7 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
         state.status = { providers = {}, received = {}, sessionSequence = 0, revision = 0 }
     end
     local status = state.status
-    status.providers[name] = { collect = collect, receive = receive, connectionChanged = connectionChanged, contact = contact }
+    status.providers[name] = { collect = collect, receive = receive, connectionChanged = connectionChanged }
     -- Replace the snapshot so registration during a callback cannot alter its active iteration.
     status.providerNames = StatusNames(status.providers)
     if first then
@@ -400,7 +388,7 @@ end
 function addon:DataStatusTick()
     local state = self.dataState
     local status = state and state.status
-    if not status or self:IsGroupSwitching() then return false end
+    if not status then return false end
     if not self:IsDataConnected() then
         StatusConnectionChanged(self, false)
         return false

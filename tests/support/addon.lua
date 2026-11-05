@@ -1,12 +1,8 @@
 -- This harness is never loaded by the addon.
--- Server membership changes are asynchronous, as they are in the client.
+-- Legacy channel restoration is mocked only to verify upgrade cleanup.
 local loadNotifications = dofile("tests/support/notifications.lua")
 local helpers = dofile("tests/support/helpers.lua")
 local loadModule = helpers.loadModule
-local function isRosterMessage(message)
-    return message:match("^1|roster|") or message:match("^1|[QR]|roster|")
-end
-
 local function isStatusMessage(message)
     return message:match("^1|status|") or message:match("^1|[QR]|status|")
 end
@@ -15,62 +11,31 @@ local function loadAddon(savedVariables, loggedIn)
     local messages, frames, timers = {}, {}, {}
     local world = {
         now = 0, channels = {}, joinCalls = {}, leaveCalls = {},
-        addCalls = {}, passwordCalls = {}, roster = {}, openedChat = {},
-        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, rosterSends = {}, statusSends = {}, guideSends = {}, prefixes = {},
-        callbacks = {}, chatFrames = {}, removeCalls = {},
+        passwordCalls = {},
+        dataJoinCalls = {}, dataLeaveCalls = {}, dataSends = {}, statusSends = {}, prefixes = {},
+        chatFrames = {},
         optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
         level = 12, xp = 0, xpMax = 1000, maxLevel = 60,
         grouped = false, raid = false, guild = false,
     }
-    local function channelByName(name)
-        if type(name) == "string" then return world.channels[name:lower()] end
-        for _, channel in pairs(world.channels) do
-            if channel.id == name then return channel end
-        end
-    end
     local function newTimer(delay, callback)
         local timer = { at = world.now + delay, callback = callback, cancelled = false }
         function timer:Cancel() self.cancelled = true end
-        function timer:IsCancelled() return self.cancelled end
         timers[#timers + 1] = timer
         return timer
     end
     local environment
-    local function newEditBox()
-        local header = {}
-        function header:SetText(text) self.text = text end
-        function header:SetFormattedText(format, ...)
-            self:SetText(string.format(format, ...))
-        end
-        function header:GetWidth() return #(self.text or "") end
-        local box = { header = header }
-        function box:SetChatType(chatType) self.chatType = chatType end
-        function box:SetChannelTarget(target) self.channelTarget = target end
-        function box:UpdateHeader()
-            if self.chatType ~= "CHANNEL" then return end
-            local id, name = environment.GetChannelName(self.channelTarget)
-            self.header:SetFormattedText(environment.CHAT_CHANNEL_SEND, id, name)
-            self.measuredHeaderWidth = self.header:GetWidth()
-        end
-        return box
-    end
     local function newChatFrame()
-        local frame = { channelList = {}, zoneChannelList = {}, editBox = newEditBox(), id = #world.chatFrames + 1 }
+        local frame = { channelList = {} }
         function frame:AddMessage(message) messages[#messages + 1] = message end
-        function frame:GetID() return self.id end
-        function frame:GetEditBox() return self.editBox end
         function frame:AddChannel(name)
-            world.addCalls[#world.addCalls + 1] = name
             self.channelList[#self.channelList + 1] = name
-            self.zoneChannelList[#self.zoneChannelList + 1] = 0
         end
         function frame:RemoveChannel(name)
-            world.removeCalls[#world.removeCalls + 1] = { frame = self, name = name }
             for index = #self.channelList, 1, -1 do
                 if self.channelList[index]:lower() == name:lower() then
                     table.remove(self.channelList, index)
-                    table.remove(self.zoneChannelList, index)
                 end
             end
         end
@@ -78,12 +43,7 @@ local function loadAddon(savedVariables, loggedIn)
         return frame
     end
     local chatFrame = newChatFrame()
-    local editBox = chatFrame.editBox
-    local function openChat(text, frame)
-        world.openedChat[#world.openedChat + 1] = { text = text, frame = frame }
-        return editBox
-    end
-    local minimap = { width = 140, height = 140, scale = 1, x = 1000, y = 600, hooks = {} }
+    local minimap = { width = 140, height = 140, scale = 1, x = 1000, y = 600 }
     function minimap:GetWidth() return self.width end
     function minimap:GetHeight() return self.height end
     function minimap:GetEffectiveScale() return self.scale end
@@ -116,7 +76,6 @@ local function loadAddon(savedVariables, loggedIn)
         GameTooltip = tooltip,
         GameTooltip_SetDefaultAnchor = function(tooltip, parent)
             tooltip:SetOwner(parent, "ANCHOR_NONE")
-            tooltip.default = 1
         end,
         GetCursorPosition = function()
             world.cursorReads = world.cursorReads + 1
@@ -140,30 +99,12 @@ local function loadAddon(savedVariables, loggedIn)
             end,
         },
         DEFAULT_CHAT_FRAME = chatFrame,
-        CHAT_CHANNEL_SEND = "%s. %s: ",
         ChatFrameUtil = {
-            ChooseBoxForSend = function() return editBox end,
-            OpenChat = openChat,
             ForEachChatFrame = function(callback)
                 for _, frame in ipairs(world.chatFrames) do callback(frame) end
             end,
-            ResolvePrefixedChannelName = function(name)
-                return name, "native-result", nil, "native-tail"
-            end,
-        },
-        EventRegistry = {
-            RegisterCallback = function(_, event, callback, owner)
-                local callbacks = world.callbacks[event] or {}
-                world.callbacks[event] = callbacks
-                callbacks[#callbacks + 1] = { callback = callback, owner = owner }
-            end,
         },
         issecretvalue = function(value) return world.secretValue ~= nil and value == world.secretValue end,
-        GetChannelName = function(identifier)
-            local channel = channelByName(identifier)
-            if channel then return channel.id, channel.name end
-            return 0, nil
-        end,
         GetChannelList = function()
             local channels, result = {}, {}
             for _, channel in pairs(world.channels) do channels[#channels + 1] = channel end
@@ -175,46 +116,28 @@ local function loadAddon(savedVariables, loggedIn)
             end
             return unpack(result)
         end,
-        JoinPermanentChannel = function(name, password, frameID)
-            assert(password == "", "chat joins without a password")
-            assert(frameID == 1, "join into the default native chat frame")
+        JoinPermanentChannel = function(name)
             world.joinCalls[#world.joinCalls + 1] = name
-            world.lastJoinPassword = password
             return 0, name
         end,
-        JoinTemporaryChannel = function(name, password)
-            assert(name:match("^LITDATA") and password == "", "group data joins without a password")
+        JoinTemporaryChannel = function(name)
             world.dataJoinCalls[#world.dataJoinCalls + 1] = name
             return 0, name
         end,
         SetChannelPassword = function(name, password)
-            assert(password == "", "channel passwords may only be cleared")
-            if world.passwordThrows then error("Native password change unavailable") end
             world.passwordCalls[#world.passwordCalls + 1] = { name = name, password = password }
         end,
-        UnitGUID = function(unit) assert(unit == "player"); return "Player-Test-Self" end,
-        GetNumDisplayChannels = function() return #world.roster end,
-        GetChannelDisplayInfo = function(displayIndex)
-            local entry = assert(world.roster[displayIndex], "display index is separate from channel number")
-            return entry.name, entry.header, false, entry.id, #(entry.members or {}), true, "CHANNEL_CATEGORY_CUSTOM"
-        end,
         C_ChatInfo = {
-            GetChannelRosterInfo = function(displayIndex, rosterIndex)
-                local member = world.roster[displayIndex].members[rosterIndex]
-                return member.name, member.owner, member.moderator, member.guid
-            end,
             RegisterAddonMessagePrefix = function(prefix)
                 if world.prefixes[prefix] then return 1 end
                 world.prefixes[prefix] = true
                 return 0
             end,
             SendAddonMessage = function(prefix, message, distribution, target)
-                assert(distribution == "CHANNEL" or distribution == "PARTY" or distribution == "RAID"
+                assert(distribution == "PARTY" or distribution == "RAID"
                     or distribution == "GUILD", "production data uses only eligible broadcast routes")
-                -- Keep feature assertions separate from independent presence and status traffic.
-                local sends = isStatusMessage(message) and world.statusSends
-                    or isRosterMessage(message) and world.rosterSends
-                    or message:match("^1|guides|") and world.guideSends or world.dataSends
+                -- Keep feature assertions separate from independent status traffic.
+                local sends = isStatusMessage(message) and world.statusSends or world.dataSends
                 sends[#sends + 1] = {
                     prefix = prefix, message = message, distribution = distribution, target = target,
                 }
@@ -224,13 +147,7 @@ local function loadAddon(savedVariables, loggedIn)
         LeaveChannelByName = function(name)
             local calls = name:lower():match("^litdata") and world.dataLeaveCalls or world.leaveCalls
             calls[#calls + 1] = name
-            if world.leaveThrows then error("Native leave unavailable") end
-            if not world.holdLeaves then world.channels[name:lower()] = nil end
-        end,
-        strlenutf8 = function(text)
-            -- Count UTF-8 leading bytes without requiring Lua 5.3's utf8 module.
-            local _, count = text:gsub("[^\128-\191]", "")
-            return count
+            world.channels[name:lower()] = nil
         end,
         IsLoggedIn = function() return loggedIn end,
         GetBuildInfo = function() return "1.60.1", "70374", "Oct 2026", 16001 end,
@@ -248,18 +165,12 @@ local function loadAddon(savedVariables, loggedIn)
         end,
     }, { __index = _G })
     environment._G = environment
-    local hookMethod = helpers.hooksecurefunc(environment)
-    environment.hooksecurefunc = function(object, methodName, callback)
-        assert(type(object) == "table" and type(methodName) == "string" and type(callback) == "function",
-            "chat display uses named object method hooks")
-        return hookMethod(object, methodName, callback)
-    end
     local addon = {}
     local _, prepareMinimap = dofile("tests/support/ui.lua")
     prepareMinimap(environment, world)
     world.notificationErrors = loadNotifications(addon, environment)
     for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
-        "Core.lua", "Crypto.lua", "Group.lua", "Chat.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Burned.lua", "Position.lua", "Roster.lua", "Ranking.lua",
+        "Core.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Burned.lua", "Position.lua", "Roster.lua", "Ranking.lua",
         "RestedXPCodec.lua", "RestedXPAdapter.lua", "RestedXP.lua", "PositionMap.lua", "Theme.lua", "RestedXPSkin.lua", "Minimap.lua", "Commands.lua" }) do
         loadModule(file, addon, environment)
     end
@@ -316,12 +227,13 @@ local function loadAddon(savedVariables, loggedIn)
         fire("PLAYER_LOGIN")
     end
     function world:newChatFrame() return newChatFrame() end
-    world.fire, world.editBox = fire, editBox
+    world.fire = fire
     return addon, environment, messages, fire, world
 end
 
 local SECRET = "LIT1-" .. string.rep("01", 32)
 local OTHER_SECRET = "LIT1-" .. string.rep("ab", 32)
+-- Existing profiles exercise migration throughout the integration suites.
 local function settings(secret, autoJoin)
     return { schemaVersion = 3, showWelcome = false,
         group = { secret = secret or SECRET }, chat = { autoJoin = autoJoin ~= false } }

@@ -6,7 +6,7 @@ local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
 local function newAddon(saved, readOnly, name, configure)
     local world = {
         now = 0, epoch = 2000000000, name = name or "Self", level = 24, xp = 420, xpMax = 1000, maxLevel = 60,
-        fingerprint = "first-group", connected = false, frames = {},
+        guild = true, connected = false, frames = {},
         invites = {}, joins = {}, positions = {},
         grouped = false, raid = false, leader = false, assistant = false,
         members = 0, sameParty = {}, refreshes = 0,
@@ -67,12 +67,10 @@ local function newAddon(saved, readOnly, name, configure)
     environment._G = environment
     world.environment = environment
     local addon = {
-        db = saved or { schemaVersion = 3, group = { secret = "otter-4827" }, position = { sharing = false } },
+        db = saved or { schemaVersion = 4, position = { sharing = false } },
         initialized = true, ready = false, savedDataReadOnly = readOnly,
     }
-    function addon:HasGroup() return world.fingerprint ~= nil end
-    function addon:HasDataGroup() return self:HasGroup() end
-    function addon:GetGroupFingerprint() return world.fingerprint end
+    function addon:HasDataGroup() return world.guild or world.grouped or world.raid end
     function addon:IsDataConnected() return world.connected end
     function addon:IsDataSelf(sender)
         if type(sender) ~= "string" then return false end
@@ -250,16 +248,16 @@ do
     local restored, clock = newAddon(copy(addon.db))
     clock:login()
     assert(clock:find("friend-testrealm") and not clock:find("friend-testrealm").online)
-    clock.fingerprint = "second-group"
-    restored:OnRosterGroupChanged()
-    assert(next(restored.db.roster.peers) == nil, "Switching groups clears the old local history")
-    assert(clock:find("friend-testrealm") == nil and restored.db.roster.peers["friend-testrealm"] == nil,
-        "A group switch cannot retain members from the old key")
-    assert(restored.db.roster.groupFingerprint == "second-group")
+    clock.grouped = true
+    clock:event("GROUP_ROSTER_UPDATE")
+    clock.grouped = false
+    clock:event("GROUP_ROSTER_UPDATE")
+    assert(clock:find("friend-testrealm") and restored.db.roster.peers["friend-testrealm"],
+        "Native party membership changes preserve retained player history")
     local mismatched = copy(addon.db)
     mismatched.roster.groupFingerprint = "other-group"
     local _, mismatchClock = newAddon(mismatched)
-    assert(mismatchClock:find("friend-testrealm") == nil, "Saved metadata is scoped to its group")
+    assert(mismatchClock:find("friend-testrealm"), "Legacy group fingerprints cannot discard saved metadata")
 end
 
 -- Legacy bare names use the saved realm before login APIs are ready and remain qualified on later reloads.
@@ -286,7 +284,7 @@ do
 end
 -- A saved realm cannot legitimize a mismatched or malformed player identity.
 do
-    local profile = { group = { secret = "otter-4827" }, roster = { groupFingerprint = "first-group", peers = {
+    local profile = { roster = { peers = {
         ["friend-testrealm"] = { name = "Other", seenAt = 2000000000 },
         ["qualified-testrealm"] = { name = "Qualified-OtherRealm", seenAt = 2000000000 },
         ["bad|name-testrealm"] = { name = "Bad|Name", seenAt = 2000000000 },
@@ -362,7 +360,7 @@ do
     local guarded, clock = newAddon(saved, true)
     clock:login(); clock:connect()
     clock:peer("Other-TestRealm", 99, true, true, false, true)
-    guarded:OnRosterGroupChanged()
+    clock:event("GROUP_ROSTER_UPDATE")
     clock:advance(100)
     assert(equal(before, saved), "Newer-schema data must remain byte-for-byte unchanged")
     assert(not guarded:PerformOverviewAction("other-testrealm", "invite"))
@@ -384,7 +382,8 @@ do
     local restoredAddon, clock = newAddon(copy(addon.db))
     clock:login(); clock:connect()
     local retained = clock:find("friend-testrealm")
-    assert(retained.xp == 125 and retained.xpMax == 500 and retained.xpUpdatedAt == friend.xpUpdatedAt
+    assert(retained.xp == 125 and retained.xpMax == 500
+        and restoredAddon.rosterState.progress["friend-testrealm"].xpUpdatedAt == world.epoch
         and not retained.online and retained.xpStale and not retained.statusSynchronized)
     assert(not restoredAddon:GetOverviewActionState("friend-testrealm").request)
     world:disconnect(); world:connect()
@@ -417,8 +416,8 @@ do
 end
 -- Legacy and malformed optional snapshots keep valid identity/presence without exposing invalid fields.
 do
-    local profile = { group = { secret = "otter-4827" }, position = { sharing = false },
-        roster = { groupFingerprint = "first-group", peers = {
+    local profile = { position = { sharing = false },
+        roster = { peers = {
             ["legacy-testrealm"] = { name = "Legacy", level = 20, seenAt = 2000000000 },
             ["max-testrealm"] = { name = "Max-TestRealm", level = 60, seenAt = 2000000000,
                 xpState = "max", xpUpdatedAt = 1999999990, inParty = false, sharing = false },
@@ -438,10 +437,9 @@ do
     assert(legacy.name == "Legacy-testrealm" and legacy.level == 20 and legacy.seenAt == world.epoch
         and legacy.xpState == "unavailable" and not legacy.online)
     local maximum, unavailable = world:find("max-testrealm"), world:find("unavailable-testrealm")
-    assert(maximum.xpState == "max" and maximum.xpUpdatedAt == 1999999990 and maximum.xpStale
+    assert(maximum.xpState == "max" and maximum.xpStale
         and maximum.inParty == false and maximum.sharing == false)
-    assert(unavailable.xpState == "unavailable" and unavailable.xpUpdatedAt == 1999999991
-        and unavailable.canInvite == false and unavailable.xpStale)
+    assert(unavailable.xpState == "unavailable" and unavailable.canInvite == false and unavailable.xpStale)
     for _, id in ipairs({ "badxp-testrealm", "badage-testrealm", "badstate-testrealm" }) do
         local row = assert(world:find(id), "Bad optional progress must not discard an otherwise valid retained player")
         assert(row.level == 30 and row.seenAt == world.epoch and not row.online and row.statusSynchronized == false)
@@ -467,11 +465,12 @@ do
     assert(snapshot.level == 25 and snapshot.xp == 81 and snapshot.xpMax == 1200 and snapshot.xpState == "known")
     assert(snapshot.xpUpdatedAt == world.epoch + 12 and snapshot.seenAt == world.epoch + 12
         and snapshot.inParty == true and snapshot.canInvite == true and snapshot.partyFull == false and snapshot.sharing == true)
-    local _, other = newAddon(copy(addon.db), false, "Other")
+    local otherAddon, other = newAddon(copy(addon.db), false, "Other")
     other:login(); other:connect()
     local previous = assert(other:find("self-testrealm"))
     assert(not previous.isSelf and not previous.online and previous.xpStale and previous.statusSynchronized == false)
-    assert(previous.level == 25 and previous.xp == 81 and previous.xpMax == 1200 and previous.xpUpdatedAt == snapshot.xpUpdatedAt,
+    assert(previous.level == 25 and previous.xp == 81 and previous.xpMax == 1200
+        and otherAddon.rosterState.progress["self-testrealm"].xpUpdatedAt == snapshot.xpUpdatedAt,
         "Account-wide history retains the previous character's exact progress")
     assert(other:find("other-testrealm").isSelf and other:find("other-testrealm").online)
     local sameAddon, same = newAddon(copy(addon.db))
@@ -499,19 +498,19 @@ do
     world:advance(30)
     fields.sharing = true
     report(2)
-    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch
+    assert(addon.rosterState.progress["friend-testrealm"].xpUpdatedAt == world.epoch
         and not world:find("friend-testrealm").xpStale)
     world:advance(5)
     fields.xp = 15
     report(3)
-    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 35)
+    assert(addon.rosterState.progress["friend-testrealm"].xpUpdatedAt == world.epoch + 35)
     world:advance(5)
     report(1, "second")
-    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 40)
+    assert(addon.rosterState.progress["friend-testrealm"].xpUpdatedAt == world.epoch + 40)
     world:advance(91)
     assert(world:find("friend-testrealm").xpStale and not addon:GetOverviewActionState("friend-testrealm").request)
     report(2, "second")
-    assert(world:find("friend-testrealm").xpUpdatedAt == world.epoch + 131
+    assert(addon.rosterState.progress["friend-testrealm"].xpUpdatedAt == world.epoch + 131
         and addon:GetOverviewActionState("friend-testrealm").request)
     local before = copy(addon.db)
     for _, malformed in ipairs({
@@ -598,7 +597,7 @@ do
     assert(world:find("self-testrealm").level == nil, "Throwing level APIs cannot escape overview rendering")
 end
 
--- Native membership is cached separately from shared party flags and survives without a LIT group.
+-- Native membership is cached separately from shared party flags and survives without data sharing.
 do
     local native = { raid = false, partyCount = 0, raidCount = 0, units = {}, reads = 0, modeReads = 0 }
     local addon, world = newAddon(nil, false, nil, function(environment)
@@ -659,8 +658,8 @@ do
     assert(addon:GetNativeGroupUnit("Friend-OtherRealm") == nil
         and addon:GetNativeGroupUnit("Fresh-OtherRealm") == "raid2" and changed == 4)
 
-    -- The native roster remains useful with no writable/shared addon group.
-    world.fingerprint, addon.savedDataReadOnly = nil, true
+    -- The native roster remains useful without writable addon settings.
+    addon.savedDataReadOnly = true
     native.units.raid3 = { "Reloaded", "TestRealm" }
     world:event("PLAYER_ENTERING_WORLD")
     assert(addon:GetNativeGroupUnit("Reloaded-TestRealm") == "raid3" and changed == 5)

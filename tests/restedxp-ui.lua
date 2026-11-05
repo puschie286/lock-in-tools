@@ -67,8 +67,8 @@ end
 do
     local state = { installed = false, loaded = false, canImport = false }
     local addon, panel, calls, environment, world = Fixture(state)
-    local guideSends, dataSends, statusSends = #world.guideSends, #world.dataSends, #world.statusSends
-    assert(not addon:HasGroup() and not panel.restedxpImport:IsEnabled())
+    local dataSends, statusSends = #world.dataSends, #world.statusSends
+    assert(not addon:HasDataGroup() and not panel.restedxpImport:IsEnabled())
     panel.restedxpBattleTag:UserInput("  UnfinishedOwner#  ")
     assert(addon.db.restedxp.sourceBattleTag == "  UnfinishedOwner#  " and #calls == 0)
     panel.tabs.sharing:Click()
@@ -111,7 +111,7 @@ do
         return false
     end
     assert(not ContainsDraft(environment.LockInToolsDB), "only the source preference is persisted")
-    assert(#world.guideSends == guideSends and #world.dataSends == dataSends and #world.statusSends == statusSends,
+    assert(#world.dataSends == dataSends and #world.statusSends == statusSends,
         "local imports initiate no group communication")
 end
 
@@ -203,7 +203,7 @@ end
 
 do
     local futureSource = { sourceBattleTag = "FutureOwner#1234", futureField = "keep" }
-    local future = { schemaVersion = 4, showWelcome = false, restedxp = futureSource }
+    local future = { schemaVersion = 5, showWelcome = false, restedxp = futureSource }
     local addon, environment, _, _, world = support.loadAddon(future, false)
     world:initialize()
     local skinChanges = 0

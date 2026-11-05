@@ -482,7 +482,6 @@ local function RefreshBurnedMeters(panel)
     local text = "Group burned: "
     if group.average ~= nil then
         text = text .. string.format("%.0f%%", group.average) .. " (" .. group.count .. " reporting)"
-    elseif addon:IsGroupSwitching() then text = text .. "switching groups"
     elseif not addon:HasDataGroup() then text = text .. "no group"
     elseif not addon:IsDataConnected() then text = text .. "disconnected"
     else text = text .. "awaiting reports" end
@@ -879,13 +878,10 @@ function addon:RefreshRankingOverlay()
     RefreshBackground(panel)
     local ranking = self:GetPlayerRanking()
 
-    local hasStandings = ranking.grouped and not ranking.switching
+    local hasStandings = ranking.grouped
     local players, own = hasStandings and ranking.players or {}, ranking.own
-    if ranking.switching then
-        panel.empty:SetText("Switching groups... Waiting for the new group.")
-        own = nil
-    elseif not ranking.grouped then
-        panel.empty:SetText("Choose a group in Settings > Group. Your group standings will appear here.")
+    if not ranking.grouped then
+        panel.empty:SetText("Join a guild, party or raid with sharing enabled to see standings.")
         own = nil
     else
         panel.empty:SetText("Waiting for usable player progress.")
@@ -941,14 +937,6 @@ end
 function addon:OnRankingLogin()
     self:RefreshRankingOverlay()
 end
-
-addon:RegisterNotification("GROUP_CHANGED", function()
-    if addon.rankingOverlay then
-        ResetRowMotion(addon.rankingOverlay)
-        ResetXPProgress(addon.rankingOverlay)
-    end
-    addon:RefreshRankingOverlay()
-end)
 
 for _, notification in ipairs({ "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshRankingOverlay() end)

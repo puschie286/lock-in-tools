@@ -1,10 +1,10 @@
 -- Shared-window behavior; rendering and labels are checked in the native client.
 local fixture = dofile("tests/support/addon.lua")
 local loadAddon, settings = fixture.loadAddon, fixture.settings
-local SECRET, OTHER_SECRET, contains = fixture.SECRET, fixture.OTHER_SECRET, fixture.contains
+local SECRET, contains = fixture.SECRET, fixture.contains
 local loadOptions = dofile("tests/support/ui.lua")
 
--- Navigation reuses one lazy window and clears hidden key drafts and confirmations.
+-- Navigation reuses one lazy window for native sharing settings and Content.
 do
     local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world:initialize()
@@ -12,36 +12,25 @@ do
     local command = api.SlashCmdList.LOCKINTOOLS
     command("options")
     local options, window = addon.optionsPanel, addon.mainPanel
-    assert(options:IsVisible() and not addon.contentPanel)
-    options.secret:UserInput(OTHER_SECRET)
-    options.secret:SetFocus()
-    options.applyGroup:Click()
+    assert(options:IsVisible() and not addon.contentPanel and options.selectedTab == "sharing")
     command("options")
     addon:OpenOptions("unknown")
-    assert(options.secret:GetText() == OTHER_SECRET and options.pendingSecret == OTHER_SECRET)
+    assert(options.selectedTab == "sharing")
     options.content:Click()
     local content = addon.contentPanel
     assert(content:IsVisible() and not options:IsVisible()
         and content.parent == window and options.parent == window and content.pages.overview:IsVisible())
-    assert(not content.secret and not content.ownSecret and not content.createGroup)
-    addon:RefreshOptions()
-    assert(options.secret:GetText() == "" and options.ownSecret:GetText() == ""
-        and not options.secret.focused and not options.pendingSecret and addon:GetGroupSecret() == SECRET,
-        "hidden Settings never retain keys or apply a pending switch")
+    assert(not options.tabs.group and not options.tabs.chat and not options.secret and not options.autoJoin)
     content.options:Click()
-    assert(options:IsVisible() and not content:IsVisible() and options.ownSecret:GetText() == SECRET)
-    options.tabs.sharing:Click()
-    assert(options.autoJoin:IsVisible() and options.positionSharing:IsVisible()
-        and options.positionRetention:IsVisible()
+    assert(options:IsVisible() and not content:IsVisible())
+    assert(options.positionSharing:IsVisible() and options.positionRetention:IsVisible()
         and options.dataChannels.party:IsVisible() and options.dataChannels.guild:IsVisible()
-        and options.dataChannels.global:IsVisible(), "Sharing brings chat, positions and data settings together")
-    assert(not options.tabs.chat and not options.tabs.position and not options.tabs.data,
-        "chat, positions and data have one navigation entry")
+        and not options.dataChannels.global, "Sharing contains native data routes and position preferences")
     options.content:Click()
     content.options:Click()
     assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible())
-    for _, entry in ipairs({ "chat", "position", "data" }) do
-        addon:OpenOptions("group")
+    for _, entry in ipairs({ "position", "data" }) do
+        addon:OpenOptions("ranking")
         addon:OpenOptions(entry)
         assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible(),
             "existing sharing page links still open the combined settings")
@@ -53,7 +42,6 @@ do
     assert(api.namedFrameCreations.LockInToolsWindow == 1
         and contains(api.UISpecialFrames, "LockInToolsWindow"), "one shared Escape-closeable window")
 end
-
 local function placed(window, owner, point, x, y)
     local actual, relativeTo, relativePoint, actualX, actualY = window:GetPoint()
     return actual == point and relativePoint == point and relativeTo == owner and actualX == x and actualY == y
@@ -106,7 +94,7 @@ do
             and damaged.windowPosition == invalid)
     end
 
-    saved.schemaVersion = 4
+    saved.schemaVersion = 5
     local readonly, readonlyApi, _, _, readonlyWorld = loadAddon(saved, false)
     readonlyWorld:initialize()
     loadOptions(readonly, readonlyApi)
@@ -117,7 +105,7 @@ do
     readonlyWindow.scripts.OnDragStop(readonlyWindow)
     readonlyWindow.CloseButton:Click()
     readonlyWorld.fire("PLAYER_LOGOUT")
-    assert(readonlyApi.LockInToolsDB == saved and saved.schemaVersion == 4
+    assert(readonlyApi.LockInToolsDB == saved and saved.schemaVersion == 5
         and saved.windowPosition == position and position.point == "TOPRIGHT"
         and position.x == -85 and position.y == -130 and position.futureField == "keep",
         "drag, close and logout preserve future-schema placement")
@@ -135,27 +123,24 @@ do
     local overviewCalls, optionsCalls = 0, 0
     addon.RefreshOverview = function(self) overviewCalls = overviewCalls + 1; return refreshOverview(self) end
     addon.RefreshOptions = function(self) optionsCalls = optionsCalls + 1; return refreshOptions(self) end
-    for _, entry in ipairs({ { "POSITIONS_CHANGED", 1, 1 }, { "CHAT_CHANGED", 0, 1 },
-        { "ROSTER_CHANGED", 1, 0 }, { "GROUP_CHANGED", 1, 1 } }) do
+    for _, entry in ipairs({ { "POSITIONS_CHANGED", 1, 1 }, { "RESTEDXP_CHANGED", 0, 1 },
+        { "ROSTER_CHANGED", 1, 0 } }) do
         overviewCalls, optionsCalls = 0, 0
         addon:Notify(entry[1])
         assert(overviewCalls == entry[2] and optionsCalls == entry[3])
     end
     local options, writes = addon.optionsPanel, 0
-    for _, widget in ipairs({ options.secret, options.ownSecret, options.autoJoin, options.positionSharing }) do
+    for _, widget in ipairs({ options.positionSharing, options.positionRetention, options.dataChannels.guild }) do
         for _, name in ipairs({ "SetText", "SetEnabled", "SetChecked" }) do
             local original = widget[name]
             widget[name] = function(self, ...) writes = writes + 1; return original(self, ...) end
         end
     end
-    assert(addon:SetChatAutoJoin(true) and addon:SetPositionSharing(true))
-    assert(addon:SetGroupSecret("hidden-friends"))
-    world:advance(0)
-    assert(writes == 0 and options.ownSecret:GetText() == "")
+    assert(addon:SetPositionSharing(false) and addon:SetDataChannelEnabled("guild", false))
+    assert(writes == 0)
     addon:OpenOptions()
-    assert(writes > 0 and options.ownSecret:GetText() == "hidden-friends"
-        and options.secret:GetText() == "" and options.autoJoin:GetChecked() and options.positionSharing:GetChecked(),
-        "reopening catches up model state without restoring an old draft")
+    assert(writes > 0 and not options.positionSharing:GetChecked() and not options.dataChannels.guild:GetChecked(),
+        "reopening catches up native sharing preferences changed while hidden")
 end
 
-print("PASS: shared window navigation, key privacy, placement and view refreshes")
+print("PASS: shared window navigation, placement and view refreshes")

@@ -55,10 +55,7 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetVerticalScroll(value) self.verticalScroll = value end
     function methods:GetWidth() return self.width or (self.allPoints and self.allPoints:GetWidth()) or 0 end
     function methods:GetHeight() return self.height or (self.allPoints and self.allPoints:GetHeight()) or 0 end
-    function methods:SetColorTexture(...)
-        self.textureColor = { ... }
-        if self.parent then self.parent.texturePaints = (self.parent.texturePaints or 0) + 1 end
-    end
+    function methods:SetColorTexture(...) self.textureColor = { ... } end
     function methods:SetVertexColor(...) self.vertexColor = { ... } end
     function methods:SetBlendMode(mode) self.blendMode = mode end
     function methods:SetTexture(texture) self.texture = texture end
@@ -127,15 +124,14 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:GetChecked() return self.checked end
     function methods:ClearFocus()
         local wasFocused = self.focused
-        self.focusCleared, self.focused = true, false
+        self.focused = false
         if wasFocused and self.scripts.OnEditFocusLost then self.scripts.OnEditFocusLost(self) end
     end
     function methods:SetFocus()
         local wasFocused = self.focused
-        self.focused, self.focusCleared = true, false
+        self.focused = true
         if not wasFocused and self.scripts.OnEditFocusGained then self.scripts.OnEditFocusGained(self) end
     end
-    function methods:HighlightText() self.highlighted = true end
     function methods:SetFontString(fontString) self.fontString = fontString end
     function methods:GetFontString() return self.fontString end
     function methods:SetCheckedTexture(texture)
@@ -353,7 +349,6 @@ local function prepareMinimap(environment, world)
         local handlers = self.hooksByScript[script] or {}
         self.hooksByScript[script] = handlers
         handlers[#handlers + 1] = callback
-        self.hooks[#self.hooks + 1] = callback
     end
     function minimap:SetSize(width, height)
         self.width, self.height = width, height

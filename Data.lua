@@ -88,8 +88,7 @@ end
 function addon:GetDataSendStatusText()
     local failures, parts = self.dataState and self.dataState.sendFailures, {}
     if not failures then return "" end
-    for _, route in ipairs({ { "PARTY", "party" }, { "RAID", "raid" }, { "GUILD", "guild" },
-        { "CHANNEL", "global channel" } }) do
+    for _, route in ipairs({ { "PARTY", "party" }, { "RAID", "raid" }, { "GUILD", "guild" } }) do
         local reason = failures[route[1]]
         if reason then parts[#parts + 1] = route[2] .. " (" .. reason .. ")" end
     end
@@ -116,11 +115,10 @@ local function SendFrame(self, message)
     -- suppress overlapping deliveries. Every route gets a chance, even on failure.
     local accepted, changed = false, false
     local failures = self.dataState.sendFailures
-    for _, distribution in ipairs({ "PARTY", "RAID", "GUILD", "CHANNEL" }) do
+    for _, distribution in ipairs({ "PARTY", "RAID", "GUILD" }) do
         local route = routes[distribution]
         if route then
-            local target = distribution == "CHANNEL" and route or nil
-            local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, distribution, target)
+            local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, distribution)
             local reason
             if ok and not IsSecret(result) and result == Enum.SendAddonMessageResult.Success then accepted = true
             else reason = SendFailureReason(ok, result) end

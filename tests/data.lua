@@ -1,4 +1,4 @@
--- Shared feature routing and the native channel lifecycle run against mocked WoW APIs.
+-- Shared feature routing uses mocked native guild and party/raid addon messages.
 local loadNotifications = dofile("tests/support/notifications.lua")
 local helpers = dofile("tests/support/helpers.lua")
 local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
@@ -7,33 +7,22 @@ local function newAddon(saved, readOnly, withPositions, native)
     native = native or {}
     local world = {
         now = 0, epoch = 2000000000, timers = {}, sent = {}, messages = {}, frames = {},
-        x = 0.25, y = 0.75, map = 37, joins = {}, leaves = {}, channels = {}, nativeSends = {}, prefixCalls = {},
-        sendResult = 0, sendCalls = 0, sendAttempts = {}, roster = {}, passwordCalls = {}, passwordAttempts = 0,
-        guild = native.guild == true, party = native.party == true, raid = native.raid == true,
+        x = 0.25, y = 0.75, map = 37, nativeSends = {}, prefixCalls = {},
+        sendResult = 0, sendCalls = 0, sendAttempts = {},
+        guild = native.guild == true, raid = native.raid == true,
+        party = native.party == true or (native.party == nil and native.guild == nil and native.raid == nil),
     }
     world.sent = world.nativeSends
     local environment = setmetatable({
-        bit = false, bit32 = false, C_ChatInfo = false,
         GetTime = function() return world.now end,
         GetServerTime = function() return world.epoch + math.floor(world.now) end,
-        GetChannelName = function() return 0, nil end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         IsInGuild = function() return world.guild end,
         IsInGroup = function() return world.party or world.raid end,
         IsInRaid = function() return world.raid end,
         UnitFullName = function(unit) assert(unit == "player"); return native.playerName or "Self", "Test Realm" end,
-        UnitGUID = function(unit) assert(unit == "player"); return "Player-Test-Self" end,
-        GetNumDisplayChannels = function() return #world.roster end,
-        GetChannelDisplayInfo = function(displayIndex)
-            local entry = assert(world.roster[displayIndex], "Use a display-list index for the roster")
-            return entry.name, entry.header, false, entry.id, #(entry.members or {}), true, "CHANNEL_CATEGORY_CUSTOM"
-        end,
-        SetChannelPassword = function(name, password)
-            assert(password == "", "Existing data-channel passwords may only be cleared")
-            world.passwordAttempts = world.passwordAttempts + 1
-            if world.passwordThrows then error("Native password change unavailable") end
-            world.passwordCalls[#world.passwordCalls + 1] = { name = name, password = password }
-        end,
+        JoinTemporaryChannel = function() error("Native data must never join a custom channel") end,
+        LeaveChannelByName = function() error("Native data must never leave a custom channel") end,
         CreateFrame = function(kind)
             assert(kind == "Frame")
             local frame = { events = {} }
@@ -63,31 +52,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1, InvalidPrefix = 2 },
         SendAddonMessageResult = { Success = 0, NotInGuild = 10, AddOnMessageLockdown = 11 },
     }
-    environment.GetChannelName = function(identifier)
-        if type(identifier) == "string" then
-            local channel = world.channels[identifier:lower()]
-            if channel then return channel.id, channel.name end
-        else
-            for _, channel in pairs(world.channels) do if channel.id == identifier then return channel.id, channel.name end end
-        end
-        return 0, nil
-    end
-    environment.JoinTemporaryChannel = function(name, password)
-        assert(password == "", "Data channels always join without a password")
-        world.joins[#world.joins + 1] = { name = name, password = password, at = world.now }
-        if world.joinThrows then error("Native join unavailable") end
-        return 0, name
-    end
-    environment.LeaveChannelByName = function(name)
-        world.leaves[#world.leaves + 1] = name
-        if world.leaveThrows then error("Native leave unavailable") end
-        if not world.holdLeaves then world.channels[name:lower()] = nil end
-    end
     environment.C_ChatInfo = {
-        GetChannelRosterInfo = function(displayIndex, rosterIndex)
-            local member = assert(world.roster[displayIndex].members[rosterIndex])
-            return member.name, member.owner, member.moderator, member.guid
-        end,
         RegisterAddonMessagePrefix = function(prefix)
             world.prefixCalls[#world.prefixCalls + 1] = prefix
             if world.prefixThrows then error("Prefix registration unavailable") end
@@ -95,12 +60,10 @@ local function newAddon(saved, readOnly, withPositions, native)
         end,
         SendAddonMessage = function(prefix, message, distribution, target)
             world.sendCalls = world.sendCalls + 1
-            assert(distribution == "CHANNEL" or distribution == "GUILD" or distribution == "PARTY" or distribution == "RAID",
-                "Shared data broadcasts through eligible native routes, never whispers")
-            assert(distribution == "CHANNEL" or target == nil, "Only the additional global route has a target")
-            local packet = {
-                prefix = prefix, message = message, distribution = distribution, target = target, at = world.now,
-            }
+            assert(distribution == "GUILD" or distribution == "PARTY" or distribution == "RAID",
+                "Shared data broadcasts only through native guild and party/raid routes")
+            assert(target == nil, "Native broadcast routes have no channel target")
+            local packet = { prefix = prefix, message = message, distribution = distribution, at = world.now }
             world.sendAttempts[#world.sendAttempts + 1] = packet
             if world.sendThrows or (world.routeThrows and world.routeThrows[distribution]) then
                 error(world.sendError or "Native send unavailable")
@@ -110,27 +73,16 @@ local function newAddon(saved, readOnly, withPositions, native)
             if result ~= nil then return result end
             return world.sendResult
         end,
-        AreOutgoingAddonChatMessagesRestricted = function()
-            error("The native result, not a realm restriction precheck, decides acceptance")
-        end,
     }
-    environment.DEFAULT_CHAT_FRAME = {
-        channelList = { "General" },
-        AddChannel = function() error("Shared data must not appear in native chat") end,
-        AddMessage = function(_, message) world.messages[#world.messages + 1] = message end,
-    }
-    local addon = {
-        db = saved or { schemaVersion = 3, group = { secret = "otter-4827" } },
-        initialized = true, ready = false, savedDataReadOnly = readOnly,
-    }
+    local addon = { db = saved or { schemaVersion = 4 }, initialized = true, ready = false,
+        savedDataReadOnly = readOnly }
     function addon:Print(message) world.messages[#world.messages + 1] = message end
     world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
     function addon:RefreshPositionPins() end
-    for _, file in ipairs({ "Crypto.lua", "Group.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua" }) do
+    for _, file in ipairs({ "DataChannel.lua", "Data.lua", "DataStatus.lua" }) do
         loadModule(file, addon, environment)
     end
-    addon:InitializeGroup()
     if native.configure then native.configure(environment, world) end
     addon:InitializeData()
     if withPositions then
@@ -148,32 +100,27 @@ local function newAddon(saved, readOnly, withPositions, native)
         addon:OnDataLogin()
         if withPositions then addon:OnPositionLogin() end
     end
-    function world:member(id, name)
-        name = name or addon:GetGroupDataChannelName()
-        self.channels[name:lower()] = { id = id, name = name }
-        self:fire("CHANNEL_UI_UPDATE")
-    end
-    function world:notice(reason, name)
-        name = name or addon:GetGroupDataChannelName()
-        self:fire("CHAT_MSG_CHANNEL_NOTICE", reason, "", "", "", "", "", 0, 0, name)
-    end
     function world:incoming(message, sender, metadata)
         metadata = metadata or {}
-        self:fire("CHAT_MSG_ADDON", metadata.prefix or addon:GetDataPrefix(), message,
-            metadata.distribution or "CHANNEL", sender, nil, 0, metadata.id, metadata.name)
+        return self:fire("CHAT_MSG_ADDON", metadata.prefix or addon:GetDataPrefix(), message,
+            metadata.distribution or "PARTY", sender)
     end
     function world:connect(accepted)
         self.sendResult, self.sendThrows = accepted == false and 11 or 0, accepted == "throw"
-        if not addon.dataState.nativeStarted then self:login() end
-        if addon.dataState.awaitingLeave then self:advance(1) end
-        if addon:HasGroup() then self:member(7) end
+        if self.previousMembership then
+            self.party, self.raid, self.guild = unpack(self.previousMembership)
+            self.previousMembership = nil
+        end
+        if not addon.dataState.nativeStarted then self:login()
+        else self:fire("GROUP_ROSTER_UPDATE") end
     end
     function world:disconnect()
-        addon:LeaveDataChannel()
+        self.previousMembership = { self.party, self.raid, self.guild }
+        self.party, self.raid, self.guild = false, false, false
+        self:fire("GROUP_ROSTER_UPDATE")
     end
-    -- Test convenience only: every receive uses the actual native event path.
     function addon:ReceiveData(sender, message, distribution)
-        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, distribution or "CHANNEL", sender)
+        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, distribution or "PARTY", sender)
     end
     function world:activeTimers()
         local count = 0
@@ -188,9 +135,7 @@ local function newAddon(saved, readOnly, withPositions, native)
             local nextIndex, nextTimer
             for index, entry in ipairs(self.timers) do
                 if not entry.cancelled and entry.at <= target
-                    and (not nextTimer or entry.at < nextTimer.at) then
-                    nextIndex, nextTimer = index, entry
-                end
+                    and (not nextTimer or entry.at < nextTimer.at) then nextIndex, nextTimer = index, entry end
             end
             if not nextTimer then break end
             table.remove(self.timers, nextIndex)
@@ -297,354 +242,19 @@ assert(addon:SendData("echo", "current payload") and #world.sent == attempts + 1
 assert(world.sent[#world.sent].message == "1|echo|current payload")
 assert(equal(addon.db, database), "The communication helper must not persist its runtime state")
 
--- Shared data names remain group-derived and distinct from established chat names.
-local same = newAddon()
-local channel = addon:GetGroupDataChannelName()
-assert(type(channel) == "string" and #channel == 31 and channel:sub(1, 7) == "LITDATA")
-assert(same:GetGroupDataChannelName() == channel)
-assert(channel ~= addon:GetGroupChannelName())
-local oldFingerprint = addon:GetGroupFingerprint()
-local lifecycle = {}
-addon.OnGroupChanged = function(self)
-    assert(not self:IsDataConnected(), "Disconnect before chat observes the new group")
-    lifecycle[#lifecycle + 1] = "chat"
-end
-addon.OnPositionGroupChanged = function(self)
-    assert(not self:IsDataConnected(), "Disconnect before features observe the new group")
-    lifecycle[#lifecycle + 1] = "position"
-end
-assert(addon:SetGroupSecret("different-group"))
-assert(addon:IsGroupSwitching() and not addon:IsDataConnected()
-    and addon:GetGroupFingerprint() == oldFingerprint, "Block traffic before the current callback returns")
-world:advance(0)
-assert(#lifecycle == 2 and not addon:IsDataConnected() and notified[#notified] == false)
-assert(addon:GetGroupFingerprint() ~= oldFingerprint and addon:GetGroupDataChannelName() ~= channel)
-assert(not addon:SendData("echo", "old connection"))
-world:connect()
-assert(addon:ReceiveData("Friend", "1|echo|handler retained"), "Features survive a group change and can use the new connection")
-addon:LeaveGroup()
-world:advance(0)
-assert(not addon:IsDataConnected() and addon:GetGroupDataChannelName() == nil)
-world:connect()
-assert(not addon:IsDataConnected() and not addon:SendData("echo", "no group"))
-
--- Read-only profiles preserve all saved data and cannot connect or dispatch.
-local saved = { schemaVersion = 99, group = { secret = "otter-4827" }, custom = { untouched = true },
-    data = { channels = { global = false, future = "preserved" } } }
-local original = copy(saved)
-local readOnly, readOnlyWorld = newAddon(saved, true)
-readOnly.ready = true
-readOnly:RegisterDataFeature("echo", function() error("Read-only dispatch") end)
-readOnlyWorld:connect()
-assert(not readOnly:IsDataConnected() and not readOnly:SendData("echo", "payload")
-    and not readOnly:ReceiveData("Friend", "1|echo|payload"))
-assert(not readOnly:SetDataChannelEnabled("global", true)
-    and not readOnly:SetDataChannelEnabled("global", false))
-readOnlyWorld:advance(30)
-assert(equal(saved, original) and #readOnlyWorld.joins == 0 and #readOnlyWorld.leaves == 0
-    and #readOnlyWorld.sent == 0,
-    "Read-only startup cannot leave a disabled global channel or change its saved preference")
-
--- Clear old data-channel passwords only after membership and our own permission
--- arrive. Display-list indexes differ from native channel numbers.
+-- Newer saved profiles remain untouched and cannot send or receive.
 do
-    local function supplyRoster(clock, name, owner, moderator)
-        clock.roster = {
-            { name = "General", id = 1, members = {
-                { name = "Self", guid = "Player-Test-Self", owner = true, moderator = true },
-            } },
-            { name = name:lower(), id = 7, members = {
-                { name = "Friend", guid = "Player-Test-Friend", owner = true, moderator = true },
-                { name = "Self", guid = "Player-Test-Self", owner = owner, moderator = moderator },
-            } },
-        }
-    end
-
-    local current, clock = newAddon()
-    local name = current:GetGroupDataChannelName()
-    supplyRoster(clock, name, true, false)
-    clock:login()
-    clock:fire("CHANNEL_ROSTER_UPDATE", 2)
-    assert(#clock.passwordCalls == 0, "A pending join cannot clear channel passwords")
-    clock.roster = {}
-    clock:member(7)
-    assert(#clock.passwordCalls == 0, "Membership can precede the channel roster")
-    supplyRoster(clock, name, false, false)
-    clock:fire("CHANNEL_ROSTER_UPDATE", 2)
-    assert(#clock.passwordCalls == 0, "Another player's ownership grants us no permission")
-    clock.roster[2].members[2].moderator = true
-    clock:fire("CHANNEL_FLAGS_UPDATED", 2)
-    assert(#clock.passwordCalls == 1 and clock.passwordCalls[1].name:lower() == name:lower()
-        and clock.passwordCalls[1].password == "", "A moderator removes the existing data-channel password")
-    clock:fire("CHANNEL_ROSTER_UPDATE", 2)
-    clock:fire("PLAYER_REGEN_ENABLED")
-    clock:advance(15)
-    assert(#clock.passwordCalls == 1, "Do not repeat password changes on each roster or connection check")
-
-    clock.channels[name:lower()] = nil
-    clock:fire("CHANNEL_UI_UPDATE")
-    clock:advance(1)
-    clock:member(19)
-    assert(#clock.passwordCalls == 2, "A new membership clears a password installed while disconnected")
-
-    -- Restored native membership also needs cleanup, and a failed native call
-    -- must leave that cleanup eligible for a later event.
-    local restored, restoredClock = newAddon()
-    local restoredName = restored:GetGroupDataChannelName()
-    restoredClock.channels[restoredName:lower()] = { id = 23, name = restoredName }
-    supplyRoster(restoredClock, restoredName, true, false)
-    restoredClock.passwordThrows = true
-    restoredClock:login()
-    assert(#restoredClock.joins == 0 and #restoredClock.passwordCalls == 0
-        and restoredClock.passwordAttempts > 0, "Restored owners attempt cleanup without another join")
-    restoredClock.passwordThrows = false
-    restoredClock:fire("PLAYER_REGEN_ENABLED")
-    assert(#restoredClock.passwordCalls == 1 and restored:IsDataConnected(),
-        "A failed password change retries when the native API becomes available")
-
-    for _, gate in ipairs({ "disabled", "read-only", "switching", "stopped" }) do
-        local gated, gatedClock = newAddon()
-        local gatedName = gated:GetGroupDataChannelName()
-        gatedClock:connect()
-        if gate == "disabled" then
-            assert(gated:SetDataChannelEnabled("global", false))
-        elseif gate == "read-only" then
-            gated.savedDataReadOnly = true
-        elseif gate == "switching" then
-            assert(gated:SetGroupSecret("another-group"))
-        else
-            gatedClock:fire("PLAYER_LOGOUT")
-        end
-        supplyRoster(gatedClock, gatedName, true, true)
-        gatedClock:fire("CHANNEL_ROSTER_UPDATE", 2)
-        gatedClock:fire("CHANNEL_FLAGS_UPDATED", 2)
-        gatedClock:fire("PLAYER_REGEN_ENABLED")
-        assert(#gatedClock.passwordCalls == 0, gate .. " data routes cannot change channel passwords")
-    end
-end
-
--- Missing joins retry indefinitely with capped delays and a single timer despite UI-event storms.
-do
-    local joining, clock = newAddon(nil, false, false, {})
-    clock:login()
-    for _ = 1, 20 do clock:fire("CHANNEL_UI_UPDATE") end
-    assert(#clock.joins == 1 and clock:activeTimers() == 1)
-    clock:advance(2)
-    assert(#clock.joins == 2 and clock.joins[2].at == 2)
-    clock:advance(4)
-    assert(#clock.joins == 3 and clock.joins[3].at == 6)
-    clock:advance(8)
-    assert(#clock.joins == 4 and clock.joins[4].at == 14)
-    clock:advance(8)
-    assert(#clock.joins == 5 and clock.joins[5].at == 22 and not joining:IsDataConnected())
-    for _ = 1, 20 do clock:fire("CHANNEL_UI_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
-    clock:advance(29)
-    assert(#clock.joins == 5 and clock:activeTimers() == 1,
-        "UI events must neither accelerate nor postpone the capped retry")
-    clock:advance(91)
-    assert(#clock.joins == 9 and clock.joins[6].at == 52 and clock.joins[9].at == 142
-        and clock:activeTimers() == 1, "A configured data connection retries without a finite attempt limit")
-    clock:member(7)
-    assert(joining:IsDataConnected() and clock:activeTimers() == 1,
-        "Confirmed membership replaces the pending join timer with one membership watchdog")
-    clock:advance(60)
-    assert(#clock.joins == 9 and clock:activeTimers() == 1, "Healthy membership does not issue join requests")
-end
-
--- Departure is confirmed before activation; failed leaves stay disconnected and retry.
-do
-    local switching, clock = newAddon(nil, false, false, {})
-    switching:RegisterDataFeature("echo", function() end)
-    switching:RegisterDataRequest("snapshot", function() return "own" end, function() end)
-    clock:login()
-    clock:member(7)
-    local oldName, oldFingerprint = switching:GetGroupDataChannelName(), switching:GetGroupFingerprint()
-    local _, oldID = switching:RequestData("snapshot", "old")
-    clock.holdLeaves = true
-    assert(switching:SetGroupSecret("switch-target"))
-    assert(not switching:IsDataConnected() and not switching:SendData("echo", "between groups"))
-    clock:advance(0)
-    assert(switching:IsGroupSwitching() and switching:GetGroupFingerprint() == oldFingerprint
-        and clock.channels[oldName:lower()] and #clock.joins == 1
-        and next(switching.dataState.pendingRequests) == nil,
-        "Keep old membership separate from the destination while clearing outstanding requests")
-    assert(switching:SetGroupSecret("latest-switch-target"))
-    clock.leaveThrows, clock.holdLeaves = true, false
-    clock:advance(6)
-    assert(switching:IsGroupSwitching() and #clock.joins == 1 and not switching:IsDataConnected(),
-        "A failed departure cannot fall through to joining the destination")
-    clock.leaveThrows = false
-    clock:advance(5)
-    assert(not switching:IsGroupSwitching() and not clock.channels[oldName:lower()] and #clock.joins == 2
-        and clock.joins[2].name == switching:GetGroupDataChannelName()
-        and switching:GetGroupSecret() == "latest-switch-target", "The latest destination is the only new join")
-    clock:member(12)
-    assert(switching:IsDataConnected() and switching:SendData("echo", "new group")
-        and clock.nativeSends[#clock.nativeSends].target == "12")
-    assert(not switching:ReceiveData("Friend", "1|R|snapshot|" .. oldID .. "|self-testrealm|stale"),
-        "The new connection has no request target for an old reply")
-end
-
--- Native leave notices recover automatically and coalesce duplicate events before retrying.
-for _, event in ipairs({ "YOU_LEFT", "CHANNEL_LEFT" }) do
-    local recovering, clock = newAddon(nil, false, false, {})
-    clock:login()
-    clock:member(7)
-    local name = recovering:GetGroupDataChannelName()
-    if event == "CHANNEL_LEFT" then clock:fire(event, 7, name) else clock:notice(event) end
-    assert(not recovering:IsDataConnected() and recovering.dataState.phase == "joining")
-    clock:fire("CHANNEL_UI_UPDATE")
-    assert(not recovering:IsDataConnected(), "A leave notice invalidates a still-cached native membership record")
-    clock.channels[name:lower()] = nil
-    clock:advance(0.5)
-    for _ = 1, 20 do
-        if event == "CHANNEL_LEFT" then clock:fire(event, 7, name) else clock:notice(event) end
-        clock:fire("CHANNEL_UI_UPDATE")
-    end
-    clock:advance(0.5)
-    assert(#clock.joins == 2 and clock.joins[2].at == 1 and clock:activeTimers() == 1,
-        "Repeated leave notices must not postpone the automatic reconnect or multiply requests")
-    clock:member(11)
-    assert(recovering:IsDataConnected())
-end
-
--- Manual departure waits for native cleanup, then reconnects without false success.
-do
-    local recovering, clock = newAddon()
+    local saved = { schemaVersion = 99, custom = { untouched = true },
+        data = { channels = { party = false, future = "preserved" } } }
+    local original = copy(saved)
+    local current, clock = newAddon(saved, true, false, { guild = true })
+    current:RegisterDataFeature("echo", function() error("Read-only dispatch") end)
     clock:connect()
-    clock.leaveThrows = true
-    assert(recovering:LeaveDataChannel())
-    clock:advance(4)
-    assert(not recovering:IsDataConnected() and #clock.joins == 1)
-    clock.leaveThrows = false
-    clock:advance(1)
-    assert(#clock.leaves == 2 and #clock.joins == 2)
-    clock:member(11)
-    assert(recovering:IsDataConnected())
-end
--- The watchdog recovers silent membership loss even when UI events are busy and features are off.
-do
-    local recovering, clock = newAddon()
-    clock:connect()
-    clock:advance(14)
-    for _ = 1, 20 do clock:fire("CHANNEL_UI_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
-    clock.channels[recovering:GetGroupDataChannelName():lower()] = nil
-    clock:advance(1)
-    assert(not recovering:IsDataConnected() and #clock.joins == 2 and clock.joins[2].at == 15)
-    clock:member(13)
-    assert(recovering:IsDataConnected())
-end
--- A send detects lost membership before calling the native transport, then uses the recovered channel number.
-do
-    local recovering, clock = newAddon()
-    recovering:RegisterDataFeature("echo", function() end)
-    clock:connect()
-    clock.channels[recovering:GetGroupDataChannelName():lower()] = nil
-    local calls = clock.sendCalls
-    assert(not recovering:SendData("echo", "lost") and not recovering:IsDataConnected() and clock.sendCalls == calls)
-    clock:advance(1)
-    clock:member(9)
-    assert(recovering:SendData("echo", "reconnected") and clock.sent[#clock.sent].target == "9")
-end
--- Restored membership and late old-channel joins preserve the active group and unrelated channels.
-do
-    local switching, clock = newAddon()
-    local oldName = switching:GetGroupDataChannelName()
-    clock:member(4)
-    clock:login()
-    assert(switching:IsDataConnected() and #clock.joins == 0)
-    clock.channels.unrelated = { id = 50, name = "Unrelated" }
-    assert(switching:SetGroupSecret("different-native-group"))
-    clock:advance(0)
-    clock:member(12)
-    clock:member(4, oldName)
-    clock:notice("YOU_JOINED", oldName)
-    assert(switching:IsDataConnected() and not clock.channels[oldName:lower()] and clock.channels.unrelated)
-    clock:fire("PLAYER_LOGOUT")
-    local joins = #clock.joins
-    clock:notice("YOU_LEFT")
-    clock:advance(60)
-    assert(not switching:IsDataConnected() and #clock.joins == joins and clock:activeTimers() == 0)
-end
--- Native rejection notices back off, retain automatic recovery and accept a late successful join.
-for _, reason in ipairs({ "WRONG_PASSWORD", "CHANNEL_PASSWORD_REQUEST", "THROTTLED" }) do
-    local recovering, clock = newAddon(nil, false, false, {})
-    clock:login()
-    local function fail()
-        if reason == "CHANNEL_PASSWORD_REQUEST" then clock:fire(reason, recovering:GetGroupDataChannelName())
-        else clock:notice(reason) end
-    end
-    fail()
-    assert(recovering.dataState.phase == "error" and not recovering:IsDataConnected())
-    clock:advance(10)
-    for _ = 1, 20 do fail(); clock:fire("CHANNEL_UI_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
-    clock:advance(19)
-    assert(#clock.joins == 1 and clock:activeTimers() == 1, "Rejections must not create immediate request storms")
-    clock:advance(1)
-    assert(#clock.joins == 2 and clock.joins[2].at == 30,
-        "Repeated notices must not postpone the next retry")
-    fail()
+    assert(not current:IsDataConnected() and not current:SendData("echo", "payload")
+        and not current:ReceiveData("Friend", "1|echo|payload", "GUILD"))
+    assert(not current:SetDataChannelEnabled("guild", true))
     clock:advance(30)
-    assert(#clock.joins == 3 and clock.joins[3].at == 60)
-    fail()
-    clock:member(7)
-    clock:notice("YOU_JOINED")
-    assert(recovering:IsDataConnected(), "A confirmed late membership recovers from a rejected join")
-    clock:advance(30)
-    assert(#clock.joins == 3 and clock:activeTimers() == 1)
-end
--- Prefix registration and thrown join requests retry, then recover when calls succeed.
-for _, failure in ipairs({ "prefixResult", "prefixThrows", "joinThrows" }) do
-    local failed, clock = newAddon(nil, false, false, {})
-    clock[failure] = failure == "prefixResult" and 2 or true
-    clock:login()
-    clock:advance(29)
-    assert(not failed:IsDataConnected() and failed.dataState.phase == "error")
-    assert(#clock.joins == (failure == "joinThrows" and 1 or 0))
-    clock:advance(31)
-    assert(#clock.joins == (failure == "joinThrows" and 3 or 0) and clock:activeTimers() == 1)
-    assert(#clock.prefixCalls == (failure == "joinThrows" and 1 or 3))
-    clock[failure] = nil
-    clock:advance(30)
-    assert(#clock.joins == (failure == "joinThrows" and 4 or 1))
-    clock:member(7)
-    assert(failed:IsDataConnected())
-end
-
--- Native capabilities are captured at initialization and cannot appear midway through a session.
-do
-    local restore
-    local missing, clock = newAddon(nil, false, false, { configure = function(environment)
-        local join = environment.JoinTemporaryChannel
-        environment.JoinTemporaryChannel = false
-        restore = function() environment.JoinTemporaryChannel = join end
-    end })
-    clock:login()
-    restore()
-    missing:JoinDataChannel(true)
-    clock:advance(90)
-    assert(not missing:IsDataConnected() and #clock.joins == 0 and #clock.prefixCalls == 1)
-end
--- Removing the configured group cancels both retry and healthy membership timers.
-for _, connected in ipairs({ false, true }) do
-    local leaving, clock = newAddon(nil, false, false, {})
-    clock:login()
-    if connected then clock:member(7) end
-    leaving:LeaveGroup()
-    local requests = #clock.joins
-    clock:advance(120)
-    clock:fire("CHANNEL_UI_UPDATE")
-    clock:fire("PLAYER_ENTERING_WORLD")
-    assert(not leaving:IsDataConnected() and #clock.joins == requests and clock:activeTimers() == 0,
-        "A removed group never reconnects")
-end
-do
-    local duplicate, clock = newAddon(nil, false, false, {})
-    clock.prefixResult = 1
-    clock:login()
-    clock:member(7)
-    assert(duplicate:IsDataConnected(), "An already registered native prefix is reusable")
-
+    assert(equal(saved, original) and #clock.sent == 0 and #clock.prefixCalls == 0)
 end
 
 -- Real channel fan-out: every client sees the request and response broadcasts, including its own echoes.
@@ -652,7 +262,7 @@ local function newRequestBus(withPositions, beforeConnect)
     local bus = { clients = {}, queue = {}, delivered = 0 }
     function bus:add(name, now)
         local profile = withPositions and {
-            schemaVersion = 3, group = { secret = "otter-4827" }, position = { sharing = true },
+            schemaVersion = 4, position = { sharing = true },
         } or nil
         local current, clock = newAddon(profile, false, withPositions, { playerName = name })
         local client = { addon = current, world = clock, name = name, requests = {}, responses = {} }
@@ -668,13 +278,12 @@ local function newRequestBus(withPositions, beforeConnect)
             local result = nativeSend(prefix, message, distribution, target)
             if result == 0 then
                 bus.queue[#bus.queue + 1] = { sender = name .. "-TestRealm", message = message,
-                    channel = current:GetGroupDataChannelName() }
+                    distribution = distribution }
             end
             return result
         end
         if beforeConnect then beforeConnect(client) end
         clock:login()
-        clock:member(7)
         return client
     end
     function bus:pump()
@@ -683,9 +292,8 @@ local function newRequestBus(withPositions, beforeConnect)
             self.delivered = self.delivered + 1
             assert(self.delivered < 100, "A snapshot must not trigger response/request loops")
             for _, client in ipairs(self.clients) do
-                local channel = client.world.channels[packet.channel:lower()]
-                if channel then
-                    client.world:incoming(packet.message, packet.sender, { id = channel.id, name = packet.channel })
+                if client.addon.dataState.routes[packet.distribution] then
+                    client.world:incoming(packet.message, packet.sender, { distribution = packet.distribution })
                 end
             end
         end
@@ -725,7 +333,6 @@ end
 local function requestFixture(onRequest, onResponse, native)
     local current, clock = newAddon(nil, false, false, native or { playerName = "Self" })
     clock:login()
-    clock:member(7)
     assert(current:RegisterDataRequest("snapshot", onRequest or function() return "own" end, onResponse or function() end))
     return current, clock
 end
@@ -866,15 +473,14 @@ do
     assert(clock.nativeSends[#clock.nativeSends].message == "1|R|other|healthy|friend-testrealm|working")
 end
 
--- Native reconnects, group changes and logout invalidate request correlation.
-for _, action in ipairs({ "disconnect", "switch", "logout" }) do
+-- Losing native memberships and logging out invalidate request correlation.
+for _, action in ipairs({ "disconnect", "logout" }) do
     local calls, responses = 0, 0
     local current, clock = requestFixture(function() calls = calls + 1; return "own" end,
         function() responses = responses + 1 end)
     local accepted, oldID = current:RequestData("snapshot", "old")
     assert(accepted and current:ReceiveData("Friend", "1|Q|snapshot|peer-request|"))
     if action == "disconnect" then clock:disconnect()
-    elseif action == "switch" then current:SetGroupSecret("snapshot-other-group"); clock:advance(0)
     else clock:fire("PLAYER_LOGOUT") end
     assert(next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil, action)
     if action ~= "logout" then
@@ -907,16 +513,13 @@ end
 
 local function statusFixture(values, accepted, native)
     local current, clock = newAddon(nil, false, false, native)
-    local samples, connections, contacts = {}, {}, {}
+    local samples, connections = {}, {}
     assert(current:RegisterDataStatusProvider("player", function() return values end,
         function(sender, fields, stamp, sequence, metadata)
             samples[#samples + 1] = { sender = sender, fields = fields, stamp = stamp, sequence = sequence, metadata = metadata }
-        end, function(connected) connections[#connections + 1] = connected end,
-        function(sender, stamp, metadata)
-            contacts[#contacts + 1] = { sender = sender, stamp = stamp, metadata = metadata }
-        end))
+        end, function(connected) connections[#connections + 1] = connected end))
     clock:connect(accepted)
-    return current, clock, samples, connections, contacts
+    return current, clock, samples, connections
 end
 
 local function full(session, stamp, revision, body)
@@ -928,7 +531,7 @@ local function receive(current, sender, payload)
 end
 
 local function positionStatusFixture(values, sharing)
-    local profile = { schemaVersion = 3, group = { secret = "otter-4827" }, position = { sharing = sharing ~= false } }
+    local profile = { schemaVersion = 4, position = { sharing = sharing ~= false } }
     local current, clock = newAddon(profile, false, true)
     local samples = {}
     assert(current:RegisterDataStatusProvider("player", function() return values end,
@@ -1322,11 +925,10 @@ end
 -- Unknown numeric IDs never leak to named consumers, but still participate in
 -- same-revision consistency. Newer complete snapshots replace all prior fields.
 do
-    local current, clock, samples, _, contacts = statusFixture({ level = 24 })
+    local current, clock, samples = statusFixture({ level = 24 })
     local function sample(revision, expected)
         local received = samples[#samples]
         assert(received.sequence == revision and equal(received.fields, expected))
-        assert(contacts[#contacts].metadata.synchronized)
     end
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "1=25|13=future|65535=edge")))
     sample(1, { level = "25" })
@@ -1351,10 +953,10 @@ do
     local current, clock, samples, connections = statusFixture(values)
     assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|[^|]+|5|F|[^|]+|2000000000|1|"))
     assert(clock.sent[1].message:find("1=24|2=10|3=100|4=1", 1, true))
-    current:JoinDataChannel(false)
+    current:StartDataMessages()
     current:OnDataLogin()
     clock:advance(25)
-    assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 2, "One membership check and one shared status timer")
+    assert(#clock.sent == 1 and #connections == 2 and clock:activeTimers() == 1, "Only the shared status timer remains")
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].at == 30
         and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000030|1|1=24|2=10|3=100|4=1$"))
@@ -1373,7 +975,7 @@ do
     assert(current:ReceiveData("Friend", "1|Q|status|joined|" .. full("friend-1", 2000000040, 1,
         "1=25|2=5|3=200|4=1")))
     assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.xp == "5"
-        and samples[1].metadata.kind == "full")
+        and samples[1].metadata.session == "friend-1")
     assert(#clock.sent == 5 and clock.sent[5].message:match("^1|R|status|joined|friend%-testrealm|5|F|"))
     assert(clock.sent[5].message:find("2=30", 1, true))
     clock:advance(5)
@@ -1404,12 +1006,12 @@ end
 -- Complete snapshots dispatch independent tables. Omitted fields disappear;
 -- an explicitly empty string remains a real value.
 do
-    local current, clock, samples, _, contacts = statusFixture({ level = 24 })
+    local current, clock, samples = statusFixture({ level = 24 })
     local second = {}
     assert(current:RegisterDataStatusProvider("future", function() return { sharing = true, xp = "a|b=c%" } end,
         function(_, fields, _, _, metadata)
             second[#second + 1] = { level = fields.level, metadata = metadata }
-            fields.level = "mutated"; metadata.kind = "mutated"
+            fields.level = "mutated"; metadata.session = "mutated"
         end))
     assert(not current:RegisterDataStatusProvider("future", function() end, function() end))
     assert(not current:RegisterDataStatusProvider("Upper", function() end, function() end))
@@ -1417,30 +1019,31 @@ do
     assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|")
         and clock.sent[2].message:find("2=a%7Cb%3Dc%25|8=1", 1, true)
         and clock.sent[2].message:find("1=24", 1, true))
-    assert(clock:activeTimers() == 2 and current.dataState.features.status and current.dataState.requests.status
+    assert(clock:activeTimers() == 1 and current.dataState.features.status and current.dataState.requests.status
         and not current.dataState.features.player and not current.dataState.features.future)
     local initial = full("friend-1", 2000000005, 10, "1=25|2=future%7Cvalue|3=|4=1|6=old")
     assert(receive(current, "Friend", initial))
     assert(#samples == 1 and samples[1].fields.level == "25" and samples[1].fields.xp == "future|value"
         and samples[1].fields.xpMax == "" and samples[1].fields.xpState == "known" and second[1].level == "25"
-        and samples[1].metadata.kind == "full" and contacts[1].metadata.synchronized)
+        and samples[1].metadata.session == "friend-1" and second[1].metadata.session == "mutated",
+        "Each provider receives independent fields and session metadata")
     assert(not receive(current, "FRIEND-Test Realm", initial))
     assert(not receive(current, "Friend", full("friend-1", 2000000004, 9, "1=26")))
     assert(not receive(current, "Self-TestRealm", initial))
     assert(receive(current, "Friend", full("friend-1", 2000000006, 11, "1=25|2=20|3=future%7Cvalue")))
     assert(#samples == 2 and samples[2].fields.level == "25" and samples[2].fields.xp == "20"
         and samples[2].fields.xpMax == "future|value" and samples[2].fields.canInvite == nil
-        and samples[2].fields.xpState == nil and samples[2].metadata.kind == "full" and samples[2].metadata.coherent)
+        and samples[2].fields.xpState == nil and samples[2].metadata.session == "friend-1")
     assert(receive(current, "Friend", full("friend-1", 2000000036, 11, "1=25|2=20|3=future%7Cvalue")))
-    assert(#samples == 3 and #contacts == 3 and contacts[3].metadata.kind == "full"
-        and samples[3].metadata.hasBaseline and samples[3].metadata.synchronized,
+    assert(#samples == 3 and samples[3].stamp == 2000000036 and samples[3].fields.xp == "20"
+        and samples[3].metadata.session == "friend-1",
         "A complete refresh delivers current values and refreshes presence")
     assert(not receive(current, "Friend", full("friend-1", 2000000036, 11, "1=25|2=20|3=future%7Cvalue")))
     local attempts, healthy = 0, 0
     assert(current:RegisterDataStatusProvider("declining", function() error("Collector failed") end,
         function() attempts = attempts + 1; return false end))
     assert(current:RegisterDataStatusProvider("broken", function() return nil end,
-        function() error("Receiver failed") end, nil, function() error("Contact failed") end))
+        function() error("Receiver failed") end))
     assert(current:RegisterDataStatusProvider("healthy", function() return { xpMax = "healthy" } end,
         function() healthy = healthy + 1 end))
     assert(receive(current, "Other", full("other-1", 2000000005, 1, "1=99")))
@@ -1454,16 +1057,16 @@ end
 -- session; timestamps also order its refreshes and changes of session.
 do
     local values = { xp = 1 }
-    local current, clock, samples, _, contacts = statusFixture(values)
+    local current, clock, samples = statusFixture(values)
     assert(receive(current, "Friend", full("friend-1", 2000000000, 1, "1=24|2=10")))
     assert(receive(current, "Friend", full("friend-1", 2000000005, 30, "1=24|2=30")))
-    assert(#samples == 2 and #contacts == 2 and contacts[2].metadata.synchronized
-        and samples[2].fields.xp == "30", "No earlier revision is needed for a complete snapshot")
+    assert(#samples == 2 and samples[2].fields.xp == "30",
+        "No earlier revision is needed for a complete snapshot")
     assert(not receive(current, "Friend", full("friend-1", 2000000006, 29, "1=24|2=29")))
     assert(not receive(current, "Friend", full("friend-1", 2000000004, 30, "1=24|2=30")))
     assert(not receive(current, "Friend", full("friend-1", 2000000006, 30, "1=24|2=99")))
     assert(not receive(current, "Friend", full("friend-1", 2000000005, 30, "1=24|2=30")))
-    assert(#samples == 2 and #contacts == 2, "Rejected packets cannot refresh presence or alter current values")
+    assert(#samples == 2, "Rejected packets cannot refresh presence or alter current values")
     assert(receive(current, "Friend", full("friend-1", 2000000006, 30, "1=24|2=30")))
     assert(receive(current, "Friend", full("friend-1", 2000000005, 31, "1=24|2=31")),
         "A newer revision retains precedence over timestamp ordering within one session")
@@ -1474,35 +1077,10 @@ do
     assert(not receive(current, "Friend", full("old-session", 2000000005, 99, "1=99")))
     assert(samples[#samples].fields.xp == "0" and samples[#samples].metadata.session == "friend-2")
     assert(receive(current, "Unknown", full("unknown-1", 2000000006, 9999, "2=99")))
-    assert(samples[#samples].fields.xp == "99" and samples[#samples].metadata.synchronized,
+    assert(samples[#samples].fields.xp == "99" and samples[#samples].metadata.session == "unknown-1",
         "A new peer can start at any complete revision")
     clock:advance(5)
     assert(#clock.sent == 1, "Receiving status never schedules a standalone recovery request")
-end
-
--- A group switch requested during delivery blocks new work immediately while
--- allowing the current callback set to finish before resetting its state.
-do
-    local current, clock, samples = statusFixture({ level = 24 })
-    local switched, finished = false, false
-    local oldName = current:GetGroupDataChannelName()
-    assert(current:RegisterDataStatusProvider("alpha", function() return {} end,
-        function(sender)
-            if switched then return end
-            switched = true
-            assert(current:SetGroupSecret("switch-after-delivery"))
-            assert(current:IsGroupSwitching() and current:GetGroupDataChannelName() == oldName)
-            assert(not receive(current, sender, full("old-peer", 2000000001, 2, "1=stale")))
-            assert(not current:RequestData("status", full("local", 2000000000, 1, "1=24")) and #clock.sent == 1)
-            finished = true
-        end))
-    assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
-    assert(finished and #samples == 1 and samples[1].fields.level == "25"
-        and current:GetGroupDataChannelName() == oldName and current:IsGroupSwitching(),
-        "No new group is activated inside the old group's callback")
-    clock:advance(0)
-    assert(not current:IsGroupSwitching() and current:GetGroupDataChannelName() ~= oldName
-        and next(current.dataState.status.received) == nil, "Deferred cleanup discards old peer snapshots")
 end
 
 -- Logically targeted replies do not postpone the public refresh needed by
@@ -1524,12 +1102,12 @@ end
 -- Initial responses may repeat the current sample in the same server second;
 -- this exception never permits conflicting values at an existing revision.
 do
-    local current, clock, samples, _, contacts = statusFixture({ xp = 1 })
+    local current, clock, samples = statusFixture({ xp = 1 })
     local requestID = assert(clock.sent[1].message:match("^1|Q|status|([^|]+)|"))
     local snapshot = full("friend-1", 2000000000, 4, "2=40")
     assert(receive(current, "Friend", snapshot))
     assert(current:ReceiveData("Friend", "1|R|status|" .. requestID .. "|self-testrealm|" .. snapshot))
-    assert(#samples == 2 and #contacts == 2 and samples[2].fields.xp == "40")
+    assert(#samples == 2 and samples[2].fields.xp == "40")
     assert(receive(current, "Other", full("other-1", 2000000000, 4, "2=40")))
     assert(not current:ReceiveData("Other", "1|R|status|" .. requestID .. "|self-testrealm|"
         .. full("other-1", 2000000000, 4, "2=99")),
@@ -1618,25 +1196,6 @@ do
     assert(#clock.sent == sent and clock:activeTimers() == 0)
 end
 
--- Reconnecting after a coordinated switch starts a distinct full status session.
-do
-    local values = { level = 24, xp = 10 }
-    local current, clock = statusFixture(values, nil, {})
-    local oldSession = assert(clock.nativeSends[1].message:match("|5|F|([^|]+)|"))
-    assert(receive(current, "Friend", full("old-peer", 2000000000, 1, "1=25")))
-    values.xp = 20
-    clock:advance(5)
-    assert(clock.nativeSends[2].message:match("|5|F|"))
-    assert(current:SetGroupSecret("fresh-status-group"))
-    clock:advance(0)
-    assert(next(current.dataState.status.received) == nil and not current:IsDataConnected())
-    clock:member(12)
-    local snapshot = clock.nativeSends[#clock.nativeSends].message
-    local session = assert(snapshot:match("|5|F|([^|]+)|%d+|1|"))
-    assert(session ~= oldSession and snapshot:find("1=24|2=20", 1, true),
-        "New group revisions restart only under a fresh session and complete snapshot")
-end
-
 -- Real roster fields share complete native status snapshots; periodic refreshes
 -- preserve presence without resetting the age of an unchanged XP sample.
 do
@@ -1684,10 +1243,10 @@ do
     alice.world:advance(4); bus:pump(); assert(counts(alice) == 0)
     alice.world:advance(1); bus:pump()
     assert(counts(alice) == 1 and player(bob, "Alice").xp == 420 and not alice.addon.dataState.features.activity)
-    local xpStamp = player(bob, "Alice").xpUpdatedAt
+    local xpStamp = assert(bob.addon.rosterState.progress["alice-testrealm"].xpUpdatedAt)
     alice.world:advance(30); bus:pump()
     assert(counts(alice) == 2 and not player(bob, "Alice").xpStale
-        and player(bob, "Alice").xpUpdatedAt == xpStamp)
+        and bob.addon.rosterState.progress["alice-testrealm"].xpUpdatedAt == xpStamp)
     alice.world.level, alice.world.xp, alice.world.xpMax = 25, 0, 1200
     alice.world:fire("PLAYER_LEVEL_UP", 25)
     alice.world:fire("PLAYER_XP_UPDATE", "player")
@@ -1698,7 +1257,8 @@ do
     assert(player(bob, "Alice").level == 25 and player(bob, "Alice").xp == 0
         and player(bob, "Alice").xpMax == 1200 and counts(alice) == 3)
     alice.world:disconnect()
-    assert(player(alice, "Bob").xpStale)
+    assert(#alice.addon:GetOverviewPlayers() == 0 and alice.addon.rosterState.progress["bob-testrealm"].disconnected,
+        "Losing all native audiences hides retained peers and marks their progress stale")
     alice.world:connect()
     assert(player(alice, "Bob").xp == 200 and player(alice, "Bob").xpStale,
         "Reconnect keeps the last reported XP stale until the shared status response arrives")
@@ -1763,12 +1323,6 @@ do
     assert(alice.addon:GetGroupBurnedStatus().average == 80 and alice.addon:GetGroupBurnedStatus().count == 1,
         "Reconnect waits for fresh remote values while retaining the personal setting")
     assert(receive(alice.addon, "Friend", full("friend-new", 2000000090, 1, "12=20")))
-    assert(alice.addon:SetGroupSecret("new-burned-group"))
-    assert(alice.addon:GetGroupBurnedStatus().count == 0 and next(alice.addon.burnedState.peers) == nil,
-        "Group switching hides and discards old reports immediately")
-    alice.world:advance(0)
-    alice.world:member(12)
-    assert(alice.addon:GetGroupBurnedStatus().count == 1 and alice.addon:GetBurnedStatus() == 80)
     alice.world:fire("PLAYER_LOGOUT")
     alice.world:advance(100)
     assert(alice.addon:GetGroupBurnedStatus().count == 0 and alice.world:activeTimers() == 0,
@@ -1798,207 +1352,11 @@ do
         "The unchanged personal status keeps its normal 30-second heartbeat during cooldown")
 end
 
--- Party/raid and guild are usable before the additional global channel joins.
--- Losing or changing one route must preserve the other routes and request caches.
-do
-    local current, clock = newAddon(nil, false, false, { party = true, guild = true })
-    local notices = {}
-    assert(current:RegisterDataFeature("echo", function() end,
-        function(connected) notices[#notices + 1] = connected end))
-    assert(current:RegisterDataRequest("snapshot", function() return "own" end, function() end))
-    clock:login()
-    assert(current:IsDataConnected() and not current.dataState.channelConnected
-        and current.dataState.routes.PARTY and current.dataState.routes.GUILD
-        and not current.dataState.routes.CHANNEL and #clock.joins == 1,
-        "Native memberships connect without waiting for global-channel membership")
-    local _, id = current:RequestData("snapshot", "pending")
-    assert(id and current:ReceiveData("Friend", "1|Q|snapshot|peer|", "PARTY"))
-    local pending, replied = current.dataState.pendingRequests, current.dataState.repliedRequests
-    local noticeCount = #notices
-    clock:member(9)
-    assert(current:IsDataConnected() and current.dataState.channelConnected
-        and current.dataState.routes.CHANNEL == "9" and #notices == noticeCount,
-        "Adding global membership does not disconnect an existing native route")
-    clock:notice("WRONG_PASSWORD")
-    assert(current:IsDataConnected() and not current.dataState.channelConnected
-        and not current.dataState.routes.CHANNEL and #notices == noticeCount,
-        "Global-channel failures do not interrupt guild or party data")
-    clock.party, clock.raid = false, true
-    clock:fire("GROUP_ROSTER_UPDATE")
-    assert(current.dataState.routes.RAID and not current.dataState.routes.PARTY
-        and current.dataState.routes.GUILD and #notices == noticeCount,
-        "A raid uses RAID in place of PARTY while guild delivery remains active")
-    assert(current.dataState.pendingRequests == pending and pending[id]
-        and current.dataState.repliedRequests == replied and next(replied),
-        "Route churn preserves request correlation and duplicate reply suppression")
-    clock.guild, clock.raid = false, false
-    clock:fire("PLAYER_GUILD_UPDATE", "player")
-    assert(not current:IsDataConnected() and notices[#notices] == false
-        and next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil,
-        "Losing the final route disconnects and invalidates request caches")
-    clock.guild = true
-    clock:fire("PLAYER_ENTERING_WORLD")
-    assert(current:IsDataConnected() and current.dataState.routes.GUILD,
-        "World entry rechecks native memberships even during global-channel recovery")
-    assert(current:SetGroupSecret("another-native-group") and current:IsGroupSwitching())
-    assert(not current:SendData("echo", "during switch")
-        and not current:ReceiveData("Friend", "1|echo|during switch", "GUILD"))
-    clock:advance(0)
-    assert(current:IsDataConnected() and current.dataState.routes.GUILD,
-        "Native routes resume after the configured group switch completes")
-    clock:fire("PLAYER_LOGOUT")
-    clock:fire("PLAYER_GUILD_UPDATE", "player")
-    assert(not current:IsDataConnected() and not current:SendData("echo", "after logout"))
-end
-
--- Native startup callbacks may change configuration before any global join was
--- sent; the abandoned group's custom channel must never be requested afterward.
-for _, action in ipairs({ "switch", "leave" }) do
-    local current, clock = newAddon(nil, false, false, { guild = true })
-    local changed = false
-    assert(current:RegisterDataFeature("startup_change", function() end, function(connected)
-        if connected and not changed then
-            changed = true
-            if action == "switch" then assert(current:SetGroupSecret("switch-on-native-startup"))
-            else assert(current:LeaveGroup()) end
-        end
-    end))
-    clock:login()
-    assert(changed and current:IsGroupSwitching() and not current:IsDataConnected()
-        and #clock.joins == 0 and #clock.sendAttempts == 0,
-        "A " .. action .. " requested by a native connection callback abandons the old global join")
-    assert(not current:SendData("startup_change", "abandoned")
-        and not current:ReceiveData("Friend", "1|startup_change|abandoned", "GUILD"))
-    clock:advance(0)
-    if action == "switch" then
-        assert(current:IsDataConnected() and #clock.joins == 1
-            and clock.joins[1].name == current:GetGroupDataChannelName(),
-            "Only the replacement group requests a global channel after native startup changes")
-    else
-        assert(not current:HasGroup() and current:IsDataConnected() and current.dataState.routes.GUILD
-            and #clock.joins == 0, "Leaving the keyed group resumes independent guild sharing")
-    end
-    assert(#clock.sendAttempts == 0, "Startup configuration callbacks cannot send abandoned-group frames")
-end
-
--- Missing or rejected global-channel APIs cannot disable native group/guild data.
-for _, missingAPI in ipairs({ "JoinTemporaryChannel", "GetChannelName" }) do
-    local current, clock = newAddon(nil, false, false, { guild = true, configure = function(environment)
-        environment[missingAPI] = false
-    end })
-    assert(current:RegisterDataFeature("echo", function() end))
-    clock:login()
-    assert(current:IsDataConnected() and #clock.prefixCalls == 1 and #clock.joins == 0)
-    assert(current:SendData("echo", missingAPI) and #clock.sent == 1
-        and clock.sent[1].distribution == "GUILD" and clock.sent[1].target == nil,
-        "Addon messaging remains available without " .. missingAPI)
-end
-do
-    local current, clock = newAddon(nil, false, false, { party = true, configure = function(_, world)
-        world.joinThrows = true
-    end })
-    assert(current:RegisterDataFeature("echo", function() end))
-    clock:login()
-    assert(current:IsDataConnected() and current:SendData("echo", "join rejected")
-        and clock.sent[1].distribution == "PARTY")
-end
-
--- Native memberships retain startup and read-only gates without requiring a key for guild.
-do
-    local current, clock = newAddon(nil, true, false, { guild = true, raid = true })
-    assert(current:RegisterDataFeature("echo", function() error("Inactive native receive") end))
-    assert(not current:SendData("echo", "before login"))
-    clock:login()
-    clock:fire("GROUP_ROSTER_UPDATE")
-    clock:fire("PLAYER_GUILD_UPDATE", "player")
-    assert(not current:IsDataConnected() and #clock.sendAttempts == 0
-        and not current:ReceiveData("Friend", "1|echo|inactive", "GUILD"))
-end
-
-do
-    local current, clock = newAddon({ schemaVersion = 3, group = { secret = "" } }, false, false,
-        { guild = true, raid = true })
-    local received = 0
-    assert(current:RegisterDataFeature("echo", function() received = received + 1 end))
-    assert(not current:SendData("echo", "before login"))
-    clock:login()
-    assert(current:IsDataConnected() and current.dataState.routes.GUILD and not current.dataState.routes.RAID
-        and not current.dataState.routes.CHANNEL and #clock.joins == 0,
-        "Guild sharing needs no key while keyed routes remain inactive")
-    assert(current:SendData("echo", "guild without a key") and clock.sent[1].distribution == "GUILD")
-    assert(current:ReceiveData("Friend", "1|echo|guild without a key", "GUILD") and received == 1)
-    clock.guild = false
-    clock:fire("PLAYER_GUILD_UPDATE", "player")
-    assert(not current:IsDataConnected(), "A keyless player cannot fall back to keyed raid/global routes")
-    clock.guild = true
-    clock:fire("PLAYER_GUILD_UPDATE", "player")
-    assert(current:IsDataConnected() and current:SendData("echo", "guild restored"),
-        "Guild membership changes restore keyless sharing without a reload")
-end
-
--- Each frame is serialized once and attempted on every route, even when another
--- send rejects or throws. Acceptance by any one route makes the logical send succeed.
-do
-    local current, clock = newAddon(nil, false, false, { guild = true, party = true })
-    local receives, requests, responses = 0, 0, 0
-    assert(current:RegisterDataFeature("echo", function() receives = receives + 1 end))
-    assert(current:RegisterDataRequest("snapshot", function() requests = requests + 1; return "own" end,
-        function() responses = responses + 1 end))
-    clock:connect()
-    local cases = {
-        { results = { PARTY = 11, CHANNEL = 11 }, accepted = true },
-        { results = { GUILD = 11, CHANNEL = 11 }, throws = { PARTY = true }, accepted = false },
-        { throws = { PARTY = true, GUILD = true }, accepted = true },
-    }
-    for index, case in ipairs(cases) do
-        clock.routeResults, clock.routeThrows = case.results, case.throws
-        local before, found = #clock.sendAttempts, {}
-        assert(current:SendData("echo", "fanout-" .. index) == case.accepted)
-        assert(#clock.sendAttempts == before + 3, "A failed route must not prevent another route's attempt")
-        for packetIndex = before + 1, #clock.sendAttempts do
-            local packet = clock.sendAttempts[packetIndex]
-            assert(packet.message == "1|echo|fanout-" .. index and not found[packet.distribution])
-            found[packet.distribution] = true
-        end
-        assert(found.PARTY and found.GUILD and found.CHANNEL)
-        assert(current.dataState.sendFailures.PARTY ~= nil,
-            "A failing route stays visible even if another route accepts the same frame")
-    end
-    clock.routeResults, clock.routeThrows = nil, nil
-    local before = #clock.sendAttempts
-    local accepted, id = current:RequestData("snapshot", "same request")
-    assert(accepted and #clock.sendAttempts == before + 3)
-    assert(current:GetDataSendStatusText() == "", "Successful retries clear each route's failure")
-    for index = before + 1, #clock.sendAttempts do
-        assert(clock.sendAttempts[index].message == "1|Q|snapshot|" .. id .. "|same request",
-            "All routes reuse one request identifier and complete serialized envelope")
-    end
-    local first = true
-    for _, route in ipairs({ "PARTY", "GUILD", "CHANNEL" }) do
-        assert(current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer", route) == first)
-        first = false
-    end
-    assert(responses == 1, "Copies from different routes produce only one response callback per responder")
-    before = #clock.sendAttempts
-    first = true
-    for _, route in ipairs({ "GUILD", "CHANNEL", "PARTY" }) do
-        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-overlap|payload", route) == first)
-        assert(current:ReceiveData("Friend", "1|echo|feature duplicate", route))
-        first = false
-    end
-    assert(requests == 1 and #clock.sendAttempts == before + 3,
-        "A duplicate request triggers one logical reply broadcast across every route")
-    assert(receives == 3, "Generic features retain their existing receive semantics without a blanket duplicate cache")
-    before = #clock.sendAttempts
-    assert(not current:SendData("echo", string.rep("x", 256))
-        and not current:SendData("echo", "bad\000payload") and #clock.sendAttempts == before)
-end
-
 -- Diagnostics describe the native failure without exposing payloads or exception text.
 -- A route remains eligible for receives and retries while its outgoing sends fail.
 do
-    local profile = { schemaVersion = 3, group = { secret = "otter-4827" },
-        data = { channels = { party = false, guild = true, global = false } } }
+    local profile = { schemaVersion = 4,
+        data = { channels = { party = false, guild = true } } }
     local current, clock = newAddon(profile, false, false, { guild = true })
     assert(current:RegisterDataFeature("echo", function() end))
     clock:login()
@@ -2045,224 +1403,179 @@ do
         "Disabling a route clears its obsolete failure instead of carrying it into another session")
 end
 
--- A newly available route requests discovery without resetting the existing
--- status session, pending requests, or contact state on healthy routes.
+
+-- Native audiences work without a key and never accept custom-channel data.
+for _, distribution in ipairs({ "PARTY", "RAID", "GUILD" }) do
+    local membership = { party = false, raid = false, guild = false }
+    membership[distribution:lower()] = true
+    local current, clock = newAddon(nil, false, false, membership)
+    local received = 0
+    assert(current:RegisterDataFeature("echo", function() received = received + 1 end))
+    assert(not current:HasDataGroup() or not current:IsDataConnected())
+    clock:login()
+    assert(current:IsDataConnected() and current:HasDataGroup() and current.dataState.routes[distribution])
+    assert(current:SendData("echo", "native") and #clock.sent == 1
+        and clock.sent[1].distribution == distribution)
+    assert(current:ReceiveData("Friend", "1|echo|native", distribution) and received == 1)
+    assert(not current:ReceiveData("Friend", "1|echo|retired", "CHANNEL")
+        and not current:ReceiveData("Friend", "1|echo|whisper", "WHISPER") and received == 1)
+    assert(current:GetDataStatusText() == "Data routes: " .. distribution:lower() .. ".")
+    assert(not current:GetDataChannelEnabled("global") and not current:SetDataChannelEnabled("global", true))
+    clock:advance(60)
+    assert(clock:activeTimers() == 0, "A native connection needs no transport watchdog")
+end
+
+-- Membership changes preserve request caches while another audience remains.
+do
+    local current, clock = newAddon(nil, false, false, { party = true, guild = true })
+    local notices = {}
+    current:RegisterDataFeature("echo", function() end, function(connected) notices[#notices + 1] = connected end)
+    current:RegisterDataRequest("snapshot", function() return "own" end, function() end)
+    clock:login()
+    local _, id = current:RequestData("snapshot", "pending")
+    assert(current:ReceiveData("Friend", "1|Q|snapshot|peer|", "PARTY"))
+    local pending, replied, count = current.dataState.pendingRequests, current.dataState.repliedRequests, #notices
+    clock.party, clock.raid = false, true
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(current.dataState.routes.RAID and current.dataState.routes.GUILD and not current.dataState.routes.PARTY)
+    assert(current.dataState.pendingRequests == pending and pending[id]
+        and current.dataState.repliedRequests == replied and next(replied) and #notices == count)
+    clock.guild = false
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(current:IsDataConnected() and #notices == count)
+    clock.raid = false
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(not current:IsDataConnected() and notices[#notices] == false
+        and next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil)
+    clock.guild = true
+    clock:fire("PLAYER_ENTERING_WORLD")
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD)
+    clock:fire("PLAYER_LOGOUT")
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not current:IsDataConnected() and not current:SendData("echo", "after logout"))
+end
+
+-- Sending rechecks membership even before the native roster event arrives.
+do
+    local current, clock = newAddon(nil, false, false, { party = true })
+    current:RegisterDataFeature("echo", function() end)
+    current:RegisterDataRequest("snapshot", function() return "own" end, function() end)
+    clock:login()
+    local accepted, id = current:RequestData("snapshot", "pending")
+    assert(accepted and current.dataState.pendingRequests[id])
+    clock.party, clock.raid = false, true
+    local before = #clock.sendAttempts
+    assert(current:SendData("echo", "raid before roster update")
+        and #clock.sendAttempts == before + 1
+        and clock.sendAttempts[#clock.sendAttempts].distribution == "RAID"
+        and current.dataState.routes.RAID and not current.dataState.routes.PARTY
+        and current.dataState.pendingRequests[id],
+        "A send follows current raid membership while retaining its live request cache")
+    clock.raid = false
+    before = #clock.sendAttempts
+    assert(not current:SendData("echo", "left before roster update")
+        and #clock.sendAttempts == before and not current:IsDataConnected()
+        and next(current.dataState.routes) == nil and next(current.dataState.pendingRequests) == nil,
+        "Losing the final membership disconnects before attempting the native send")
+end
+
+-- Every route gets the same serialized frame even when another route fails.
+do
+    local current, clock = newAddon(nil, false, false, { party = true, guild = true })
+    local receives, requests, responses = 0, 0, 0
+    current:RegisterDataFeature("echo", function() receives = receives + 1 end)
+    current:RegisterDataRequest("snapshot", function() requests = requests + 1; return "own" end,
+        function() responses = responses + 1 end)
+    clock:login()
+    for index, failure in ipairs({ "reject", "throw", "both" }) do
+        clock.routeResults = { PARTY = 11, GUILD = failure == "both" and 11 or 0 }
+        clock.routeThrows = failure == "throw" and { PARTY = true } or nil
+        local before = #clock.sendAttempts
+        assert(current:SendData("echo", "fanout-" .. index) == (failure ~= "both"))
+        assert(#clock.sendAttempts == before + 2)
+        assert(clock.sendAttempts[before + 1].distribution == "PARTY"
+            and clock.sendAttempts[before + 2].distribution == "GUILD"
+            and clock.sendAttempts[before + 1].message == clock.sendAttempts[before + 2].message)
+    end
+    clock.routeResults, clock.routeThrows = nil, nil
+    local before = #clock.sendAttempts
+    local accepted, id = current:RequestData("snapshot", "shared")
+    assert(accepted and #clock.sendAttempts == before + 2 and current:GetDataSendStatusText() == "")
+    assert(clock.sendAttempts[before + 1].message == "1|Q|snapshot|" .. id .. "|shared"
+        and clock.sendAttempts[before + 1].message == clock.sendAttempts[before + 2].message)
+    local first = true
+    for _, route in ipairs({ "PARTY", "GUILD" }) do
+        assert(current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer", route) == first)
+        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-overlap|", route) == first)
+        assert(current:ReceiveData("Friend", "1|echo|feature duplicate", route))
+        first = false
+    end
+    assert(responses == 1 and requests == 1 and receives == 2,
+        "Request deduplication spans routes; streaming features keep their own receive semantics")
+end
+
+-- Enabled switches govern sends and receives, including raid through party.
+do
+    local current, clock = newAddon({ data = { channels = { party = false, guild = true } } }, false, false,
+        { guild = true, raid = true })
+    current:RegisterDataFeature("echo", function() end)
+    clock:login()
+    assert(current.dataState.routes.GUILD and not current.dataState.routes.RAID)
+    assert(not current:ReceiveData("Friend", "1|echo|disabled", "RAID"))
+    assert(current:SetDataChannelEnabled("guild", false) and not current:IsDataConnected())
+    assert(current:GetDataStatusText() == "All data channels are disabled.")
+    assert(current:SetDataChannelEnabled("party", true) and current:IsDataConnected()
+        and current.dataState.routes.RAID and not current.dataState.routes.GUILD)
+    assert(current:SendData("echo", "raid") and clock.sent[#clock.sent].distribution == "RAID")
+    assert(not current:SetDataChannelEnabled("party", "yes") and not current:SetDataChannelEnabled("raid", true))
+    clock:fire("PLAYER_LOGOUT")
+    local sends = #clock.sent
+    assert(current:SetDataChannelEnabled("guild", true))
+    clock:advance(60)
+    assert(not current:IsDataConnected() and #clock.sent == sends)
+end
+
+-- A new audience requests discovery without replacing the active status session.
 do
     local current, clock = statusFixture({ level = 24 }, true, { guild = true })
-    local status = current.dataState.status
-    local session, pending = status.session, current.dataState.pendingRequests
-    local before = #clock.sent
+    local status, pending, before = current.dataState.status, current.dataState.pendingRequests, #clock.sent
+    local session = status.session
     clock.party = true
     clock:fire("GROUP_ROSTER_UPDATE")
     clock:advance(5)
-    assert(status.session == session and current.dataState.pendingRequests == pending,
-        "Adding a route must preserve the active status session and request cache")
-    assert(#clock.sent == before + 3, "A new route discovers its peers at the existing status cadence")
-    local request = clock.sent[before + 1].message
-    assert(request:match("^1|Q|status|"))
-    for index = before + 1, #clock.sent do assert(clock.sent[index].message == request) end
+    assert(status.session == session and current.dataState.pendingRequests == pending)
+    assert(#clock.sent == before + 2 and clock.sent[before + 1].message:match("^1|Q|status|")
+        and clock.sent[before + 1].message == clock.sent[before + 2].message)
 end
 
--- Saved route switches apply to both directions immediately, including RAID
--- through the party switch. Missing settings still enable every route.
-do
-    local defaults = newAddon()
-    assert(defaults:GetDataChannelEnabled("party") and defaults:GetDataChannelEnabled("guild")
-        and defaults:GetDataChannelEnabled("global"), "Feature-only harnesses use enabled defaults too")
-    local profile = { schemaVersion = 3, group = { secret = "otter-4827" },
-        data = { channels = { party = false, guild = true, global = false } } }
-    local current, clock = newAddon(profile, false, false, { guild = true, party = true })
-    local received = 0
-    assert(current:RegisterDataFeature("echo", function() received = received + 1 end))
-    clock:login()
-    assert(current:IsDataConnected() and #clock.joins == 0
-        and not current.dataState.routes.PARTY and current.dataState.routes.GUILD
-        and not current.dataState.routes.CHANNEL)
-    assert(current:SendData("echo", "guild only") and #clock.sent == 1
-        and clock.sent[1].distribution == "GUILD")
-    assert(not current:ReceiveData("Friend", "1|echo|disabled", "PARTY")
-        and not current:ReceiveData("Friend", "1|echo|disabled", "CHANNEL")
-        and current:ReceiveData("Friend", "1|echo|enabled", "GUILD") and received == 1)
-    clock.party, clock.raid = false, true
-    clock:fire("GROUP_ROSTER_UPDATE")
-    assert(not current.dataState.routes.RAID
-        and not current:ReceiveData("Friend", "1|echo|disabled", "RAID"),
-        "A native membership change cannot bypass a disabled route")
-    assert(current:SetDataChannelEnabled("guild", false) and not current:IsDataConnected())
-    assert(current:SetDataChannelEnabled("party", true) and current:IsDataConnected()
-        and current.dataState.routes.RAID and not current.dataState.routes.GUILD)
-    assert(current:SendData("echo", "raid only") and #clock.sent == 2
-        and clock.sent[2].distribution == "RAID"
-        and current:ReceiveData("Friend", "1|echo|raid", "RAID") and received == 2)
-    assert(current:SetDataChannelEnabled("party", false) and not current:IsDataConnected()
-        and not current:ReceiveData("Friend", "1|echo|disabled again", "RAID"))
-    clock:fire("PLAYER_LOGOUT")
-    local joins, leaves, sends = #clock.joins, #clock.leaves, #clock.sent
-    assert(current:SetDataChannelEnabled("global", true) and current:SetDataChannelEnabled("global", false)
-        and current:SetDataChannelEnabled("global", true))
-    clock:advance(30)
-    assert(not current:IsDataConnected() and current:GetDataChannelEnabled("global")
-        and #clock.joins == joins and #clock.leaves == leaves and #clock.sent == sends,
-        "Saving on/off preferences after logout cannot join, leave or send through native APIs")
-end
-
--- Turning off global data cancels each stage of its lifecycle. Late joins and
--- failure notices cannot revive it, while enabled guild delivery stays active.
-do
-    local current, clock = newAddon(nil, false, false, { guild = true })
-    local changed = false
-    assert(current:RegisterDataFeature("startup_toggle", function() end, function(connected)
-        if connected and not changed then
-            changed = true
-            assert(current:SetDataChannelEnabled("global", false))
-        end
-    end))
-    clock:login()
-    assert(changed and current:IsDataConnected() and current.dataState.routes.GUILD
-        and #clock.joins == 0 and not current.dataState.timer,
-        "A native connection callback can disable global before its startup join is requested")
-end
-
--- Membership confirmation invokes feature callbacks synchronously. If the
--- callback disables the only route, neither confirmation nor its caller may
--- restore a watchdog or fall through to an abandoned global join.
-for _, restoredBeforeLogin in ipairs({ false, true }) do
+-- Prefix failures retry once per interval; disabling every route cancels work.
+for _, failure in ipairs({ "reject", "throw" }) do
     local current, clock = newAddon()
-    local changes = 0
-    assert(current:RegisterDataFeature("confirmation_toggle", function() end, function(connected)
-        if connected then
-            changes = changes + 1
-            assert(current:SetDataChannelEnabled("global", false))
-        end
-    end))
-    local name = current:GetGroupDataChannelName()
-    if restoredBeforeLogin then clock.channels[name:lower()] = { id = 7, name = name } end
+    clock.prefixResult, clock.prefixThrows = 2, failure == "throw"
     clock:login()
-    if not restoredBeforeLogin then
-        assert(#clock.joins == 1 and not current:IsDataConnected())
-        clock:member(7)
-    end
-    local joins = restoredBeforeLogin and 0 or 1
-    assert(changes == 1 and not current:GetDataChannelEnabled("global") and not current:IsDataConnected()
-        and current.dataState.phase == "disabled" and not current.dataState.timer and #clock.joins == joins,
-        "Disabling the only route during " .. (restoredBeforeLogin and "restored" or "pending")
-            .. " membership confirmation abandons its join and watchdog")
-    clock:fire("CHANNEL_UI_UPDATE")
-    clock:fire("PLAYER_ENTERING_WORLD")
-    clock:advance(60)
-    assert(changes == 1 and not current:IsDataConnected() and current.dataState.phase == "disabled"
-        and not current.dataState.timer and #clock.joins == joins,
-        "An abandoned membership confirmation cannot schedule a later global retry")
-end
-
--- Prefix registration is shared by native routes; disabling global must stop
--- its polling without suppressing recovery of the common messaging API.
-do
-    local current, clock = newAddon(nil, false, false, { guild = true })
-    assert(current:SetDataChannelEnabled("global", false))
-    assert(current:RegisterDataFeature("echo", function() end))
-    clock.prefixResult = 2
-    clock:login()
-    assert(not current:IsDataConnected() and #clock.prefixCalls == 1 and #clock.joins == 0
-        and current.dataState.timer)
+    assert(not current:IsDataConnected() and clock:activeTimers() == 1)
+    for _ = 1, 20 do clock:fire("GROUP_ROSTER_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
     clock:advance(29)
-    assert(#clock.prefixCalls == 1 and #clock.joins == 0)
-    clock.prefixResult = 0
+    assert(#clock.prefixCalls == 1 and clock:activeTimers() == 1)
     clock:advance(1)
-    assert(current:IsDataConnected() and current.dataState.routes.GUILD and #clock.prefixCalls == 2
-        and #clock.joins == 0 and not current.dataState.timer,
-        "Native-only prefix recovery retries once without restarting disabled global polling")
-    assert(current:SendData("echo", "prefix recovered") and #clock.sent == 1
-        and clock.sent[1].distribution == "GUILD")
+    assert(#clock.prefixCalls == 2 and clock:activeTimers() == 1)
+    assert(current:SetDataChannelEnabled("party", false) and current:SetDataChannelEnabled("guild", false))
+    assert(clock:activeTimers() == 0)
+    clock.prefixResult, clock.prefixThrows = 1, false
+    assert(current:SetDataChannelEnabled("party", true) and current:IsDataConnected()
+        and clock:activeTimers() == 0, "A duplicate registered prefix is reusable")
 end
 
-for _, phase in ipairs({ "pending", "failed", "joined" }) do
-    local current, clock = newAddon(nil, false, false, { guild = true })
-    assert(current:RegisterDataFeature("echo", function() end))
-    clock:login()
-    if phase == "failed" then clock:notice("WRONG_PASSWORD")
-    elseif phase == "joined" then clock:member(7) end
-    local timer, joins = current.dataState.timer, #clock.joins
-    assert(timer and current:SetDataChannelEnabled("global", false))
-    assert(timer.cancelled and not current.dataState.timer and current:IsDataConnected()
-        and not current.dataState.routes.CHANNEL and not current.dataState.channelConnected)
-    clock:member(9)
-    clock:notice("YOU_JOINED")
-    clock:notice("WRONG_PASSWORD")
-    clock:fire("CHANNEL_PASSWORD_REQUEST", current:GetGroupDataChannelName())
-    clock:fire("PLAYER_ENTERING_WORLD")
-    clock:advance(60)
-    assert(#clock.joins == joins and not current.dataState.timer and current:IsDataConnected()
-        and not current.dataState.routes.CHANNEL and not current.dataState.channelConnected
-        and not clock.channels[current:GetGroupDataChannelName():lower()],
-        "Disabled global " .. phase .. " work cannot retry or accept an abandoned join")
-    assert(not current:ReceiveData("Friend", "1|echo|disabled global", "CHANNEL"))
-    assert(current:SendData("echo", "guild survives") and clock.sent[#clock.sent].distribution == "GUILD")
-    assert(current:SetDataChannelEnabled("global", true) and #clock.joins == joins + 1)
-    clock:member(12)
-    assert(current.dataState.routes.CHANNEL == "12" and current:IsDataConnected(),
-        "Enabling the global route starts a fresh join using its current channel number")
-end
-
--- A cached global leave cannot become a fresh membership when toggled back on.
--- Other routes keep their status session and request/duplicate caches throughout.
 do
-    local current, clock = statusFixture({ level = 24 }, true, { party = true, guild = true })
-    local responses = 0
-    assert(current:RegisterDataFeature("echo", function() end))
-    assert(current:RegisterDataRequest("snapshot", function() return "own" end,
-        function() responses = responses + 1 end))
-    local accepted, id = current:RequestData("snapshot", "pending")
-    assert(accepted and current:ReceiveData("Friend", "1|Q|snapshot|peer-toggle|", "GUILD"))
-    local state, status = current.dataState, current.dataState.status
-    local session, received, pending, replied = status.session, status.received,
-        state.pendingRequests, state.repliedRequests
-    local dataName, chatName = current:GetGroupDataChannelName(), current:GetGroupChannelName()
-    clock.channels[chatName:lower()] = { id = 3, name = chatName }
-    clock.holdLeaves = true
-    local joins, leaves = #clock.joins, #clock.leaves
-    assert(current:SetDataChannelEnabled("global", false))
-    assert(current:IsDataConnected() and not state.routes.CHANNEL and not state.timer
-        and #clock.leaves == leaves + 1 and clock.leaves[#clock.leaves] == dataName
-        and clock.channels[chatName:lower()] and clock.channels[dataName:lower()],
-        "Global data leaves only its custom channel even when membership cleanup is delayed")
-    assert(status.session == session and status.received == received
-        and state.pendingRequests == pending and pending[id] and state.repliedRequests == replied and next(replied))
-    assert(not current:ReceiveData("Friend", "1|Q|snapshot|peer-toggle|", "PARTY")
-        and current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer", "PARTY")
-        and not current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer", "GUILD")
-        and responses == 1, "Route switches retain duplicate request and response suppression")
-    local sends = #clock.sent
-    assert(current:SendData("echo", "native only") and #clock.sent == sends + 2)
-    assert(clock.sent[sends + 1].distribution == "PARTY" and clock.sent[sends + 2].distribution == "GUILD")
-    assert(current:SetDataChannelEnabled("global", true) and current:IsDataConnected()
-        and not state.routes.CHANNEL and #clock.joins == joins,
-        "Enabling global waits for its old membership to disappear")
-    clock:advance(1)
-    assert(not state.routes.CHANNEL and #clock.joins == joins)
-    clock.holdLeaves, clock.channels[dataName:lower()] = false, nil
-    clock:fire("CHANNEL_LEFT", 7, dataName)
-    clock:advance(1)
-    assert(#clock.joins == joins + 1 and not state.routes.CHANNEL)
-    clock:member(12)
-    assert(state.routes.CHANNEL == "12" and status.session == session and status.received == received
-        and state.pendingRequests == pending and pending[id] and state.repliedRequests == replied
-        and clock.channels[chatName:lower()],
-        "Fresh global membership preserves native sessions and human chat")
-    assert(current:SetDataChannelEnabled("party", false) and current:SetDataChannelEnabled("guild", false)
-        and current:IsDataConnected() and state.routes.CHANNEL and status.session == session)
-    assert(current:SetDataChannelEnabled("global", false) and not current:IsDataConnected()
-        and next(state.pendingRequests) == nil and next(state.repliedRequests) == nil)
-    sends, joins = #clock.sent, #clock.joins
-    clock:fire("GROUP_ROSTER_UPDATE")
-    clock:fire("PLAYER_GUILD_UPDATE", "player")
-    clock:fire("PLAYER_ENTERING_WORLD")
-    clock:advance(30)
-    assert(not current:SendData("echo", "all disabled") and #clock.sent == sends and #clock.joins == joins,
-        "Disabling the final route stops all transport and status traffic")
-    assert(current:SetDataChannelEnabled("guild", true) and current:IsDataConnected()
-        and state.routes.GUILD and not state.routes.CHANNEL and #clock.joins == joins,
-        "A native route can resume data while global remains disabled")
+    local current, clock = newAddon(nil, false, false, { configure = function(environment)
+        environment.C_ChatInfo.SendAddonMessage = false
+    end })
+    clock:login()
+    assert(not current:IsDataConnected() and current:GetDataStatusText() == "The native group-data API is unavailable.")
+    clock.environment.C_ChatInfo.SendAddonMessage = function() return 0 end
+    clock:advance(60)
+    assert(not current:IsDataConnected() and #clock.prefixCalls == 0 and clock:activeTimers() == 0,
+        "Native capability detection is stable for the UI session")
 end
 
 print("Data tests passed.")

@@ -339,10 +339,8 @@ function addon:RefreshOverview()
     for key, header in pairs(page.headers) do
         header:SetText(header.title .. (key == page.sortKey and (page.sortDescending and " v" or " ^") or ""))
     end
-    if self:IsGroupSwitching() then
-        page.empty:SetText("Leaving previous group...")
-    elseif not self:HasDataGroup() then
-        page.empty:SetText("Join a guild or choose a group key in Settings > Group to see your friends.")
+    if not self:HasDataGroup() then
+        page.empty:SetText("Join a guild, party or raid with sharing enabled to see your friends.")
     elseif #players == 0 then
         page.empty:SetText("Waiting for players on this realm and faction.")
     end
@@ -377,6 +375,6 @@ function addon:OpenOverview()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED", "ROSTER_CHANGED" }) do
+for _, notification in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED", "ROSTER_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOverview() end)
 end

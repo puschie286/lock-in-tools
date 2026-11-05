@@ -33,8 +33,8 @@ do
         api.WorldMapFrame = { IsShown = function() return true end, GetMapID = function() return map end,
             GetCanvasScale = function() return 1 end, InstantPanAndZoom = function() end }
     end
+    overviewWorld.guild = true
     overviewWorld:initialize()
-    overviewWorld:completeJoin(overview:GetGroupDataChannelName(), 7)
     local now = api.GetServerTime()
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
         assert(overview:ReceivePlayerStatus(name .. "-TestRealm", {
@@ -58,7 +58,7 @@ do
     local command = api.SlashCmdList.LOCKINTOOLS
     command("options")
     local options = overview.optionsPanel
-    assert(options.selectedTab == "group" and not overview.contentPanel and snapshotCalls == 0,
+    assert(options.selectedTab == "sharing" and not overview.contentPanel and snapshotCalls == 0,
         "opening Settings does not activate Content or request an Overview snapshot")
     command("overview")
     local content = overview.contentPanel
@@ -212,8 +212,8 @@ do
         and not page.active and not page.scripts.OnUpdate and not menu:IsShown(),
         "closing the shared window stops live Overview work and dismisses its action menu")
     command("options")
-    assert(options.selectedTab == "group"
-        and options.pages.group:IsVisible() and not page.active and not page.scripts.OnUpdate
+    assert(options.selectedTab == "sharing"
+        and options.pages.sharing:IsVisible() and not page.active and not page.scripts.OnUpdate
         and snapshotCalls == 0,
         "opening Settings does not reactivate the hidden Content page")
     options.content:Click()
@@ -231,12 +231,10 @@ do
         and not page.rows[2]:IsShown() and not page.rows[2].playerID and not page.scrollbar:IsShown()
         and not menu:IsShown() and not page.empty:IsShown(),
         "live roster removal clamps scrolling, removes old row targets and closes obsolete menus")
-    assert(overview:LeaveGroup())
-    assert(page.empty:IsShown() and not page.rows[1]:IsShown(), "pending departure immediately hides the old roster")
-    overviewWorld:advance(0)
-    assert(page.empty:IsShown()
-        and not page.rows[1]:IsShown() and not page.rows[1].playerID,
-        "leaving the global group clears the overview while it remains open")
+    overviewWorld.guild = false
+    overviewWorld.fire("PLAYER_GUILD_UPDATE", "player")
+    assert(page.empty:IsShown() and not page.rows[1]:IsShown() and not page.rows[1].playerID,
+        "leaving every native sharing context hides the disconnected roster")
 end
 
 -- Player actions also work on independent surfaces without opening Content.
@@ -252,8 +250,8 @@ do
         tooltip:SetOwner(owner, "ANCHOR_CURSOR")
     end
     local scroll = 0
+    world.guild = true
     world:initialize()
-    world:completeJoin(actions:GetGroupDataChannelName(), 7)
     assert(actions:ReceivePlayerStatus("Alpha-TestRealm", {
         level = 21, xpState = "unavailable", inParty = false, partyFull = false,
     }, api.GetServerTime(), 1))

@@ -503,7 +503,7 @@ function addon:RefreshNativePositionPins()
     self:RefreshPositionPins()
 end
 
-for _, notification in ipairs({ "GROUP_CHANGED", "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED",
+for _, notification in ipairs({ "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED",
     "POSITION_VISIBILITY_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
 end

@@ -1,7 +1,7 @@
 -- Exercise the real bundled DataBroker and DBIcon against native API mocks.
 local fixtures = dofile("tests/support/addon.lua")
 local loadAddon, settings = fixtures.loadAddon, fixtures.settings
-local contains, SECRET = fixtures.contains, fixtures.SECRET
+local SECRET = fixtures.SECRET
 
 local function near(actual, expected)
     return type(actual) == "number" and math.abs(actual - expected) < 0.000001
@@ -20,7 +20,7 @@ end
 
 -- Registration, public broker callbacks and minimap navigation remain one entry point.
 do
-    local entry, api, messages, event, world = loadAddon(settings(nil, false), false)
+    local entry, api, _, event, world = loadAddon(settings(nil, false), false)
     local brokerLibrary = library(api, "LibDataBroker-1.1")
     local icons = library(api, "LibDBIcon-1.0")
     local observer, created = {}, 0
@@ -65,7 +65,6 @@ do
     assert(world.contentOpened == 2 and world.optionsOpened == 2,
         "external broker displays share navigation and tooltip callbacks")
     brokerLibrary.UnregisterAllCallbacks(observer)
-    assert(not contains(messages, SECRET), "launcher and display interactions never print the group key")
 end
 
 -- Only the library-rendered tooltip follows global positioning; displays keep ownership.
@@ -192,7 +191,7 @@ end
 -- The library receives a detached settings table when saved data is from the future.
 do
     local future = settings(nil, false)
-    future.schemaVersion = 4
+    future.schemaVersion = 5
     future.minimap = { minimapPos = 120, angle = 160, futureField = "keep", nested = { value = true } }
     local originalMinimap, originalNested = future.minimap, future.minimap.nested
     local entry, api, _, _, world = loadAddon(future, false)
@@ -206,7 +205,7 @@ do
     button.scripts.OnDragStop(button)
     assert(world.contentOpened == 1 and world.optionsOpened == 1 and near(button.db.minimapPos, 0)
         and at(button, api.Minimap, 70 + library(api, "LibDBIcon-1.0").radius, 0)
-        and api.LockInToolsDB == future and future.schemaVersion == 4 and future.group.secret == SECRET
+        and api.LockInToolsDB == future and future.schemaVersion == 5 and future.group.secret == SECRET
         and future.minimap == originalMinimap and future.minimap.nested == originalNested
         and originalMinimap.minimapPos == 120 and originalMinimap.angle == 160
         and originalMinimap.futureField == "keep" and originalNested.value,

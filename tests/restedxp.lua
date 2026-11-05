@@ -217,8 +217,8 @@ do
     local addon, _, _, _, world = fixtures.loadAddon(profile, false)
     world:initialize()
     world:advance(8)
-    assert(addon.ready and profile.restedxp == nil and profile.group.secret == fixtures.SECRET)
-    assert(#world.guideSends == 0 and addon.dataState.features.guides == nil, "startup sends no guide data and registers no guide feature")
+    assert(addon.ready and profile.restedxp == nil and profile.group == nil and profile.chat == nil)
+    assert(#world.dataSends == 0 and addon.dataState.features.guides == nil, "startup sends no guide data and registers no guide feature")
 end
 
 do
@@ -265,7 +265,7 @@ do
     importer.importBufferSize = 0
     world:advance(0.01)
     assert(addon:GetRestedXPState().phase == "completed"
-        and panel.restedxpImport:IsEnabled() and #world.guideSends == 0,
+        and panel.restedxpImport:IsEnabled() and #world.dataSends == 0,
         "the native success event completes the helper and releases the form without guide traffic")
 end
 print("PASS: local RestedXP import lifecycle, cleanup, privacy and zero guide traffic")

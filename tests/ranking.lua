@@ -4,15 +4,13 @@ local helpers = dofile("tests/support/helpers.lua")
 local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
 
 local function newAddon(saved, readOnly, skipInitialization)
-    local world = { players = {}, grouped = true, connected = true, switching = false, reads = 0 }
+    local world = { players = {}, guild = true, connected = true, reads = 0 }
     local addon = {
-        db = saved or { schemaVersion = 3 }, initialized = true, ready = true,
+        db = saved or { schemaVersion = 4 }, initialized = true, ready = true,
         savedDataReadOnly = readOnly == true,
     }
-    function addon:HasGroup() return world.grouped end
-    function addon:HasDataGroup() return self:HasGroup() end
+    function addon:HasDataGroup() return world.guild end
     function addon:IsDataConnected() return world.connected end
-    function addon:IsGroupSwitching() return world.switching end
     function addon:GetOverviewPlayers()
         world.reads = world.reads + 1
         return world.players
@@ -52,7 +50,6 @@ local function newRosterAddon(saved)
     environment.UnitXP = function() return 25 end
     environment.UnitXPMax = function() return 100 end
     environment.GetMaxPlayerLevel = function() return 60 end
-    function addon:GetGroupFingerprint() return "first-group" end
     function addon:IsDataSelf(name) return name:lower() == "self-testrealm" end
     function addon:RegisterDataStatusProvider(name, collect, receive, connected)
         assert(name == "player")
@@ -74,7 +71,7 @@ do
         player("self", 19, 1, 1000, true),
     }
     local ranking = addon:GetPlayerRanking()
-    assert(ranking.connected and ranking.grouped and not ranking.switching)
+    assert(ranking.connected and ranking.grouped)
     assert(ids(ranking.players) == "higher-zero,lower-full,third,fourth,fifth,sixth,self",
         "A higher level always outranks a lower level, including 0% against 100%")
     assert(#ranking.players == 7 and ranking.own.id == "self" and ranking.own.rank == 7,
@@ -96,8 +93,9 @@ do
     local expected = { 1, 2, 3, 3, 5 }
     for index, row in ipairs(ranking.players) do
         assert(row.rank == expected[index], "Equal progress must use shared competition ranks")
+        assert(row.stale == (index == 3 or index == 4) and row.xpStale == row.stale,
+            "Saved and current reports use the same exact ordering and shared ranks")
     end
-    assert(ranking.stale == 2, "Saved and current reports use the same exact ordering and shared ranks")
 end
 
 -- Protocol-sized integers can produce equal floating ratios and rounded cross-products.
@@ -143,8 +141,6 @@ do
     local ranking = addon:GetPlayerRanking()
     assert(ids(ranking.players) == "inactive,contact-only,stale,current",
         "Offline and unsynchronized players retain ranks from their last complete progress")
-    assert(ranking.awaiting == 2 and ranking.stale == 3 and ranking.inactive == 2,
-        "Stale counts describe ranked snapshots; missing XP stays awaiting")
     for index, row in ipairs(ranking.players) do
         assert(row.stale == (index ~= 4) and row.xpStale == row.stale,
             "Each saved ranking row must explicitly identify its stale progress")
@@ -163,7 +159,7 @@ do
     world.players = { player("no-level", nil, 10, 100), player("zero-maximum", 30, 0, 0),
         player("excess", 30, 101, 100), player("negative", 30, -1, 100) }
     local ranking = addon:GetPlayerRanking()
-    assert(#ranking.players == 0 and ranking.awaiting == #world.players,
+    assert(#ranking.players == 0,
         "Malformed or incomplete progress must remain unranked rather than looking like zero XP")
 end
 
@@ -174,7 +170,7 @@ do
     assert(addon:GetPlayerRanking().own.rank == 2)
     world.connected = false
     local ranking = addon:GetPlayerRanking()
-    assert(not ranking.connected and ranking.grouped and #ranking.players == 2 and ranking.stale == 1,
+    assert(not ranking.connected and ranking.grouped and #ranking.players == 2,
         "Connection loss retains standings using the peers' last saved progress")
     assert(ranking.players[1].stale and ranking.players[1].xpStale)
     assert(ranking.own and ranking.own.id == "self" and ranking.own.xp == 25 and ranking.own.rank == 2
@@ -182,16 +178,16 @@ do
         "Live local progress remains current and comparable against the last peer reports")
     world.connected = true
     local recovered = addon:GetPlayerRanking()
-    assert(#recovered.players == 2 and recovered.own.rank == 2 and recovered.stale == 0
-        and recovered.players[1].stale == false)
-    world.switching = true
-    ranking = addon:GetPlayerRanking()
-    assert(ranking.switching and #ranking.players == 0 and ranking.own == nil,
-        "Switching groups must clear old group standings, including the own-rank row")
-    world.switching, world.grouped = false, false
+    assert(#recovered.players == 2 and recovered.own.rank == 2
+        and recovered.players[1].stale == false and recovered.own.stale == false)
+    world.guild = false
     ranking = addon:GetPlayerRanking()
     assert(not ranking.grouped and #ranking.players == 0 and ranking.own == nil,
-        "Leaving the group must clear every ranking row")
+        "Without native guild or group membership, ranking rows are hidden")
+    world.guild = true
+    ranking = addon:GetPlayerRanking()
+    assert(#ranking.players == 2 and ranking.own.id == "self",
+        "Native membership changes preserve retained standings")
 end
 
 -- Coordinates/contact changes keep the exact progress order; returned rows stay
@@ -215,7 +211,7 @@ do
     assert(sorts == 1 and ids(refreshed.players) == "friend,self" and refreshed.players[1].rank == 1
         and refreshed.players[1].level == 30 and refreshed.players[1].map == 38
         and refreshed.players[1].seenAt == 2000000010 and refreshed.players[1].stale
-        and refreshed.awaiting == 1 and refreshed.inactive == 1,
+        and not refreshed.players[1].online,
         "Movement, contact and unranked discovery refresh metadata without sorting progress again")
     first.xp = 75
     addon:GetPlayerRanking()
@@ -262,14 +258,14 @@ do
     addon:Notify("DATA_CHANGED")
     assert(addon:GetPlayerTooltipPlayers().friend.stale and world.reads == 4)
     world.players = {}
-    addon:Notify("GROUP_CHANGED")
+    addon:Notify("DATA_CHANGED")
     assert(next(addon:GetPlayerTooltipPlayers()) == nil and world.reads == 5,
-        "Group changes immediately discard the prior group's tooltip metadata")
+        "Native data changes immediately refresh tooltip membership")
 end
 
 -- Real Roster reports survive a SavedVariables reload and rank before peers reconnect.
 do
-    local saved = { schemaVersion = 3 }
+    local saved = { schemaVersion = 4 }
     local addon, world = newRosterAddon(saved)
     world.connected = true
     world.statusConnected(true)
@@ -283,24 +279,24 @@ do
     saved.roster.peers["legacy-testrealm"] = { name = "Legacy-TestRealm", level = 32, seenAt = 1999999990 }
     local reloaded, restored = newRosterAddon(copy(saved))
     local ranking = reloaded:GetPlayerRanking()
-    assert(not ranking.connected and ranking.awaiting == 1 and ranking.stale == 2 and ranking.inactive == 3)
-    assert(ids(ranking.players) == "maximum-testrealm,friend-testrealm,self-testrealm"
+    assert(not ranking.connected and ids(ranking.players) == "maximum-testrealm,friend-testrealm,self-testrealm"
         and ranking.own.rank == 3, "Saved XP and maximum-level records remain ranked before reconnection")
     assert(ranking.players[1].xpState == "max" and ranking.players[1].stale
         and ranking.players[2].xp == 700 and ranking.players[2].xpMax == 1000 and ranking.players[2].stale)
     restored.connected = true
     restored.statusConnected(true)
     ranking = reloaded:GetPlayerRanking()
-    assert(ranking.stale == 2, "Reconnecting alone cannot make saved reports current")
+    assert(ranking.players[1].stale and ranking.players[2].stale,
+        "Reconnecting alone cannot make saved reports current")
     assert(reloaded:ReceivePlayerStatus("Friend-TestRealm", {
         level = 31, xp = 750, xpMax = 1000, xpState = "known",
     }, 2, 1))
     ranking = reloaded:GetPlayerRanking()
-    assert(ranking.stale == 1 and ranking.players[2].xp == 750 and not ranking.players[2].stale,
+    assert(ranking.players[1].stale and ranking.players[2].xp == 750 and not ranking.players[2].stale,
         "A fresh status replaces saved XP and clears only that player's stale marker")
     restored.now = 91
     ranking = reloaded:GetPlayerRanking()
-    assert(ranking.stale == 2 and ranking.players[2].xp == 750,
+    assert(ranking.players[1].stale and ranking.players[2].stale and ranking.players[2].xp == 750,
         "Expired contact keeps the last valid XP ranked and marks it stale again")
 end
 
@@ -316,25 +312,24 @@ do
     assert(#ranking.players == 0 and ranking.own == nil)
 end
 
--- Visibility defaults off, locking and the burning effect on; preferences persist account-wide.
+-- Visibility defaults off and the burning effect on; preferences persist account-wide.
 do
-    local saved = { schemaVersion = 3, group = { secret = "preserved" }, futureField = "keep",
+    local saved = { schemaVersion = 4, otherSettings = { preserved = true }, futureField = "keep",
         ranking = { futureField = { preserved = true } } }
     local addon = newAddon(saved)
     local settings = addon:GetRankingSettings()
-    assert(settings.enabled == false and settings.locked == true and settings.position == nil
+    assert(settings.enabled == false and settings.position == nil
         and settings.burningEffect == true and settings.backgroundTransparency == 0)
-    assert(addon:SetRankingEnabled(true) and addon:SetRankingLocked(false) and addon:SetRankingBurningEffect(false))
+    assert(addon:SetRankingEnabled(true) and addon:SetRankingBurningEffect(false))
     assert(addon:SetRankingBackgroundTransparency(50))
     local position = { point = "TOPRIGHT", relativePoint = "TOPRIGHT", x = -80, y = -160 }
     assert(addon:SetRankingPosition(position))
-    assert(saved.ranking.enabled == true and saved.ranking.locked == false and saved.ranking.burningEffect == false
+    assert(saved.ranking.enabled == true and saved.ranking.burningEffect == false
         and saved.ranking.backgroundTransparency == 50 and equal(saved.ranking.position, position))
-    assert(saved.group.secret == "preserved" and saved.futureField == "keep" and saved.ranking.futureField.preserved)
-    assert(not addon:SetRankingEnabled("true") and not addon:SetRankingLocked("true")
-        and not addon:SetRankingBurningEffect("true"),
+    assert(saved.otherSettings.preserved == true and saved.futureField == "keep" and saved.ranking.futureField.preserved)
+    assert(not addon:SetRankingEnabled("true") and not addon:SetRankingBurningEffect("true"),
         "Saved overlay preferences accept booleans only")
-    assert(not addon:SetRankingEnabled(nil) and not addon:SetRankingLocked(nil) and not addon:SetRankingBurningEffect(nil))
+    assert(not addon:SetRankingEnabled(nil) and not addon:SetRankingBurningEffect(nil))
     for _, invalid in ipairs({ 0, 1, {}, function() end }) do
         assert(not addon:SetRankingBurningEffect(invalid) and saved.ranking.burningEffect == false,
             "Invalid effect values must leave the last preference intact")
@@ -352,9 +347,9 @@ do
     end
     local reloaded = newAddon(saved)
     settings = reloaded:GetRankingSettings()
-    assert(settings.enabled and not settings.locked and not settings.burningEffect
+    assert(settings.enabled and not settings.burningEffect
         and settings.backgroundTransparency == 50 and equal(settings.position, position),
-        "Visibility, locking, burning effect, transparency and position must survive reload and character changes")
+        "Visibility, burning effect, transparency and position must survive reload and character changes")
 end
 
 -- Background edits are independent of visibility and player data; unchanged slider values do no work.
@@ -398,22 +393,22 @@ end
 -- Damaged settings fall back safely while preserving unrelated saved data.
 do
     for _, invalid in ipairs({ false,
-        { enabled = "yes", locked = 0, burningEffect = "no", position = { point = "INVALID", x = 1, y = 2 } } }) do
-        local saved = { schemaVersion = 3, ranking = invalid, group = { secret = "preserved" } }
+        { enabled = "yes", burningEffect = "no", position = { point = "INVALID", x = 1, y = 2 } } }) do
+        local saved = { schemaVersion = 4, ranking = invalid, otherSettings = { preserved = true } }
         local addon = newAddon(saved)
         local settings = addon:GetRankingSettings()
-        assert(settings.enabled == false and settings.locked == true and settings.position == nil
+        assert(settings.enabled == false and settings.position == nil
             and settings.burningEffect and settings.backgroundTransparency == 0)
-        assert(saved.group.secret == "preserved")
+        assert(saved.otherSettings.preserved == true)
     end
     for _, invalid in ipairs({ 0, 1, "false", {}, function() end }) do
-        local saved = { schemaVersion = 3, ranking = { burningEffect = invalid, futureField = "keep" } }
+        local saved = { schemaVersion = 4, ranking = { burningEffect = invalid, futureField = "keep" } }
         local addon = newAddon(saved)
         assert(addon:GetRankingSettings().burningEffect == true and saved.ranking.burningEffect == true
             and saved.ranking.futureField == "keep", "Only an explicit false disables the saved effect")
     end
     for _, invalid in ipairs({ "50", false, {}, math.huge, -math.huge, 0 / 0 }) do
-        local saved = { schemaVersion = 3, ranking = { backgroundTransparency = invalid, futureField = "keep" } }
+        local saved = { schemaVersion = 4, ranking = { backgroundTransparency = invalid, futureField = "keep" } }
         local addon = newAddon(saved)
         assert(addon:GetRankingSettings().backgroundTransparency == 0 and saved.ranking.backgroundTransparency == 0
             and saved.ranking.futureField == "keep", "Invalid saved transparency defaults to zero without losing unknown fields")
@@ -429,25 +424,25 @@ end
 do
     local position = { point = "TOPLEFT", relativePoint = "TOPLEFT", x = 40, y = -60 }
     local saved = { schemaVersion = 999, ranking = { enabled = true, locked = false, burningEffect = false, backgroundTransparency = 65,
-        position = position, futureField = "keep" }, group = { secret = "preserved" } }
+        position = position, futureField = "keep" }, otherSettings = { preserved = true } }
     local before = copy(saved)
     local addon = newAddon(saved, true)
-    assert(not addon:SetRankingEnabled(false) and not addon:SetRankingLocked(true) and not addon:SetRankingBurningEffect(true))
+    assert(not addon:SetRankingEnabled(false) and not addon:SetRankingBurningEffect(true))
     assert(not addon:SetRankingBackgroundTransparency(50) and not addon:SetRankingBackgroundTransparency(65))
     local moved = { point = "BOTTOMRIGHT", relativePoint = "BOTTOMRIGHT", x = -90, y = 120 }
     assert(addon:SetRankingPosition(moved), "Read-only profiles still permit temporary overlay movement")
     local settings = addon:GetRankingSettings()
-    assert(settings.enabled and not settings.locked and not settings.burningEffect
+    assert(settings.enabled and not settings.burningEffect
         and settings.backgroundTransparency == 65 and equal(settings.position, moved))
     assert(equal(saved, before), "Temporary placement must never write into newer-schema saved settings")
     moved.x = 999
     assert(addon:GetRankingSettings().position.x == -90, "Temporary placement must detach caller-owned values")
     local reloaded = newAddon(saved, true)
     assert(equal(reloaded:GetRankingSettings().position, position), "Read-only movement must not survive reload")
-    local malformed = { schemaVersion = 999, ranking = "future-format", group = { secret = "preserved" } }
+    local malformed = { schemaVersion = 999, ranking = "future-format", otherSettings = { preserved = true } }
     local malformedBefore = copy(malformed)
     local future = newAddon(malformed, true)
-    assert(future:GetRankingSettings().enabled == false and future:GetRankingSettings().locked == true
+    assert(future:GetRankingSettings().enabled == false
         and future:GetRankingSettings().burningEffect == true and future:GetRankingSettings().backgroundTransparency == 0)
     assert(equal(malformed, malformedBefore), "Read-only initialization must not normalize unknown settings")
     local invalid = { schemaVersion = 999, ranking = { burningEffect = "future-value", backgroundTransparency = "future-value", futureField = "keep" } }
@@ -460,10 +455,10 @@ end
 
 -- Before initialization no operation may create or change saved preferences.
 do
-    local saved = { schemaVersion = 3 }
+    local saved = { schemaVersion = 4 }
     local addon = newAddon(saved, false, true)
     addon.initialized = false
-    assert(not addon:SetRankingEnabled(true) and not addon:SetRankingLocked(false) and not addon:SetRankingBurningEffect(false))
+    assert(not addon:SetRankingEnabled(true) and not addon:SetRankingBurningEffect(false))
     assert(not addon:SetRankingBackgroundTransparency(50))
     assert(not addon:SetRankingPosition({ point = "CENTER", relativePoint = "CENTER", x = 20, y = -20 }))
     assert(saved.ranking == nil)

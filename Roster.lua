@@ -56,7 +56,6 @@ end
 
 local function Active(self)
     return self.initialized and self.ready and self.rosterState and not self.rosterState.stopped
-        and not (self.IsGroupSwitching and self:IsGroupSwitching())
         and not self.savedDataReadOnly and self:HasDataGroup()
 end
 
@@ -292,9 +291,7 @@ function addon:InitializeRoster()
     if self.rosterState then return end
     local settings = not self.savedDataReadOnly and type(self.db.roster) == "table" and self.db.roster or {}
     if not self.savedDataReadOnly then self.db.roster = settings end
-    local fingerprint = self:GetGroupFingerprint()
-    if settings.groupFingerprint ~= fingerprint or type(settings.peers) ~= "table" then settings.peers = {} end
-    settings.groupFingerprint = fingerprint
+    if type(settings.peers) ~= "table" then settings.peers = {} end
     self.rosterState = { peers = {}, progress = {} }
     for id, saved in pairs(settings.peers) do
         local name = type(saved) == "table" and SavedName(saved.name, id)
@@ -355,28 +352,17 @@ function addon:OnRosterLogin()
     Refresh(self)
 end
 
-function addon:OnRosterGroupChanged()
-    local state = self.rosterState
-    if not state then return end
-    state.peers, state.progress = {}, {}
-    if not self.savedDataReadOnly then
-        self.db.roster.peers, self.db.roster.groupFingerprint = {}, self:GetGroupFingerprint()
-    end
-    Refresh(self)
-end
-
 function addon:OnRosterLogout()
     if not self.rosterState then return end
     if Active(self) then LocalStatus(self) end
     self.rosterState.stopped = true
 end
 
--- Rows cover discovered characters, not all key holders or distinct people.
+-- Rows cover discovered characters, not every guild/group member or distinct person.
 -- Progress is reported, not independently verified; online means recent contact,
 -- so contact expiry cannot confirm a logout.
 function addon:GetOverviewPlayers()
     if not self.initialized or not self:HasDataGroup() or not self.rosterState then return {} end
-    if self.IsGroupSwitching and self:IsGroupSwitching() then return {} end
     local rows, byID = {}, {}
     local function Add(id, peer, isSelf)
         local row = { id = id, name = peer.name, level = peer.level, seenAt = peer.seenAt, isSelf = isSelf,
@@ -386,8 +372,6 @@ function addon:GetOverviewPlayers()
         local progress = isSelf and self.rosterState.localStatus or self.rosterState.progress[id]
         row.xpState, row.xpStale = "unavailable", false
         if progress then
-            local savedProgress = self.rosterState.progress[id]
-            row.xpUpdatedAt = isSelf and (savedProgress and savedProgress.xpUpdatedAt or GetServerTime()) or progress.xpUpdatedAt
             row.xpStale = not isSelf and (not row.online or progress.disconnected == true) or false
             if progress.level == row.level then
                 row.xp, row.xpMax, row.xpState = progress.xp, progress.xpMax, progress.xpState
@@ -443,7 +427,7 @@ function addon:GetOverviewActionState(id)
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     local reason
-    if not Active(self) then reason = "Join a guild or a writable LockInTools group after login first."
+    if not Active(self) then reason = "After login, join a guild, party or raid with sharing enabled."
     elseif not row then reason = "This player is no longer available."
     elseif row.isSelf then reason = "This is your character."
     elseif not row.online then reason = "No recent contact with this player."

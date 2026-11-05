@@ -64,14 +64,12 @@ return function(addon, environment, captureOnly)
     end
     if not captureOnly then
         local function capture(...) return { n = select("#", ...), ... } end
-        for _, name in ipairs({ "Notify", "EndNotificationBatch" }) do
-            local original = addon[name]
-            addon[name] = function(self, ...)
-                local before = #errors
-                local result = capture(original(self, ...))
-                assert(#errors == before, errors[before + 1])
-                return unpack(result, 1, result.n)
-            end
+        local notify = addon.Notify
+        addon.Notify = function(self, ...)
+            local before = #errors
+            local result = capture(notify(self, ...))
+            assert(#errors == before, errors[before + 1])
+            return unpack(result, 1, result.n)
         end
     end
     return errors
