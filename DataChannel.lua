@@ -40,7 +40,7 @@ local function NativeMembership(api)
 end
 
 local function CanUseData(self)
-    return self.initialized == true and self.ready == true and not self.savedDataReadOnly and self:HasGroup()
+    return self.initialized == true and self.ready == true and not self.savedDataReadOnly
         and not self:IsGroupSwitching() and not self.dataState.stopped
 end
 
@@ -52,6 +52,16 @@ function addon:GetDataChannelEnabled(channel)
     return type(channels) ~= "table" or channels[channel] ~= false
 end
 
+function addon:HasGuild()
+    return NativeMembership(IsInGuild)
+end
+
+-- Guild membership supplies its own audience; only the custom channel and
+-- existing party/raid sharing require a configured LockInTools group.
+function addon:HasDataGroup()
+    return self:HasGroup() or (self:GetDataChannelEnabled("guild") and self:HasGuild())
+end
+
 local function Wanted(self)
     return CanUseData(self) and self.dataState.wanted
         and (self:GetDataChannelEnabled("party") or self:GetDataChannelEnabled("guild")
@@ -59,7 +69,7 @@ local function Wanted(self)
 end
 
 local function GlobalWanted(self)
-    return Wanted(self) and self:GetDataChannelEnabled("global")
+    return Wanted(self) and self:HasGroup() and self:GetDataChannelEnabled("global")
 end
 
 local function Refresh(self)
@@ -114,11 +124,11 @@ function addon:RefreshDataRoutes()
     local state, routes = self.dataState, {}
     local channelLost = false
     if Wanted(self) and state.nativeStarted and state.nativeAvailable and state.prefixRegistered then
-        if self:GetDataChannelEnabled("party") then
+        if self:HasGroup() and self:GetDataChannelEnabled("party") then
             if NativeMembership(IsInRaid) then routes.RAID = true
             elseif NativeMembership(IsInGroup) then routes.PARTY = true end
         end
-        if self:GetDataChannelEnabled("guild") and NativeMembership(IsInGuild) then routes.GUILD = true end
+        if self:GetDataChannelEnabled("guild") and self:HasGuild() then routes.GUILD = true end
         if self:GetDataChannelEnabled("global") and state.channelConnected then
             local id = self:GetDataChannelID()
             if id then routes.CHANNEL = tostring(id)
@@ -133,6 +143,9 @@ function addon:RefreshDataRoutes()
     end
     local previous, connected = state.routes, state.connected
     state.routes = routes
+    for distribution in pairs(state.sendFailures or {}) do
+        if not routes[distribution] then state.sendFailures[distribution] = nil end
+    end
     -- Changing one route must not clear request caches or reset feature sessions
     -- while another route remains available.
     self:SetDataConnected(next(routes) ~= nil)
@@ -188,8 +201,8 @@ function addon:OnDataLogin()
     self:NotifyDataConnection()
     state.nativeStarted = true
     -- Status discovery stays active with human chat or position sharing off.
-    state.wanted = self:HasGroup()
-    if CanUseData(self) and not self:GetDataChannelEnabled("global") then DisableGlobalChannel(self) end
+    state.wanted = true
+    if CanUseData(self) and not GlobalWanted(self) then DisableGlobalChannel(self) end
     if state.wanted then self:JoinDataChannel(false) end
 end
 
@@ -198,6 +211,7 @@ function addon:ResetDataForGroupSwitch()
     if not state then return end
     self:CancelDataTimer()
     state.wanted, state.channelConnected, state.routes = false, false, {}
+    state.sendFailures = {}
     state.passwordCleared = false
     self:SetDataConnected(false)
     state.phase, state.detail = "idle", nil
@@ -209,7 +223,7 @@ end
 function addon:ResumeDataAfterGroupSwitch()
     local state = self.dataState
     if not state then return end
-    state.wanted = self:HasGroup()
+    state.wanted = true
     if state.nativeStarted and Wanted(self) then self:JoinDataChannel(false) end
     Refresh(self)
 end
@@ -277,7 +291,6 @@ function addon:JoinDataChannel(manual)
     if not state or not self.ready then return false, "Still loading. Please try again after login." end
     if self:IsGroupSwitching() then return false, "Waiting to leave the previous group." end
     if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
-    if not self:HasGroup() then return false, "Join a LockInTools group first." end
     state.nativeStarted = true
     if manual then
         self:CancelDataTimer()
@@ -298,7 +311,7 @@ function addon:JoinDataChannel(manual)
     -- Connecting a native route invokes feature callbacks, which may switch or
     -- remove the configured group before its global-channel join begins.
     if not Wanted(self) then return false end
-    if not self:GetDataChannelEnabled("global") then
+    if not GlobalWanted(self) then
         self:CancelDataTimer()
         state.phase, state.detail = "disabled", nil
         Refresh(self)
@@ -347,7 +360,7 @@ function addon:LeaveDataChannel()
     if self:IsGroupSwitching() then return false, "Waiting to leave the previous group." end
     if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
     self:CancelDataTimer()
-    state.wanted = self:HasGroup()
+    state.wanted = true
     state.pending, state.failed, state.awaitingLeave, state.attempts = false, false, true, 0
     state.leaveChecks = 0
     state.phase, state.detail = self:GetDataChannelEnabled("global") and "joining" or "disabled", nil
@@ -364,6 +377,7 @@ function addon:OnDataEvent(event, ...)
     if event == "PLAYER_LOGOUT" then
         self:CancelDataTimer()
         state.stopped, state.wanted, state.channelConnected, state.routes = true, false, false, {}
+        state.sendFailures = {}
         state.passwordCleared = false
         self:SetDataConnected(false)
         return
@@ -408,9 +422,10 @@ function addon:OnDataEvent(event, ...)
         self:RefreshDataRoutes()
         Refresh(self)
     elseif event == "CHANNEL_UI_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
-        if not self:GetDataChannelEnabled("global") then
+        if not GlobalWanted(self) then
             if ChannelID(name) then self:LeaveGroupChannel(name) end
             self:RefreshDataRoutes()
+            Refresh(self)
             return
         end
         if not Wanted(self) then return end
@@ -434,7 +449,6 @@ function addon:GetDataStatusText()
     if not self.dataState then return "Still loading." end
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
     if self:IsGroupSwitching() then return "Leaving the previous group before connecting." end
-    if not self:HasGroup() then return "No group configured." end
     if not self:GetDataChannelEnabled("party") and not self:GetDataChannelEnabled("guild")
         and not self:GetDataChannelEnabled("global") then return "All data channels are disabled." end
     local state = self.dataState
@@ -446,6 +460,16 @@ function addon:GetDataStatusText()
     if state.routes.GUILD then routes[#routes + 1] = "guild" end
     if state.routes.CHANNEL then routes[#routes + 1] = label end
     local active = #routes > 0 and ("Data routes: " .. table.concat(routes, ", ") .. ". ") or ""
+    local sendStatus = self:GetDataSendStatusText()
+    if sendStatus ~= "" then active = active .. sendStatus .. " " end
+    if not self:HasGroup() and state.phase ~= "error" then
+        if #routes == 0 and not self:GetDataChannelEnabled("guild") then
+            return "No group configured. Enable guild sharing or configure a LockInTools group key."
+        end
+        return active .. (#routes == 0 and "Waiting for guild membership. " or "")
+            .. (self:GetDataChannelEnabled("global") and "Global channel requires a LockInTools group key."
+                or "Global channel is disabled.")
+    end
     if not self:GetDataChannelEnabled("global") and state.phase ~= "error" then
         return active .. (#routes > 0 and "Global channel is disabled." or "Waiting for an enabled party or guild channel.")
     end

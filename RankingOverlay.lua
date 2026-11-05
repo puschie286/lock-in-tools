@@ -483,7 +483,7 @@ local function RefreshBurnedMeters(panel)
     if group.average ~= nil then
         text = text .. string.format("%.0f%%", group.average) .. " (" .. group.count .. " reporting)"
     elseif addon:IsGroupSwitching() then text = text .. "switching groups"
-    elseif not addon:HasGroup() then text = text .. "no group"
+    elseif not addon:HasDataGroup() then text = text .. "no group"
     elseif not addon:IsDataConnected() then text = text .. "disconnected"
     else text = text .. "awaiting reports" end
     PaintMeter(panel.groupBurned, group.average, text)

@@ -220,7 +220,7 @@ function addon:GetPlayerRanking(overviewPlayers)
     local result = { players = {}, awaiting = 0, stale = 0, inactive = 0,
         connected = false, grouped = false, switching = false }
     if not self.initialized or not self.ready then return result end
-    result.grouped, result.switching = self:HasGroup(), self:IsGroupSwitching()
+    result.grouped, result.switching = self:HasDataGroup(), self:IsGroupSwitching()
     result.connected = self:IsDataConnected()
     if not result.grouped or result.switching then return result end
     local cached, ranked = self.rankingOrderCache, {}

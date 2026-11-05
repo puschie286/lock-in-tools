@@ -117,7 +117,8 @@ function addon:OnLogin()
     self:OnPositionLogin()
     self:OnRosterLogin()
     if self.OnRankingLogin then self:OnRankingLogin() end
-    if self.db.showWelcome and not self:HasGroup() and not self.savedDataReadOnly then
+    if self.db.showWelcome and self.db.setupComplete ~= true and not self:HasGroup()
+        and not self.savedDataReadOnly then
         self:OpenContent()
     end
 end

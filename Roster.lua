@@ -57,7 +57,7 @@ end
 local function Active(self)
     return self.initialized and self.ready and self.rosterState and not self.rosterState.stopped
         and not (self.IsGroupSwitching and self:IsGroupSwitching())
-        and not self.savedDataReadOnly and self:HasGroup()
+        and not self.savedDataReadOnly and self:HasDataGroup()
 end
 
 local function Refresh(self)
@@ -375,7 +375,7 @@ end
 -- Progress is reported, not independently verified; online means recent contact,
 -- so contact expiry cannot confirm a logout.
 function addon:GetOverviewPlayers()
-    if not self.initialized or not self:HasGroup() or not self.rosterState then return {} end
+    if not self.initialized or not self:HasDataGroup() or not self.rosterState then return {} end
     if self.IsGroupSwitching and self:IsGroupSwitching() then return {} end
     local rows, byID = {}, {}
     local function Add(id, peer, isSelf)
@@ -443,7 +443,7 @@ function addon:GetOverviewActionState(id)
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     local reason
-    if not Active(self) then reason = "Join a writable LockInTools group after login first."
+    if not Active(self) then reason = "Join a guild or a writable LockInTools group after login first."
     elseif not row then reason = "This player is no longer available."
     elseif row.isSelf then reason = "This is your character."
     elseif not row.online then reason = "No recent contact with this player."

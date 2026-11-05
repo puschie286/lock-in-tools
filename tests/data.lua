@@ -61,7 +61,7 @@ local function newAddon(saved, readOnly, withPositions, native)
     environment.C_Timer.After = environment.C_Timer.NewTimer
     environment.Enum = {
         RegisterAddonMessagePrefixResult = { Success = 0, DuplicatePrefix = 1, InvalidPrefix = 2 },
-        SendAddonMessageResult = { Success = 0, AddOnMessageLockdown = 11 },
+        SendAddonMessageResult = { Success = 0, NotInGuild = 10, AddOnMessageLockdown = 11 },
     }
     environment.GetChannelName = function(identifier)
         if type(identifier) == "string" then
@@ -102,7 +102,9 @@ local function newAddon(saved, readOnly, withPositions, native)
                 prefix = prefix, message = message, distribution = distribution, target = target, at = world.now,
             }
             world.sendAttempts[#world.sendAttempts + 1] = packet
-            if world.sendThrows or (world.routeThrows and world.routeThrows[distribution]) then error("Native send unavailable") end
+            if world.sendThrows or (world.routeThrows and world.routeThrows[distribution]) then
+                error(world.sendError or "Native send unavailable")
+            end
             world.nativeSends[#world.nativeSends + 1] = packet
             local result = world.routeResults and world.routeResults[distribution]
             if result ~= nil then return result end
@@ -1817,7 +1819,8 @@ for _, action in ipairs({ "switch", "leave" }) do
             and clock.joins[1].name == current:GetGroupDataChannelName(),
             "Only the replacement group requests a global channel after native startup changes")
     else
-        assert(not current:HasGroup() and not current:IsDataConnected() and #clock.joins == 0)
+        assert(not current:HasGroup() and current:IsDataConnected() and current.dataState.routes.GUILD
+            and #clock.joins == 0, "Leaving the keyed group resumes independent guild sharing")
     end
     assert(#clock.sendAttempts == 0, "Startup configuration callbacks cannot send abandoned-group frames")
 end
@@ -1844,12 +1847,9 @@ do
         and clock.sent[1].distribution == "PARTY")
 end
 
--- Native memberships retain the existing setup, startup and read-only gates.
-for _, profile in ipairs({
-    { saved = { schemaVersion = 3, group = { secret = "" } } },
-    { readOnly = true },
-}) do
-    local current, clock = newAddon(profile.saved, profile.readOnly, false, { guild = true, raid = true })
+-- Native memberships retain startup and read-only gates without requiring a key for guild.
+do
+    local current, clock = newAddon(nil, true, false, { guild = true, raid = true })
     assert(current:RegisterDataFeature("echo", function() error("Inactive native receive") end))
     assert(not current:SendData("echo", "before login"))
     clock:login()
@@ -1857,6 +1857,27 @@ for _, profile in ipairs({
     clock:fire("PLAYER_GUILD_UPDATE", "player")
     assert(not current:IsDataConnected() and #clock.sendAttempts == 0
         and not current:ReceiveData("Friend", "1|echo|inactive", "GUILD"))
+end
+
+do
+    local current, clock = newAddon({ schemaVersion = 3, group = { secret = "" } }, false, false,
+        { guild = true, raid = true })
+    local received = 0
+    assert(current:RegisterDataFeature("echo", function() received = received + 1 end))
+    assert(not current:SendData("echo", "before login"))
+    clock:login()
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD and not current.dataState.routes.RAID
+        and not current.dataState.routes.CHANNEL and #clock.joins == 0,
+        "Guild sharing needs no key while keyed routes remain inactive")
+    assert(current:SendData("echo", "guild without a key") and clock.sent[1].distribution == "GUILD")
+    assert(current:ReceiveData("Friend", "1|echo|guild without a key", "GUILD") and received == 1)
+    clock.guild = false
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not current:IsDataConnected(), "A keyless player cannot fall back to keyed raid/global routes")
+    clock.guild = true
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(current:IsDataConnected() and current:SendData("echo", "guild restored"),
+        "Guild membership changes restore keyless sharing without a reload")
 end
 
 -- Each frame is serialized once and attempted on every route, even when another
@@ -1884,11 +1905,14 @@ do
             found[packet.distribution] = true
         end
         assert(found.PARTY and found.GUILD and found.CHANNEL)
+        assert(current.dataState.sendFailures.PARTY ~= nil,
+            "A failing route stays visible even if another route accepts the same frame")
     end
     clock.routeResults, clock.routeThrows = nil, nil
     local before = #clock.sendAttempts
     local accepted, id = current:RequestData("snapshot", "same request")
     assert(accepted and #clock.sendAttempts == before + 3)
+    assert(current:GetDataSendStatusText() == "", "Successful retries clear each route's failure")
     for index = before + 1, #clock.sendAttempts do
         assert(clock.sendAttempts[index].message == "1|Q|snapshot|" .. id .. "|same request",
             "All routes reuse one request identifier and complete serialized envelope")
@@ -1912,6 +1936,57 @@ do
     before = #clock.sendAttempts
     assert(not current:SendData("echo", string.rep("x", 256))
         and not current:SendData("echo", "bad\000payload") and #clock.sendAttempts == before)
+end
+
+-- Diagnostics describe the native failure without exposing payloads or exception text.
+-- A route remains eligible for receives and retries while its outgoing sends fail.
+do
+    local profile = { schemaVersion = 3, group = { secret = "otter-4827" },
+        data = { channels = { party = false, guild = true, global = false } } }
+    local current, clock = newAddon(profile, false, false, { guild = true })
+    assert(current:RegisterDataFeature("echo", function() end))
+    clock:login()
+    local notices = 0
+    current:RegisterNotification("DATA_CHANGED", function() notices = notices + 1 end)
+    local private = "private payload must never appear in status"
+    clock.sendResult = 11
+    assert(not current:SendData("echo", private) and current:IsDataConnected())
+    local status = current:GetDataStatusText()
+    assert(status:find("Send failures: guild", 1, true) and status:find("AddOnMessageLockdown", 1, true)
+        and status:find("11", 1, true) and not status:find(private, 1, true),
+        "Status reports rejected guild messages even though membership remains active")
+    assert(notices == 1)
+    assert(not current:SendData("echo", private) and notices == 1,
+        "Repeated identical failures do not repeatedly notify the interface")
+    clock.sendResult = 10
+    assert(not current:SendData("echo", private))
+    assert(current:GetDataSendStatusText():find("NotInGuild, code 10", 1, true) and notices == 2)
+    clock.sendResult = 777
+    assert(not current:SendData("echo", private))
+    assert(current:GetDataSendStatusText():find("code 777", 1, true) and notices == 3,
+        "Unknown native numeric results remain diagnosable")
+    clock.sendThrows, clock.sendError = true, private
+    assert(not current:SendData("echo", private))
+    assert(current:GetDataSendStatusText():find("native API error", 1, true)
+        and not current:GetDataSendStatusText():find(private, 1, true) and notices == 4)
+    local secret = {}
+    clock.sendThrows, clock.sendResult = false, secret
+    clock.environment.issecretvalue = function(value) return rawequal(value, secret) end
+    assert(not current:SendData("echo", private))
+    assert(current:GetDataSendStatusText():find("native result unavailable", 1, true) and notices == 5)
+    clock.sendResult = private
+    assert(not current:SendData("echo", private))
+    assert(not current:GetDataSendStatusText():find(private, 1, true) and notices == 5,
+        "Unexpected strings and secret native results are never displayed")
+    clock.sendResult = 0
+    assert(current:SendData("echo", private) and current:GetDataSendStatusText() == ""
+        and not current:GetDataStatusText():find("Send failures:", 1, true) and notices == 6,
+        "Successful recovery clears status and notifies the interface once")
+    clock.sendResult = 11
+    assert(not current:SendData("echo", private))
+    assert(current:SetDataChannelEnabled("guild", false) and not current:IsDataConnected())
+    assert(current:GetDataSendStatusText() == "" and not current:GetDataStatusText():find("Send failures:", 1, true),
+        "Disabling a route clears its obsolete failure instead of carrying it into another session")
 end
 
 -- A newly available route requests discovery without resetting the existing

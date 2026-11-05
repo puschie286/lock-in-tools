@@ -196,6 +196,157 @@ do
     assert(not contains(connectedMessages, SECRET) and not contains(connectedMessages, OTHER_SECRET))
 end
 
+-- Guild discovery and all shared player data work with no LIT key. Global and
+-- party defaults must not turn that independent route into a custom-channel join.
+do
+    local aliceProfile, bobProfile = settings("", false), settings("", false)
+    aliceProfile.burned, bobProfile.burned = { status = 20 }, { status = 80 }
+    local alice, aliceEnvironment, _, aliceEvent, aliceWorld = loadAddon(aliceProfile, false)
+    local bob, bobEnvironment, _, bobEvent, bobWorld = loadAddon(bobProfile, false)
+    aliceEnvironment.UnitFullName = function() return "Alice", "Test Realm" end
+    bobEnvironment.UnitFullName = function() return "Bob", "Test Realm" end
+    aliceEnvironment.UnitClass = function() return "Mage", "MAGE" end
+    bobEnvironment.UnitClass = function() return "Hunter", "HUNTER" end
+    aliceWorld.guild, aliceWorld.grouped, aliceWorld.xp = true, true, 125
+    bobWorld.guild, bobWorld.grouped, bobWorld.xp = true, true, 750
+    aliceEvent("ADDON_LOADED", "LockInTools")
+    bobEvent("ADDON_LOADED", "LockInTools")
+    assert(#aliceWorld.statusSends == 0 and #bobWorld.statusSends == 0,
+        "Guild membership cannot start keyless sharing before login")
+    aliceEvent("PLAYER_LOGIN")
+    bobEvent("PLAYER_LOGIN")
+    assert(not alice:HasGroup() and not bob:HasGroup() and alice:IsDataConnected() and bob:IsDataConnected()
+        and alice.dataState.routes.GUILD and not alice.dataState.routes.PARTY
+        and not alice.dataState.routes.CHANNEL and #aliceWorld.dataJoinCalls == 0
+        and #bobWorld.dataJoinCalls == 0 and #aliceWorld.joinCalls == 0 and #bobWorld.joinCalls == 0,
+        "Keyless guild sharing starts without joining chat, global data or a party route")
+    local function deliver(sends, first, last, receive, sender)
+        for index = first, last do
+            local sent = assert(sends[index])
+            assert(sent.distribution == "GUILD" and sent.target == nil)
+            receive("CHAT_MSG_ADDON", sent.prefix, sent.message, sent.distribution, sender)
+        end
+    end
+    assert(#aliceWorld.statusSends == 1 and #bobWorld.statusSends == 1)
+    deliver(aliceWorld.statusSends, 1, 1, bobEvent, "Alice")
+    deliver(bobWorld.statusSends, 1, 2, aliceEvent, "Bob")
+    deliver(aliceWorld.statusSends, 2, 2, bobEvent, "Alice")
+    for _, entry in ipairs({ { alice, "bob-testrealm", 750, "HUNTER" },
+        { bob, "alice-testrealm", 125, "MAGE" } }) do
+        local current, id, xp, class = unpack(entry)
+        local players, found = current:GetOverviewPlayers()
+        for _, row in ipairs(players) do if row.id == id then found = row end end
+        local ranking, burned = current:GetPlayerRanking(), current:GetGroupBurnedStatus()
+        local position = current:GetSharedPositions()[id]
+        assert(#players == 2 and found and found.online and found.xp == xp
+            and ranking.connected and #ranking.players == 2 and ranking.players[1].id == "bob-testrealm"
+            and burned.count == 2 and burned.average == 50
+            and position and position.class == class and position.x == 0.25 and position.y == 0.75,
+            "Keyless guild replies populate Overview, Ranking, XP, Burned, class and positions")
+    end
+    local oldXP = alice.rosterState.progress["bob-testrealm"].xp
+    assert(alice:SetDataChannelEnabled("guild", false) and not alice:IsDataConnected())
+    bobWorld.xp = 950
+    bobWorld:advance(5)
+    local latest = assert(bobWorld.statusSends[#bobWorld.statusSends])
+    aliceEvent("CHAT_MSG_ADDON", latest.prefix, latest.message, "GUILD", "Bob")
+    local before = #aliceWorld.statusSends
+    aliceWorld:advance(30)
+    assert(alice.rosterState.progress["bob-testrealm"].xp == oldXP and #aliceWorld.statusSends == before
+        and #aliceWorld.dataJoinCalls == 0 and #aliceWorld.dataSends == 0,
+        "Disabling guild blocks keyless sends and receives even with party and global enabled")
+    assert(alice:SetDataChannelEnabled("guild", true) and alice:IsDataConnected())
+    deliver(bobWorld.statusSends, #bobWorld.statusSends, #bobWorld.statusSends, aliceEvent, "Bob")
+    assert(alice.rosterState.progress["bob-testrealm"].xp == 950)
+    assert(alice:SetGroupSecret(SECRET) and alice:HasGroup() and alice.dataState.routes.GUILD
+        and alice.dataState.routes.PARTY and #aliceWorld.dataJoinCalls == 1)
+    assert(alice:LeaveGroup())
+    aliceWorld:advance(0)
+    assert(not alice:HasGroup() and alice:IsDataConnected() and alice.dataState.routes.GUILD
+        and not alice.dataState.routes.PARTY and not alice.dataState.routes.CHANNEL,
+        "Removing a LIT key resumes independent guild discovery after channel cleanup")
+    local joins = #aliceWorld.dataJoinCalls
+    aliceWorld:advance(30)
+    assert(#aliceWorld.dataJoinCalls == joins and alice.db.group.secret == ""
+        and bob.db.group.secret == "" and #aliceWorld.notificationErrors == 0
+        and #bobWorld.notificationErrors == 0,
+        "Keyless guild traffic never generates a key or retries a custom-channel join")
+end
+
+-- Guild membership can arrive after login; no keyless route may bypass opt-out,
+-- native membership or newer-schema protection.
+do
+    local current, environment, _, event, clock = loadAddon(settings("", false), false)
+    clock.grouped = true
+    clock:initialize()
+    clock:advance(30)
+    assert(not current:IsDataConnected() and #clock.statusSends == 0 and #clock.dataSends == 0
+        and #clock.dataJoinCalls == 0,
+        "A native party alone does not enable the guild-only keyless route")
+    clock.guild = true
+    event("PLAYER_GUILD_UPDATE", "player")
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD and #clock.statusSends == 1,
+        "Guild membership arriving after login starts keyless discovery")
+    environment.C_Map.GetPlayerMapPosition = function()
+        return { GetXY = function() return 0.5, 0.2 end }
+    end
+    clock:advance(2)
+    assert(#clock.dataSends == 1 and clock.dataSends[1].distribution == "GUILD"
+        and clock.dataSends[1].message:match("^1|position|2|P|%d+|37|50000|20000$"),
+        "Late guild membership starts movement sharing beyond the initial status snapshot")
+    clock.guild = false
+    event("PLAYER_GUILD_UPDATE", "player")
+    assert(not current:IsDataConnected() and current:GetGroupBurnedStatus().count == 0)
+    local sends, positions = #clock.statusSends, #clock.dataSends
+    clock:advance(30)
+    assert(#clock.statusSends == sends and #clock.dataSends == positions and #clock.dataJoinCalls == 0,
+        "Leaving the guild stops keyless sharing rather than falling back to party or global")
+    local profile = settings("", false)
+    profile.schemaVersion = 4
+    local future, environment, _, _, futureClock = loadAddon(profile, false)
+    futureClock.guild = true
+    futureClock:initialize()
+    futureClock:advance(30)
+    assert(future.savedDataReadOnly and environment.LockInToolsDB == profile and profile.group.secret == ""
+        and profile.schemaVersion == 4 and not future:IsDataConnected() and #futureClock.statusSends == 0
+        and #futureClock.dataJoinCalls == 0,
+        "Keyless guild membership cannot bypass newer-schema read-only protection")
+end
+
+-- Loading-screen channel updates can be the first membership signal. They
+-- must also restart movement after losing and recovering the keyless route.
+do
+    local current, environment, _, event, clock = loadAddon(settings("", false), false)
+    local x = 0.1
+    environment.C_Map.GetPlayerMapPosition = function()
+        return { GetXY = function() return x, 0.2 end }
+    end
+    clock:initialize()
+    assert(not current:IsDataConnected() and not current.positionState.timer)
+    clock.guild = true
+    event("PLAYER_ENTERING_WORLD")
+    x = 0.3
+    clock:advance(2)
+    assert(current:IsDataConnected() and #clock.dataSends == 1
+        and clock.dataSends[1].distribution == "GUILD"
+        and clock.dataSends[1].message:match("^1|position|2|P|%d+|37|30000|20000$"),
+        "World entry starts keyless guild movement without a guild-update event")
+    clock.guild, x = false, 0.4
+    event("CHANNEL_UI_UPDATE")
+    assert(not current:IsDataConnected() and not current.positionState.timer,
+        "A channel update cancels movement when keyless guild membership disappears")
+    clock:advance(2)
+    assert(#clock.dataSends == 1)
+    clock.guild = true
+    event("PLAYER_ENTERING_WORLD")
+    x = 0.5
+    clock:advance(2)
+    assert(current:IsDataConnected() and #clock.dataSends == 2
+        and clock.dataSends[2].distribution == "GUILD"
+        and clock.dataSends[2].message:match("^1|position|2|P|%d+|37|50000|20000$"),
+        "World entry restarts keyless guild movement after membership recovery")
+end
+
 -- Native routes connect the complete addon before its additional global channel.
 -- Overlapping deliveries keep one roster entry, position and Burned report per player.
 do

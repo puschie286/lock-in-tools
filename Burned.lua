@@ -9,7 +9,7 @@ end
 
 local function Active(self)
     return self.initialized and self.ready and self.burnedState and not self.burnedState.stopped
-        and not self.savedDataReadOnly and self:HasGroup() and not self:IsGroupSwitching()
+        and not self.savedDataReadOnly and self:HasDataGroup() and not self:IsGroupSwitching()
 end
 
 local function Refresh(self)

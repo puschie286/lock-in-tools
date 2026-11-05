@@ -70,6 +70,31 @@ local function ValidRequestID(id)
     return id and #id <= 32 and id:match("^[a-zA-Z0-9_-]+$")
 end
 
+local function SendFailureReason(ok, result)
+    -- Native errors may contain payloads or credentials. Report only the result
+    -- enum/code, never the message or the exception returned by pcall.
+    if not ok then return "native API error" end
+    if IsSecret(result) or type(result) ~= "number" or result ~= result
+        or result == math.huge or result == -math.huge then return "native result unavailable" end
+    for name, code in pairs(Enum.SendAddonMessageResult) do
+        if code == result and type(name) == "string" and name:match("^[a-zA-Z]+$") then
+            return name .. ", code " .. tostring(result)
+        end
+    end
+    return "code " .. tostring(result)
+end
+
+function addon:GetDataSendStatusText()
+    local failures, parts = self.dataState and self.dataState.sendFailures, {}
+    if not failures then return "" end
+    for _, route in ipairs({ { "PARTY", "party" }, { "RAID", "raid" }, { "GUILD", "guild" },
+        { "CHANNEL", "global channel" } }) do
+        local reason = failures[route[1]]
+        if reason then parts[#parts + 1] = route[2] .. " (" .. reason .. ")" end
+    end
+    return #parts > 0 and ("Send failures: " .. table.concat(parts, "; ") .. ".") or ""
+end
+
 function addon:SetDataConnected(connected)
     local state = self.dataState
     if state.connected == connected then return end
@@ -88,15 +113,22 @@ local function SendFrame(self, message)
     -- No queue or automatic retry: each feature decides when its data is current.
     -- Reuse the exact frame (including request IDs) so existing protocol guards
     -- suppress overlapping deliveries. Every route gets a chance, even on failure.
-    local accepted = false
+    local accepted, changed = false, false
+    local failures = self.dataState.sendFailures
     for _, distribution in ipairs({ "PARTY", "RAID", "GUILD", "CHANNEL" }) do
         local route = routes[distribution]
         if route then
             local target = distribution == "CHANNEL" and route or nil
             local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, distribution, target)
-            if ok and not IsSecret(result) and result == Enum.SendAddonMessageResult.Success then accepted = true end
+            local reason
+            if ok and not IsSecret(result) and result == Enum.SendAddonMessageResult.Success then accepted = true
+            else reason = SendFailureReason(ok, result) end
+            if failures[distribution] ~= reason then
+                failures[distribution], changed = reason, true
+            end
         end
     end
+    if changed then self:Notify("DATA_CHANGED") end
     if not accepted then return false, "Data message was not accepted." end
     return true
 end
@@ -107,7 +139,7 @@ end
 
 function addon:InitializeData()
     if self.dataState then return end
-    self.dataState = { features = {}, requests = {}, connected = false, nextRequestID = 0,
+    self.dataState = { features = {}, requests = {}, sendFailures = {}, connected = false, nextRequestID = 0,
         nameAPIs = { fullName = type(UnitFullName) == "function", realm = type(GetNormalizedRealmName) == "function",
             unmodifiedFullName = NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" or false },
         requestSession = string.format("%x-%x", GetServerTime(), math.floor(GetTime() * 1000) % 2147483647) }

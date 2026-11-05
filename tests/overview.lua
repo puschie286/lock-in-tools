@@ -71,6 +71,7 @@ local function newAddon(saved, readOnly, name, configure)
         initialized = true, ready = false, savedDataReadOnly = readOnly,
     }
     function addon:HasGroup() return world.fingerprint ~= nil end
+    function addon:HasDataGroup() return self:HasGroup() end
     function addon:GetGroupFingerprint() return world.fingerprint end
     function addon:IsDataConnected() return world.connected end
     function addon:IsDataSelf(sender)

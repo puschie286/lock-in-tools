@@ -949,7 +949,10 @@ function addon:OpenContent()
     end
 
     local problem
-    if not self:HasGroup() and not self.invalidGroupSecret and not self.savedDataReadOnly then
+    -- Initial setup is separate from current sharing preferences: a keyless
+    -- guild user must not acquire a key just by disabling Guild or reopening.
+    if self.db.setupComplete ~= true and not self:HasGroup() and not self:HasGuild()
+        and not self.invalidGroupSecret and not self.savedDataReadOnly then
         local key
         key, problem = self:GenerateGroupKey()
         if key then
@@ -963,6 +966,9 @@ function addon:OpenContent()
     ShowPanel(self.contentPanel)
     self:RefreshContent()
     if problem then SetFeedback(self.contentPanel, problem, true) end
+    if not problem and not self.invalidGroupSecret and not self.savedDataReadOnly then
+        self.db.setupComplete = true
+    end
 end
 
 -- Keep the old command/API entry point without retaining a separate welcome view.

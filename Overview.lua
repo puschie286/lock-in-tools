@@ -341,8 +341,8 @@ function addon:RefreshOverview()
     end
     if self:IsGroupSwitching() then
         page.empty:SetText("Leaving previous group...")
-    elseif not self:HasGroup() then
-        page.empty:SetText("Choose a group key in Settings > Group to see your friends.")
+    elseif not self:HasDataGroup() then
+        page.empty:SetText("Join a guild or choose a group key in Settings > Group to see your friends.")
     elseif #players == 0 then
         page.empty:SetText("Waiting for players on this realm and faction.")
     end

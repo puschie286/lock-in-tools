@@ -54,7 +54,7 @@ local function NativeSelfName()
 end
 
 local function Active(self)
-    return self.positionState and self.ready and self:HasGroup()
+    return self.positionState and self.ready and self:HasDataGroup()
         and not (self.IsGroupSwitching and self:IsGroupSwitching())
         and self.db.position.sharing and not self.savedDataReadOnly
 end
@@ -158,6 +158,13 @@ function addon:InitializePositions()
         if not connected then ResetSendState(self) end
         Refresh(self)
     end)
+    self:RegisterNotification("DATA_CHANGED", function()
+        local active = Active(self) and true or false
+        if self.positionState.timerActive ~= active then
+            self:UpdatePositionTimer()
+            Refresh(self)
+        end
+    end)
     if self.InitializePositionMap then self:InitializePositionMap() end
 end
 
@@ -170,7 +177,8 @@ function addon:UpdatePositionTimer()
     local state = self.positionState
     state.generation = state.generation + 1
     if state.timer then state.timer:Cancel(); state.timer = nil end
-    if not Active(self) then return end
+    state.timerActive = Active(self) and true or false
+    if not state.timerActive then return end
     local generation = state.generation
     local function Tick()
         if state.generation ~= generation or not Active(self) then return end
@@ -365,7 +373,7 @@ end
 function addon:GetPositionStatusText(concise)
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
     if not self.db.position.sharing then return "Off." end
-    if not self:HasGroup() then return "Join a LockInTools group first." end
+    if not self:HasDataGroup() then return "Join a guild or a LockInTools group first." end
     if not self:IsDataConnected() then return "On. Waiting for a group connection." end
     if self.positionState.lastSendSucceeded == false then return "On. Group connection unavailable." end
     return concise and "On." or "On. Movement checks every 2 seconds; idle refresh with player status."

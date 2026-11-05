@@ -10,6 +10,7 @@ local function newAddon(saved, readOnly, skipInitialization)
         savedDataReadOnly = readOnly == true,
     }
     function addon:HasGroup() return world.grouped end
+    function addon:HasDataGroup() return self:HasGroup() end
     function addon:IsDataConnected() return world.connected end
     function addon:IsGroupSwitching() return world.switching end
     function addon:GetOverviewPlayers()
