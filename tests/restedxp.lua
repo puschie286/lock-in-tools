@@ -2,7 +2,10 @@
 local function Fixture(readOnly, saved)
     local world = { timers = {}, handed = {}, tag = "Local#1234" }
     local addon = { ready = true, savedDataReadOnly = readOnly,
-        db = saved or { group = { secret = "keep" }, restedxp = { groups = { old = "cached export" } } } }
+        db = saved or { showWelcome = false, data = { channels = { party = false, guild = true } },
+            roster = { players = { old = { level = 20 } } },
+            restedxpSkin = { enabled = false, backgroundTransparency = 35 },
+            restedxp = { sourceBattleTag = "Previous#1234", groups = { old = "cached export" } } } }
     local env = setmetatable({ issecretvalue = function(value)
         return world.secretValue ~= nil and value == world.secretValue
     end, C_Timer = { NewTimer = function(_, callback)
@@ -19,7 +22,8 @@ local function Fixture(readOnly, saved)
     end
     function addon:GetRestedXPBattleTag() return world.tag, "BattleTag unavailable." end
     addon.RestedXPCodec = { MAX_DATA = 2097152, Reencrypt = function(raw, source, destination)
-        assert(raw == "ExportCASE+Payload" and source == "Source#9876" and destination == "Local#1234")
+        assert(raw == "ExportCASE+Payload" and source == "Player#1234" and destination == "Local#1234",
+            "conversion always uses the generic source and the live local BattleTag")
         coroutine.yield()
         if world.crash then error("private export and tag must never be displayed") end
         if world.invalid then return nil, "Invalid export framing." end
@@ -56,14 +60,14 @@ end
 do
     local addon, world = Fixture()
     world.monitored = true
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     assert(addon:GetRestedXPState().phase == "preparing")
     world:run()
     local state = addon:GetRestedXPState()
     assert(state.busy and not state.canImport and state.phase == "importing"
         and state.current == 0 and state.total == 10,
         "native acceptance stays busy and shows initial import progress")
-    assert(not addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"),
+    assert(not addon:ImportRestedXPString("ExportCASE+Payload"),
         "a second import cannot start while native processing is in progress")
     world.progress("importing", 10, 10)
     assert(addon:GetRestedXPState().busy and addon:GetRestedXPState().phase == "importing",
@@ -73,7 +77,7 @@ do
     assert(not state.busy and state.canImport and state.phase == "completed" and not state.error,
         "only explicit native success reports completion")
     local previous = world.progress
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     world:run()
     previous("failed")
     assert(addon:GetRestedXPState().busy and addon:GetRestedXPState().phase == "importing",
@@ -84,7 +88,7 @@ end
 for _, phase in ipairs({ "failed", "cancelled", "unknown" }) do
     local addon, world = Fixture()
     world.monitored = true
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     world:run()
     world.progress(phase, nil, nil, "private guide source must not be displayed")
     local state = addon:GetRestedXPState()
@@ -97,7 +101,7 @@ end
 do
     local addon, world = Fixture()
     world.monitored, world.immediate = true, "completed"
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     world:run()
     assert(addon:GetRestedXPState().phase == "completed" and not addon:GetRestedXPState().busy,
         "an immediate native completion callback is not overwritten by the handoff result")
@@ -105,97 +109,70 @@ end
 
 do
     local addon, world = Fixture()
-    assert(addon.db.restedxp == nil and addon.db.group.secret == "keep", "remove only obsolete LIT guide caches")
+    local data, history, skin = addon.db.data, addon.db.roster, addon.db.restedxpSkin
+    assert(addon.db.restedxp == nil, "remove obsolete guide caches and the source-tag preference on initialization")
+    assert(addon.SetRestedXPSourceBattleTag == nil and addon:GetRestedXPState().sourceBattleTag == nil,
+        "the import helper exposes no configurable source tag")
     assert(addon:GetRestedXPState().canImport, "local import needs no group or data connection")
-    assert(addon:SetRestedXPSourceBattleTag("  Source#9876  "))
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "  Source#9876  "))
-    assert(addon:GetRestedXPState().busy and #world.handed == 0
-        and addon.db.restedxp.sourceBattleTag == "  Source#9876  ",
-        "starting asynchronous conversion preserves the entered source preference")
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
+    assert(addon:GetRestedXPState().busy and #world.handed == 0 and addon.db.restedxp == nil,
+        "starting asynchronous conversion never saves guide strings or source tags")
     world:run()
     assert(#world.handed == 1 and world.handed[1] == "retargeted export" and not addon:GetRestedXPState().busy)
-    assert(addon.db.restedxp.sourceBattleTag == "  Source#9876  "
-        and addon:GetRestedXPState().sourceBattleTag == "  Source#9876  ",
-        "native acceptance preserves the exact input while conversion uses a trimmed source")
-    local count = 0
-    for _ in pairs(addon.db.restedxp) do count = count + 1 end
-    assert(count == 1, "only the source preference is saved, never pasted or converted guide strings")
-    addon.db.restedxp.groups = { late = "obsolete guide export" }
+    assert(addon.db.restedxp == nil, "native acceptance never saves pasted or converted guide strings")
+    addon.db.restedxp = { sourceBattleTag = "Late#5678", groups = { late = "obsolete guide export" } }
     world.event(nil, "PLAYER_LOGOUT")
-    assert(addon.db.restedxp.sourceBattleTag == "  Source#9876  " and addon.db.restedxp.groups == nil,
-        "logout cleanup retains the preference while removing any old cache")
+    assert(addon.db.restedxp == nil, "logout also removes any old source preference and guide cache")
     local reloaded = Fixture(false, addon.db)
-    assert(reloaded:GetRestedXPState().sourceBattleTag == "  Source#9876  ",
-        "the source preference survives initialization with existing SavedVariables")
+    assert(reloaded.db.restedxp == nil and reloaded.db.data == data and reloaded.db.roster == history
+        and reloaded.db.restedxpSkin == skin and not reloaded.db.showWelcome
+        and not data.channels.party and data.channels.guild and history.players.old.level == 20
+        and not skin.enabled and skin.backgroundTransparency == 35,
+        "cleanup and reload preserve unrelated settings, player history and skin appearance")
 end
 
 for _, scenario in ipairs({ "invalid", "crash", "rejected" }) do
     local addon, world = Fixture()
-    addon.db.restedxp = { sourceBattleTag = "Previous#1234" }
-    assert(addon:SetRestedXPSourceBattleTag("Source#9876"))
     world[scenario] = true
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     world:run()
     local state = addon:GetRestedXPState()
     assert(not state.busy and state.status and not state.status:find("private", 1, true))
     assert(#world.handed == (scenario == "rejected" and 1 or 0), "failed conversions never reach native import")
-    assert(addon:GetRestedXPState().sourceBattleTag == "Source#9876",
-        "failed conversion or native rejection retains the latest entered source")
+    assert(addon.db.restedxp == nil, "failed conversion or native rejection never saves guide data")
     world[scenario] = nil
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"), "errors release the helper for retry")
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"), "errors release the helper for retry")
 end
 
 do
     local addon, world = Fixture()
-    addon.db.restedxp = { sourceBattleTag = "Previous#1234" }
-    assert(addon:SetRestedXPSourceBattleTag("bad tag"))
-    assert(not addon:ImportRestedXPString("", "Source#9876"))
-    assert(not addon:ImportRestedXPString("ExportCASE+Payload", "bad tag"))
+    assert(not addon:ImportRestedXPString(""))
+    assert(not addon:ImportRestedXPString(string.rep("a", addon.RestedXPCodec.MAX_DATA + 1)))
+    for _, invalid in ipairs({ false, 123, {}, "secret" }) do
+        world.secretValue = "secret"
+        assert(not addon:ImportRestedXPString(invalid), "invalid or secret guide strings cannot start an import")
+    end
+    assert(not addon:ImportRestedXPString(nil))
     world.missing = true
-    assert(not addon:GetRestedXPState().canImport and not addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(not addon:GetRestedXPState().canImport and not addon:ImportRestedXPString("ExportCASE+Payload"))
     world.missing, world.tag = false, nil
-    assert(not addon:GetRestedXPState().canImport and not addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
-    assert(#world.timers == 0 and #world.handed == 0 and addon:GetRestedXPState().sourceBattleTag == "bad tag",
-        "validation and availability failures retain even an unfinished source preference")
+    assert(not addon:GetRestedXPState().canImport and not addon:ImportRestedXPString("ExportCASE+Payload"))
+    assert(#world.timers == 0 and #world.handed == 0 and addon.db.restedxp == nil,
+        "validation and availability failures never schedule conversion or save guide data")
 end
 
 do
     local addon, world = Fixture()
-    assert(addon:SetRestedXPSourceBattleTag("Source#9876"))
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     world.tag = "Changed#4567"
     world:run()
     assert(#world.handed == 0 and not addon:GetRestedXPState().busy, "changed destination cannot receive an old personalized export")
     world.tag = "Local#1234"
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
+    assert(addon:ImportRestedXPString("ExportCASE+Payload"))
     world.event(nil, "PLAYER_LOGOUT")
     world:run()
     assert(#world.handed == 0 and not addon:GetRestedXPState().busy, "logout drops transient conversion without a native abort")
-    assert(addon.db.restedxp.sourceBattleTag == "Source#9876",
-        "cancelled conversions retain the independently saved source preference")
-end
-
-for _, newer in ipairs({ "Newer#4567", "" }) do
-    local addon, world = Fixture()
-    assert(addon:SetRestedXPSourceBattleTag("Source#9876"))
-    assert(addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876"))
-    assert(addon:SetRestedXPSourceBattleTag(newer))
-    world:run()
-    assert(#world.handed == 1 and addon:GetRestedXPState().sourceBattleTag == newer,
-        "a completed import cannot overwrite newer saved input or undo a cleared preference")
-    assert(newer ~= "" or addon.db.restedxp == nil, "clearing input removes the preference namespace")
-end
-
-do
-    local addon, world = Fixture()
-    assert(addon:SetRestedXPSourceBattleTag(string.rep("a", 128)), "the complete field limit is saved")
-    local preference = addon.db.restedxp
-    for _, invalid in ipairs({ false, 123, {}, string.rep("a", 129), "secret" }) do
-        world.secretValue = "secret"
-        assert(not addon:SetRestedXPSourceBattleTag(invalid) and addon.db.restedxp == preference
-            and addon:GetRestedXPState().sourceBattleTag == string.rep("a", 128),
-            "invalid, secret and oversized values cannot replace the saved preference")
-    end
+    assert(addon.db.restedxp == nil, "cancelled conversions never save guide data")
 end
 
 do
@@ -203,17 +180,18 @@ do
     assert(addon.db.restedxp.groups.old == "cached export" and not addon:GetRestedXPState().canImport)
     assert(not addon:CleanupRestedXPData() and addon.db.restedxp.groups.old == "cached export",
         "explicit cleanup also respects newer-schema read-only data")
-    assert(not addon:ImportRestedXPString("ExportCASE+Payload", "Source#9876") and #world.timers == 0,
+    assert(not addon:ImportRestedXPString("ExportCASE+Payload") and #world.timers == 0,
         "newer-schema saved data remains untouched")
-    assert(not addon:SetRestedXPSourceBattleTag("Source#9876") and not addon:SetRestedXPSourceBattleTag("")
-        and addon.db.restedxp.groups.old == "cached export",
-        "saving or clearing input respects newer-schema read-only settings")
+    world.event(nil, "PLAYER_LOGOUT")
+    assert(addon.db.restedxp.sourceBattleTag == "Previous#1234" and addon.db.restedxp.groups.old == "cached export"
+        and addon:GetRestedXPState().sourceBattleTag == nil,
+        "logout preserves newer-schema source preferences without exposing them in the import helper")
 end
 
 local fixtures = dofile("tests/support/addon.lua")
 do
     local profile = fixtures.settings(fixtures.SECRET, false)
-    profile.restedxp = { groups = { old = { data = "obsolete guide data" } } }
+    profile.restedxp = { sourceBattleTag = "Previous#1234", groups = { old = { data = "obsolete guide data" } } }
     local addon, _, _, _, world = fixtures.loadAddon(profile, false)
     world:initialize()
     world:advance(8)
@@ -242,11 +220,11 @@ do
         if name == "AceAddon-3.0" then return { GetAddon = function() return rxp end } end
         return nativeLibStub(name, ...)
     end
-    function addon:GetRestedXPBattleTag() return "Local#1234" end
+    function addon:GetRestedXPBattleTag() return "Player#1234" end
     dofile("tests/support/ui.lua")(addon, environment)
     addon:OpenOptions("restedxp")
     local panel = addon.optionsPanel
-    panel.restedxpBattleTag:UserInput("Local#1234")
+    assert(panel.restedxpBattleTag == nil, "generic imports need no BattleTag input")
     -- Keep the payload opaque: the same source/destination makes conversion
     -- byte-preserving. RestedXP alone decides whether these bytes are guides.
     panel.restedxpExport:Paste("1||1:Zg==%||40000")

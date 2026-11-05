@@ -328,9 +328,9 @@ do
         assert(not tooltip:IsShown())
     end
     panel.tabs.restedxp:Click()
-    panel.restedxpBattleTag.scripts.OnEnter(panel.restedxpBattleTag)
-    assert(tooltip:IsOwned(panel.restedxpBattleTag) and tooltip.anchor == "ANCHOR_CURSOR",
-        "RestedXP input help also follows global positioning")
+    panel.restedxpTransparencyHelp.scripts.OnEnter(panel.restedxpTransparencyHelp)
+    assert(tooltip:IsOwned(panel.restedxpTransparencyHelp) and tooltip.anchor == "ANCHOR_CURSOR",
+        "RestedXP appearance help also follows global positioning")
     addon.mainPanel:Hide()
     assert(not tooltip:IsShown(), "closing Settings dismisses its globally positioned tooltip")
     addon:OpenOptions("sharing")

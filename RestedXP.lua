@@ -2,47 +2,24 @@ local _, addon = ...
 
 -- Local import helper. RestedXP owns validation and installation;
 -- this module only retargets an export and hands it to the native importer.
-local function SourcePreference(value)
-    if type(value) ~= "string" or issecretvalue and issecretvalue(value) then return nil end
-    if #value <= 128 then return value end
-end
-
-local function SourceBattleTag(value)
-    if type(value) ~= "string" or issecretvalue and issecretvalue(value) then return nil end
-    value = value:match("^%s*(.-)%s*$")
-    if #value <= 128 and value:match("^[^%s#]+#%d+$") then return value end
-end
-
-function addon:SetRestedXPSourceBattleTag(value)
-    if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
-    if type(self.db) ~= "table" then return false, "Saved preferences are not loaded yet." end
-    value = SourcePreference(value)
-    if not value then return false, "Enter a source BattleTag no longer than 128 bytes." end
-    -- Remember edits independently of import validation, including partial input.
-    self.db.restedxp = value ~= "" and { sourceBattleTag = value } or nil
-    return true
-end
-
-function addon:CleanupRestedXPData(keepSourceBattleTag)
+function addon:CleanupRestedXPData()
     if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
     if type(self.db) ~= "table" then return false, "Saved preferences are not loaded yet." end
     -- All former guide packs, subscriptions and installation markers lived
-    -- under this namespace. Automatic cleanup retains only the helper's source
-    -- preference; explicit cleanup clears it too. Guide strings are never saved.
-    local source = keepSourceBattleTag and type(self.db.restedxp) == "table"
-        and SourcePreference(self.db.restedxp.sourceBattleTag)
-    self.db.restedxp = source and source ~= "" and { sourceBattleTag = source } or nil
+    -- under this namespace, including the obsolete source-tag preference.
+    -- Guide strings are never saved.
+    self.db.restedxp = nil
     return true, "Old RestedXP data cleared from LockInTools. Use /reload to save the cleaned settings."
 end
 
 function addon:InitializeRestedXP()
-    self:CleanupRestedXPData(true)
+    self:CleanupRestedXPData()
     if self.restedxpState then return end
     self.restedxpState = {}
     self:RegisterGameEvents({ "ADDON_LOADED", "PLAYER_LOGOUT" }, function(_, event, name)
         local state = self.restedxpState
         if event == "PLAYER_LOGOUT" then
-            self:CleanupRestedXPData(true)
+            self:CleanupRestedXPData()
             self:StopRestedXPImportTracking()
             if state.timer then state.timer:Cancel() end
             state.job, state.timer, state.importing = nil, nil, nil
@@ -61,14 +38,12 @@ function addon:GetRestedXPState()
     result.error = state and state.error
     result.phase = state and state.phase
     result.current, result.total = state and state.current, state and state.total
-    result.sourceBattleTag = type(self.db) == "table" and type(self.db.restedxp) == "table"
-        and SourcePreference(self.db.restedxp.sourceBattleTag) or ""
     result.canImport = self.ready == true and result.compatible == true and battleTag ~= nil
         and not result.busy and not result.readOnly
     return result
 end
 
-function addon:ImportRestedXPString(raw, sourceBattleTag)
+function addon:ImportRestedXPString(raw)
     local state = self.restedxpState
     if not self.ready or not state then return false, "Still loading. Please try again after login." end
     if self.savedDataReadOnly then return false, "Saved preferences are read-only." end
@@ -79,16 +54,12 @@ function addon:ImportRestedXPString(raw, sourceBattleTag)
         or #raw == 0 or #raw > self.RestedXPCodec.MAX_DATA then
         return false, "Paste a RestedXP export no larger than 2 MiB."
     end
-    sourceBattleTag = SourceBattleTag(sourceBattleTag)
-    if not sourceBattleTag then
-        return false, "Enter the export's original BattleTag in Name#1234 form."
-    end
     local destination, problem = self:GetRestedXPBattleTag()
     if not destination then return false, problem end
     if not C_Timer or type(C_Timer.NewTimer) ~= "function" then return false, "The import helper is unavailable." end
 
     local job = coroutine.create(function()
-        return self.RestedXPCodec.Reencrypt(raw, sourceBattleTag, destination)
+        return self.RestedXPCodec.Reencrypt(raw, "Player#1234", destination)
     end)
     state.job, state.status, state.error = job, "Preparing import...", nil
     state.phase, state.current, state.total = "preparing", nil, nil
@@ -104,7 +75,7 @@ function addon:ImportRestedXPString(raw, sourceBattleTag)
         local started = type(debugprofilestop) == "function" and debugprofilestop()
         for _ = 1, 8 do
             local success, converted, failure = coroutine.resume(job)
-            if not success then Finish("Could not prepare the export. Check the import string and source BattleTag.", true); return end
+            if not success then Finish("Could not prepare the export. Check the import string.", true); return end
             if coroutine.status(job) == "dead" then
                 if not converted then Finish(failure or "Could not prepare the export.", true); return end
                 if self:GetRestedXPBattleTag() ~= destination then

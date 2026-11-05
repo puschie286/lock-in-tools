@@ -5,13 +5,10 @@ local function Fixture(state, skin)
     local addon, environment, _, _, world = support.loadAddon({ schemaVersion = 3,
         showWelcome = false, chat = { autoJoin = false } }, false)
     world:initialize()
-    local calls, getState = {}, addon.GetRestedXPState
-    function addon:GetRestedXPState()
-        state.sourceBattleTag = getState(self).sourceBattleTag
-        return state
-    end
-    function addon:ImportRestedXPString(raw, source)
-        calls[#calls + 1] = { raw = raw, source = source }
+    local calls = {}
+    function addon:GetRestedXPState() return state end
+    function addon:ImportRestedXPString(raw)
+        calls[#calls + 1] = { raw = raw }
         return not calls.importError, calls.importError
     end
     if skin then
@@ -63,54 +60,47 @@ local function AssertPrivate(panel, snippet)
     Inspect(panel.parent, 1)
 end
 
--- One form lifecycle covers availability, remembered input, retry and busy state.
+-- One form lifecycle covers availability, export drafts, retry and busy state.
 do
     local state = { installed = false, loaded = false, canImport = false }
     local addon, panel, calls, environment, world = Fixture(state)
     local dataSends, statusSends = #world.dataSends, #world.statusSends
     assert(not addon:HasDataGroup() and not panel.restedxpImport:IsEnabled())
-    panel.restedxpBattleTag:UserInput("  UnfinishedOwner#  ")
-    assert(addon.db.restedxp.sourceBattleTag == "  UnfinishedOwner#  " and #calls == 0)
+    assert(panel.restedxpBattleTag == nil, "the fixed source requires no BattleTag input")
     panel.tabs.sharing:Click()
     panel.tabs.restedxp:Click()
-    assert(panel.restedxpBattleTag:GetText() == "  UnfinishedOwner#  " and Export(panel) == "")
-    panel.restedxpBattleTag:UserInput("")
-    assert(addon.db.restedxp == nil, "deleting the source clears its preference")
+    assert(Export(panel) == "" and #calls == 0)
     state.installed, state.loaded, state.compatible, state.canImport = true, true, true, true
     addon:Notify("RESTEDXP_CHANGED")
     local raw = "Private+CaseSensitive/Export=="
     Paste(panel, raw)
-    assert(not panel.restedxpImport:IsEnabled(), "an export still requires a source")
-    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
+    assert(panel.restedxpImport:IsEnabled(), "a loaded export needs no source input")
     calls.importError = "conversion failed"
     panel.restedxpImport:Click()
-    assert(#calls == 1 and calls[1].raw == raw and calls[1].source == "SourceOwner#5678"
+    assert(#calls == 1 and calls[1].raw == raw
         and Export(panel) == raw and panel.restedxpImport:IsEnabled(), "rejection retains the exact draft")
     calls.importError = nil
     panel.restedxpImport:Click()
     state.busy, state.canImport = true, false
     addon:Notify("RESTEDXP_CHANGED")
-    assert(not panel.restedxpImport:IsEnabled() and not panel.restedxpBattleTag:IsEnabled()
+    assert(not panel.restedxpImport:IsEnabled() and not panel.restedxpExport:IsEnabled()
         and not panel.restedxpPaste:IsEnabled() and not panel.restedxpClearExport:IsEnabled())
     panel.restedxpImport:Click()
     assert(#calls == 2 and Export(panel) == raw, "busy imports cannot be submitted again")
     state.busy, state.canImport, state.error = false, true, true
     addon:Notify("RESTEDXP_CHANGED")
     assert(panel.restedxpImport:IsEnabled() and Export(panel) == raw, "failure permits retry")
-    assert(addon:SetRestedXPSourceBattleTag("ChangedOwner#5555"))
-    addon:Notify("RESTEDXP_CHANGED")
-    assert(panel.restedxpBattleTag:GetText() == "SourceOwner#5678" and Export(panel) == raw,
-        "backend preference changes cannot replace a visible draft")
     panel.parent.CloseButton:Click()
     assert(Export(panel) == "" and panel.restedxpExport:GetText() == "")
     addon:OpenOptions("restedxp")
-    assert(panel.restedxpBattleTag:GetText() == "ChangedOwner#5555" and Export(panel) == "")
+    assert(Export(panel) == "" and not panel.restedxpImport:IsEnabled())
     local function ContainsDraft(value)
         if type(value) ~= "table" then return value == raw end
         for _, child in pairs(value) do if ContainsDraft(child) then return true end end
         return false
     end
-    assert(not ContainsDraft(environment.LockInToolsDB), "only the source preference is persisted")
+    assert(not ContainsDraft(environment.LockInToolsDB) and addon.db.restedxp == nil,
+        "neither guide contents nor a source preference are persisted")
     assert(#world.dataSends == dataSends and #world.statusSends == statusSends,
         "local imports initiate no group communication")
 end
@@ -131,7 +121,6 @@ do
         "header visibility remains independent of the combined skin preference")
     checkbox:Click()
     assert(skin.enabled and checkbox:GetChecked() and calls.skinChanges[1] == true)
-    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
     Paste(panel, "Retained+draft==")
     state.installed, state.loaded, state.busy = true, true, true
     skin.available, skin.pending, skin.status = true, true, "The appearance will update after combat."
@@ -144,7 +133,7 @@ do
     chrome:Click()
     assert(not skin.enabled and not checkbox:GetChecked() and calls.skinChanges[2] == false
         and not skin.chromeHidden and not chrome:GetChecked() and calls.chromeChanges[2] == false
-        and Export(panel) == "Retained+draft==" and panel.restedxpBattleTag:GetText() == "SourceOwner#5678",
+        and Export(panel) == "Retained+draft==",
         "all appearance preferences remain independent during imports and preserve the draft")
     calls.skinError = "The saved preference could not be changed."
     for _, control in ipairs({ checkbox, chrome }) do
@@ -182,13 +171,12 @@ do
     assert(slider:GetValue() == 100 and skin.backgroundTransparency == 100)
     slider:SetValue(-4)
     assert(slider:GetValue() == 0 and skin.backgroundTransparency == 0, "slider input stays within zero to one hundred")
-    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
     Paste(panel, "Retained+opacity+draft==")
     state.busy = true
     addon:Notify("RESTEDXP_CHANGED")
     slider:SetValue(40)
     assert(slider:IsEnabled() and skin.backgroundTransparency == 40
-        and Export(panel) == "Retained+opacity+draft==" and panel.restedxpBattleTag:GetText() == "SourceOwner#5678",
+        and Export(panel) == "Retained+opacity+draft==",
         "busy native imports cannot disable transparency changes or lose their draft")
     calls.skinError = "The saved preference could not be changed."
     slider:SetValue(60)
@@ -217,7 +205,7 @@ do
     loadOptions(addon, environment)
     addon:OpenOptions("restedxp")
     local panel = addon.optionsPanel
-    assert(addon.savedDataReadOnly and not panel.restedxpBattleTag:IsEnabled()
+    assert(addon.savedDataReadOnly and not panel.restedxpExport:IsEnabled()
         and not panel.restedxpImport:IsEnabled() and not panel.restedxpPaste:IsEnabled()
         and not panel.restedxpClearExport:IsEnabled())
     for _, control in ipairs({ panel.restedxpSkinEnabled, panel.restedxpChromeHidden }) do
@@ -239,7 +227,6 @@ end
 do
     local _, panel, calls = Fixture({ installed = true, loaded = true, compatible = true, canImport = true })
     local edit = panel.restedxpExport
-    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
     panel.restedxpPaste:Click()
     assert(edit.focused and edit.alpha == 0 and edit:GetMaxBytes() == 1)
     edit:Paste("First|chunk\r\n")
@@ -266,8 +253,7 @@ do
     panel.restedxpImport:Click()
     assert(#calls == 1 and calls[1].raw == raw, "focus loss submits exact literal bytes")
     panel.restedxpClearExport:Click()
-    assert(Export(panel) == "" and not panel.restedxpImport:IsEnabled()
-        and panel.restedxpBattleTag:GetText() == "SourceOwner#5678")
+    assert(Export(panel) == "" and not panel.restedxpImport:IsEnabled())
     edit:Paste("Abandoned|chunk\n")
     panel.restedxpClearExport:Click()
     edit:AdvanceFrame(1)
@@ -283,12 +269,11 @@ do
     local maximum = 2 * 1024 * 1024
     local _, panel, calls = Fixture({ installed = true, loaded = true, compatible = true, canImport = true })
     local edit = panel.restedxpExport
-    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
     function edit:GetNumLines() error("bulk paste must not measure the native EditBox") end
     local widgetCalls = 0
     for _, entry in ipairs({ { edit, "GetText" }, { edit, "SetText" }, { edit, "SetScript" },
         { edit, "SetMaxBytes" }, { panel.restedxpExportStatus, "SetText" },
-        { panel.restedxpBattleTag, "GetText" }, { panel.restedxpImport, "SetEnabled" } }) do
+        { panel.restedxpImport, "SetEnabled" } }) do
         local widget, method = entry[1], entry[2]
         local original = widget[method]
         widget[method] = function(self, ...)
@@ -329,7 +314,6 @@ end
 for _, closeWindow in ipairs({ false, true }) do
     local addon, panel, calls = Fixture({ installed = true, loaded = true, compatible = true, canImport = true })
     local edit = panel.restedxpExport
-    panel.restedxpBattleTag:UserInput("SourceOwner#5678")
     edit:Paste("Abandoned|chunk\n")
     edit:AdvanceFrame(0.06)
     if closeWindow then panel.parent.CloseButton:Click() else panel.tabs.sharing:Click() end

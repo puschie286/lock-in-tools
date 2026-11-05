@@ -227,20 +227,10 @@ local function CreateRestedXPPage(panel)
     panel.restedxpNotice:SetPoint("TOPLEFT", 16, -46)
     panel.restedxpNotice:SetSize(648, 28)
 
-    local sourceLabel = UI:Label(page, "Export's source BattleTag", 12, "muted")
-    sourceLabel:SetPoint("TOPLEFT", 16, -80)
-    panel.restedxpBattleTag = UI:EditBox(page)
-    panel.restedxpBattleTag:SetPoint("TOPLEFT", 16, -100)
-    panel.restedxpBattleTag:SetSize(648, 30)
-    panel.restedxpBattleTag:SetMaxLetters(128)
-    panel.restedxpBattleTag:SetMaxBytes(128)
-    OptionTooltip(panel.restedxpBattleTag, "Export's source BattleTag",
-        "BattleTag this export was created for.")
-
-    local exportLabel = UI:Label(page, "Guide export", 12, "muted")
-    exportLabel:SetPoint("TOPLEFT", 16, -140)
+    local exportLabel = UI:Label(page, "Guide export (Player#1234)", 12, "muted")
+    exportLabel:SetPoint("TOPLEFT", 16, -80)
     panel.restedxpPaste = UI:Button(page, "Paste export")
-    panel.restedxpPaste:SetPoint("TOPLEFT", 16, -160)
+    panel.restedxpPaste:SetPoint("TOPLEFT", 16, -100)
     panel.restedxpPaste:SetSize(148, 32)
     -- A focused EditBox is still required for native Ctrl+V. Keep it shown but
     -- transparent, with no visible text or surface; only the byte count is shown.
@@ -254,24 +244,24 @@ local function CreateRestedXPPage(panel)
     panel.restedxpExport:SetAlpha(0)
     panel.restedxpExport:EnableMouse(false)
     panel.restedxpExportStatus = UI:Label(page, "No export loaded (0 bytes).", 12, "muted")
-    panel.restedxpExportStatus:SetPoint("TOPLEFT", 180, -160)
+    panel.restedxpExportStatus:SetPoint("TOPLEFT", 180, -100)
     panel.restedxpExportStatus:SetSize(380, 32)
     panel.restedxpClearExport = UI:Button(page, "Clear")
-    panel.restedxpClearExport:SetPoint("TOPLEFT", 572, -160)
+    panel.restedxpClearExport:SetPoint("TOPLEFT", 572, -100)
     panel.restedxpClearExport:SetSize(92, 32)
     local pasteHint = UI:Label(page, "Click Paste export, then press Ctrl+V. Pasting again replaces the loaded export.", 12, "muted")
-    pasteHint:SetPoint("TOPLEFT", 16, -200)
+    pasteHint:SetPoint("TOPLEFT", 16, -140)
     pasteHint:SetSize(648, 28)
 
     panel.restedxpImport = UI:Button(page, "Import", "primary")
-    panel.restedxpImport:SetPoint("TOPLEFT", 16, -236)
+    panel.restedxpImport:SetPoint("TOPLEFT", 16, -176)
     panel.restedxpImport:SetSize(128, 32)
 
     for index, preference in ipairs(RESTEDXP_APPEARANCE_PREFERENCES) do
         local getter, setter = preference.getter, preference.setter
         local checkbox = UI:Checkbox(page)
         panel[preference.field] = checkbox
-        checkbox:SetPoint("TOPLEFT", 12, -282 - (index - 1) * 32)
+        checkbox:SetPoint("TOPLEFT", 12, -222 - (index - 1) * 32)
         checkbox:SetSize(28, 28)
         BindPreference(panel, checkbox,
             function() return addon[getter](addon) == true end,
@@ -282,14 +272,14 @@ local function CreateRestedXPPage(panel)
     local help, slider = CreateTransparencyControl(panel, page, "restedxp", "Transparency",
         function() return addon:GetRestedXPBackgroundTransparency() end,
         function(value) return addon:SetRestedXPBackgroundTransparency(value) end)
-    help:SetPoint("TOPLEFT", 356, -286)
-    slider:SetPoint("TOPLEFT", 360, -314)
+    help:SetPoint("TOPLEFT", 356, -226)
+    slider:SetPoint("TOPLEFT", 360, -254)
     local transparencyHelp = "Fade LockInTools theme backgrounds and borders without fading text."
     OptionTooltip(panel.restedxpTransparencyHelp, "Transparency", transparencyHelp)
     OptionTooltip(slider, "Transparency", transparencyHelp)
 
     panel.restedxpSkinStatus = UI:Label(page, "", 12, "muted")
-    panel.restedxpSkinStatus:SetPoint("TOPLEFT", 16, -380)
+    panel.restedxpSkinStatus:SetPoint("TOPLEFT", 16, -320)
     panel.restedxpSkinStatus:SetSize(648, 28)
 
     local raw, buffer, bufferSize, quietTime, oversized = "", nil, 0, 0, false
@@ -297,10 +287,9 @@ local function CreateRestedXPPage(panel)
     local maxData, concat = addon.RestedXPCodec.MAX_DATA, table.concat
     local StartPaste
     local function RefreshDraft()
-        local hasSource = panel.restedxpBattleTag:GetText():find("%S") ~= nil
         local hasExport = raw:find("%S") ~= nil
         panel.restedxpImport:SetEnabled(page.canImport and not page.readOnly and not page.busy
-            and buffer == nil and hasSource and hasExport)
+            and buffer == nil and hasExport)
         panel.restedxpPaste:SetEnabled(not page.readOnly and not page.busy)
         panel.restedxpClearExport:SetEnabled(not page.readOnly and not page.busy
             and (buffer ~= nil or raw ~= "" or oversized))
@@ -324,16 +313,7 @@ local function CreateRestedXPPage(panel)
         ShowExportStatus()
         RefreshDraft()
     end
-    for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
-        edit:SetScript("OnEscapePressed", function(widget) widget:ClearFocus() end)
-    end
-    panel.restedxpBattleTag:SetScript("OnTextChanged", function(edit, userInput)
-        -- Hiding or reopening the page also sets this text; only user edits save.
-        if userInput and not page.readOnly and not page.busy then
-            addon:SetRestedXPSourceBattleTag(edit:GetText())
-        end
-        RefreshDraft()
-    end)
+    panel.restedxpExport:SetScript("OnEscapePressed", function(edit) edit:ClearFocus() end)
     -- Match RestedXP's bulk-paste handling: OnChar receives input beyond the
     -- native byte limit. Keep the export in Lua without rendering its contents;
     -- laying out a multi-megabyte EditBox can crash the client before Import.
@@ -394,27 +374,15 @@ local function CreateRestedXPPage(panel)
         RefreshDraft()
     end
     panel.restedxpClearExport:SetScript("OnClick", ClearExport)
-    local function ClearDraft()
-        ClearExport()
-        for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
-            edit:ClearFocus()
-            edit:SetText("")
-        end
-        RefreshDraft()
-    end
     page.RefreshDraft = RefreshDraft
     page.GetExport = function() return raw end
     panel.restedxpImport:SetScript("OnClick", function()
         if buffer then return end
-        local success, message = addon:ImportRestedXPString(raw, panel.restedxpBattleTag:GetText())
+        local success, message = addon:ImportRestedXPString(raw)
         page.actionError = not success and (message or "Unable to import this RestedXP string.") or nil
         addon:RefreshOptions()
     end)
-    page:SetScript("OnShow", function()
-        local state = addon:GetRestedXPState()
-        panel.restedxpBattleTag:SetText(type(state.sourceBattleTag) == "string" and state.sourceBattleTag or "")
-    end)
-    page:SetScript("OnHide", function() page.actionError = nil; ClearDraft() end)
+    page:SetScript("OnHide", function() page.actionError = nil; ClearExport() end)
     RefreshDraft()
 end
 
@@ -433,9 +401,7 @@ local function RefreshRestedXP(panel)
     end
     page.RefreshTransparency()
     panel.restedxpSkinStatus:SetText(GuideText(skin.problem or skin.status))
-    for _, edit in ipairs({ panel.restedxpBattleTag, panel.restedxpExport }) do
-        edit:SetEnabled(not page.readOnly and not page.busy)
-    end
+    panel.restedxpExport:SetEnabled(not page.readOnly and not page.busy)
     page.RefreshDraft()
     SetFeedback(panel, page.actionError or state.status, page.actionError ~= nil or state.error == true)
 end

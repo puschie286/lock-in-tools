@@ -25,6 +25,7 @@ try {
         Get-ChildItem -LiteralPath $repositoryRoot -Filter '*.lua' -File
         Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'Libs') -Filter '*.lua' -File -Recurse
         Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File -Recurse
+        Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.lua' -File
     )
     foreach ($file in $sourceFiles) {
         & $compilerExecutable -p $file.FullName
@@ -43,8 +44,11 @@ try {
     }
     Write-Host "PASS: XML syntax ($($xmlFiles.Count) files)"
 
-    Write-Host 'Running tests/link-wow.ps1...'
-    & (Join-Path $repositoryRoot 'tests\link-wow.ps1')
+    $scriptSuites = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.ps1' -File | Sort-Object Name
+    foreach ($suite in $scriptSuites) {
+        Write-Host "Running tests/$($suite.Name)..."
+        & $suite.FullName
+    }
 
     $suites = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.lua' -File | Sort-Object Name
     foreach ($suite in $suites) {

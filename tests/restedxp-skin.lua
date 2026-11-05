@@ -787,8 +787,8 @@ do
     local preference = addon.db.restedxpSkin
     addon.db.restedxp = { sourceBattleTag = "Source#1234", groups = { stale = "obsolete payload" } }
     Load("RestedXP.lua")
-    assert(addon:CleanupRestedXPData(true) and addon.db.restedxpSkin == preference
-        and addon.db.restedxp.sourceBattleTag == "Source#1234" and addon.db.restedxp.groups == nil
+    assert(addon:CleanupRestedXPData() and addon.db.restedxpSkin == preference
+        and addon.db.restedxp == nil
         and addon:GetRestedXPBackgroundTransparency() == 50 and addon:IsRestedXPSkinEnabled()
         and addon:IsRestedXPModernScrollbarEnabled(),
         "importer cleanup preserves independent appearance preferences")
