@@ -71,6 +71,7 @@ local function SavePeer(self, sender)
             name = SavedName(peer.name, sender), map = peer.map, x = peer.x, y = peer.y,
             stamp = peer.stamp, class = peer.class,
             positionStamp = peer.positionStamp,
+            seenAt = peer.seenAt,
         }
     else
         self.db.position.peers[sender] = nil
@@ -118,6 +119,7 @@ function addon:InitializePositions()
             self.positionState.peers[sender] = {
                 name = name, map = peer.map, x = peer.x, y = peer.y, stamp = peer.stamp,
                 online = false, class = ClassToken(peer.class),
+                seenAt = Number(peer.seenAt, 0, MAX_POSITION_STAMP, true) and peer.seenAt or peer.stamp,
                 -- Old activity stamps may follow an unavailable-position update.
                 positionStamp = Number(peer.positionStamp, 0, peer.stamp, true) and peer.positionStamp or nil,
                 positionAvailable = false,
@@ -126,7 +128,9 @@ function addon:InitializePositions()
             if ClassToken(peer.class) then
                 self.positionState.classes[sender] = peer.class
             end
-            if not self.savedDataReadOnly then peer.name = name end
+            if not self.savedDataReadOnly then
+                peer.name, peer.seenAt = name, self.positionState.peers[sender].seenAt
+            end
         else
             settings.peers[sender] = nil
         end
@@ -350,11 +354,13 @@ function addon:ReceivePosition(sender, payload)
             stamp = stamp, lastReceived = GetTime(), online = true,
             class = state.classes[canonical],
             positionStamp = stamp, positionAvailable = true,
+            seenAt = GetServerTime(),
         }
     elseif self.db.position.keepLastKnown then
         local peer = state.peers[canonical]
         if peer then
             peer.stamp, peer.lastReceived, peer.online = stamp, GetTime(), true
+            peer.seenAt = GetServerTime()
             peer.positionAvailable = false
         end
     else

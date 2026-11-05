@@ -803,5 +803,177 @@ do
     assert(current:GetBurnedStatusCooldown() == 0 and current:SetBurnedStatus(60))
 end
 
+-- Player-history cleanup defaults on for existing profiles, while explicit
+-- opt-outs and unrelated data settings survive normalization and reloads.
+for _, saved in ipairs({ {}, { cleanupOldPlayers = false }, { cleanupOldPlayers = "false" } }) do
+    local profile = settings("", false)
+    profile.data = { cleanupOldPlayers = saved.cleanupOldPlayers, future = "preserved",
+        channels = { party = false, guild = false, global = false } }
+    local current, _, _, event = loadAddon(profile, false)
+    local accepted, problem = current:SetPlayerDataCleanupEnabled(false)
+    assert(not accepted and type(problem) == "string")
+    assert(not current:ClearPlayerData(), "History cannot be cleared before saved data is loaded")
+    event("ADDON_LOADED", "LockInTools")
+    local expected = saved.cleanupOldPlayers ~= false
+    assert(current:GetPlayerDataCleanupEnabled() == expected
+        and profile.data.cleanupOldPlayers == expected and profile.data.future == "preserved")
+    assert(not current:SetPlayerDataCleanupEnabled("true")
+        and current:GetPlayerDataCleanupEnabled() == expected)
+    assert(current:SetPlayerDataCleanupEnabled(false))
+    local restored, _, _, restoredEvent = loadAddon(profile, false)
+    restoredEvent("ADDON_LOADED", "LockInTools")
+    assert(not restored:GetPlayerDataCleanupEnabled() and profile.data.future == "preserved",
+        "The account-wide opt-out must remain off after a reload")
+end
+
+-- Cleanup removes an identity from every history cache only after its newest
+-- roster or position activity reaches ten days, including the exact boundary.
+do
+    local seed, _, _, seedEvent = loadAddon(settings(nil, false), false)
+    seedEvent("ADDON_LOADED", "LockInTools")
+    local fingerprint, cutoff = seed:GetGroupFingerprint(), 2000000000 - 10 * 86400
+    local profile = settings(nil, false)
+    profile.data = { channels = { party = false, guild = false, global = false } }
+    profile.roster = { groupFingerprint = fingerprint, peers = {} }
+    profile.position = { sharing = false, keepLastKnown = true, groupFingerprint = fingerprint, peers = {} }
+    local function roster(name, stamp)
+        profile.roster.peers[name:lower() .. "-testrealm"] = {
+            name = name, level = 20, seenAt = stamp, xp = 50, xpMax = 100,
+            xpState = "known", xpUpdatedAt = stamp,
+        }
+    end
+    local function position(name, stamp, seenAt)
+        profile.position.peers[name:lower() .. "-testrealm"] = {
+            name = name, stamp = stamp, seenAt = seenAt, positionStamp = stamp - 5,
+            map = 37, x = 0.2, y = 0.3, class = "MAGE",
+        }
+    end
+    roster("Boundary", cutoff); position("Boundary", cutoff)
+    roster("Older", cutoff - 1)
+    position("PositionOnly", cutoff - 1)
+    roster("NewPosition", cutoff - 10); position("NewPosition", cutoff + 1)
+    roster("NewRoster", cutoff + 1); position("NewRoster", cutoff - 10)
+    position("LocalReceipt", cutoff - 20, cutoff + 1)
+    roster("Future", 2000000001)
+    local current, _, _, event, clock = loadAddon(profile, false)
+    event("ADDON_LOADED", "LockInTools")
+    for _, id in ipairs({ "boundary-testrealm", "older-testrealm", "positiononly-testrealm" }) do
+        assert(not profile.roster.peers[id] and not profile.position.peers[id]
+            and not current.rosterState.peers[id] and not current.rosterState.progress[id]
+            and not current.positionState.peers[id] and not current.positionState.latest[id]
+            and not current.positionState.classes[id], "Expired identities must leave every restored cache")
+    end
+    for _, id in ipairs({ "newposition-testrealm", "newroster-testrealm" }) do
+        assert(profile.roster.peers[id] and profile.position.peers[id]
+            and current.rosterState.progress[id] and current.positionState.classes[id],
+            "Activity from either source keeps that player's saved history")
+    end
+    assert(profile.roster.peers["future-testrealm"], "Clock rollback must not expire future activity")
+    assert(profile.position.peers["localreceipt-testrealm"]
+        and current.positionState.peers["localreceipt-testrealm"].seenAt == cutoff + 1,
+        "A saved local receipt time takes precedence over the sender's older position clock")
+    assert(current:SetPlayerDataCleanupEnabled(false))
+    event("PLAYER_LOGIN")
+    clock:advance(3600)
+    assert(profile.roster.peers["newroster-testrealm"] and profile.position.peers["newposition-testrealm"],
+        "Disabled cleanup must leave newly expired records in place")
+    assert(current:SetPlayerDataCleanupEnabled(true))
+    assert(not profile.roster.peers["newroster-testrealm"] and not profile.position.peers["newposition-testrealm"],
+        "Enabling cleanup immediately removes records that expired while it was off")
+    profile.roster.peers["hourly-testrealm"] = { name = "Hourly-TestRealm", level = 20,
+        seenAt = 2000003600 - 10 * 86400 + 1 }
+    current.rosterState.peers["hourly-testrealm"] = profile.roster.peers["hourly-testrealm"]
+    clock:advance(3599)
+    assert(profile.roster.peers["hourly-testrealm"], "Scheduled cleanup waits for its hourly interval")
+    clock:advance(1)
+    assert(not profile.roster.peers["hourly-testrealm"] and not current.rosterState.peers["hourly-testrealm"],
+        "Hourly cleanup removes expired history even with all data routes and positions disabled")
+    assert(current:SetPlayerDataCleanupEnabled(false))
+    profile.roster.peers["disabled-testrealm"] = { name = "Disabled-TestRealm", seenAt = cutoff }
+    current.rosterState.peers["disabled-testrealm"] = profile.roster.peers["disabled-testrealm"]
+    clock:advance(3600)
+    assert(profile.roster.peers["disabled-testrealm"], "Disabling cleanup cancels the active hourly job")
+end
+
+-- Clearing player data removes persisted and live peer reports without changing
+-- group membership, account preferences or the personal burned cooldown.
+do
+    local profile = settings(nil, false)
+    profile.data = { cleanupOldPlayers = false, channels = { party = false, guild = true, global = false } }
+    profile.burned = { status = 40, changeAvailableAt = 2000000300, future = "preserved" }
+    local current, environment, _, event, clock = loadAddon(profile, false)
+    clock.guild = true
+    clock:initialize()
+    assert(current:ReceivePlayerStatus("Friend-TestRealm", { level = "24", xp = "25", xpMax = "100",
+        xpState = "known", sharing = true }, 2000000000, 1))
+    assert(current:ReceivePosition("Friend-TestRealm", "2|P|2000000000|37|20000|30000"))
+    assert(current:ReceivePosition("OldClock-TestRealm", "2|P|1900000000|37|20000|30000"))
+    assert(current.positionState.peers["oldclock-testrealm"].seenAt == 2000000000
+        and profile.position.peers["oldclock-testrealm"].seenAt == 2000000000,
+        "A live position records local activity independently of a peer's older clock")
+    assert(current:SetPlayerDataCleanupEnabled(true))
+    current:PrunePlayerData()
+    assert(profile.position.peers["oldclock-testrealm"], "Fresh local contact must not be pruned for an old wire stamp")
+    assert(current:SetPlayerDataCleanupEnabled(false))
+    assert(current:ReceiveBurnedStatus("Friend-TestRealm", { burned = "80" }, 2000000000, 1))
+    current.positionState.classes["friend-testrealm"] = "MAGE"
+    current.dataState.status.received["friend-testrealm"] = { stamp = 2000000000 }
+    local accepted, requestID = current:RequestData("status", "pending")
+    assert(accepted and current.dataState.pendingRequests[requestID])
+    current.dataState.repliedRequests["friend-testrealm|status|old-request"] = 10
+    local expiry, cooldown = current.burnedState.timer, current:GetBurnedStatusCooldown()
+    local notices = { roster = 0, position = 0, burned = 0 }
+    current:RegisterNotification("ROSTER_CHANGED", function() notices.roster = notices.roster + 1 end)
+    current:RegisterNotification("POSITIONS_CHANGED", function() notices.position = notices.position + 1 end)
+    current:RegisterNotification("BURNED_CHANGED", function() notices.burned = notices.burned + 1 end)
+    assert(current:ClearPlayerData())
+    assert(next(profile.roster.peers) == nil and next(profile.position.peers) == nil
+        and next(current.rosterState.peers) == nil and next(current.rosterState.progress) == nil
+        and next(current.positionState.peers) == nil and next(current.positionState.latest) == nil
+        and next(current.positionState.classes) == nil and next(current.burnedState.peers) == nil
+        and next(current.dataState.status.received) == nil
+        and next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil,
+        "Clearing history must remove saved records, visible peers and protocol caches together")
+    assert(expiry.cancelled and not current.burnedState.timer
+        and notices.roster > 0 and notices.position > 0 and notices.burned > 0)
+    assert(environment.LockInToolsDB == profile and profile.group.secret == SECRET
+        and profile.chat.autoJoin == false and not current:GetPlayerDataCleanupEnabled()
+        and profile.position.sharing and profile.position.keepLastKnown
+        and profile.data.channels.guild and not profile.data.channels.global
+        and current:IsDataConnected() and current:GetBurnedStatus() == 40
+        and current:GetBurnedStatusCooldown() == cooldown and profile.burned.changeAvailableAt == 2000000300
+        and profile.burned.future == "preserved", "Clearing peer data preserves settings and personal status")
+    -- A fresh peer's normal startup request must be accepted after clearing.
+    local other, otherEnvironment, _, _, otherClock = loadAddon(settings(nil, false), false)
+    otherEnvironment.UnitFullName = function() return "Friend", "Test Realm" end
+    otherClock.guild = true
+    otherClock:initialize()
+    local packet = assert(otherClock.statusSends[1])
+    event("CHAT_MSG_ADDON", packet.prefix, packet.message, "GUILD", "Friend-TestRealm")
+    assert(profile.roster.peers["friend-testrealm"] and profile.position.peers["friend-testrealm"]
+        and current.dataState.status.received["friend-testrealm"],
+        "Fresh shared status repopulates history after an explicit clear")
+end
+
+-- Newer saved schemas are preserved in full even when cleanup would otherwise
+-- remove old player records or the user explicitly requests a clear.
+do
+    local helpers = dofile("tests/support/helpers.lua")
+    local profile = settings(nil, false)
+    profile.schemaVersion = 4
+    profile.data = { cleanupOldPlayers = true, future = "preserved" }
+    profile.roster = { groupFingerprint = "future-group", peers = {
+        ["old-testrealm"] = { name = "Old-TestRealm", seenAt = 1 },
+    } }
+    profile.position = { peers = { ["old-testrealm"] = { name = "Old-TestRealm", stamp = 1 } } }
+    local original = helpers.copy(profile)
+    local current, _, _, _, clock = loadAddon(profile, false)
+    clock:initialize()
+    assert(not current:SetPlayerDataCleanupEnabled(false) and not current:ClearPlayerData())
+    current:PrunePlayerData()
+    clock:advance(3600)
+    assert(helpers.equal(profile, original), "Cleanup and explicit clearing cannot modify a newer schema")
+end
+
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
 print("PASS: production data startup, preferences, routing and recovery")

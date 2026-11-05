@@ -765,6 +765,51 @@ local function CreateOptionsPanel()
     OptionTooltip(ranking, panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
     OptionTooltip(ranking, slider, "Background transparency", transparencyHelp)
 
+    local playerData = UI:Section(panel, 20, 116, 680, 414, "Player data")
+    panel.pages.playerData = playerData
+    local playerDataIntroduction = UI:Label(playerData,
+        "Manage saved player history and last-known positions.", 14)
+    playerDataIntroduction:SetPoint("TOPLEFT", 16, -50)
+    playerDataIntroduction:SetWidth(648)
+
+    panel.playerDataCleanup = UI:Checkbox(playerData)
+    panel.playerDataCleanup:SetPoint("TOPLEFT", 12, -94)
+    panel.playerDataCleanup:SetSize(28, 28)
+    BindPreference(panel, panel.playerDataCleanup, function() return addon:GetPlayerDataCleanupEnabled() end,
+        addon.SetPlayerDataCleanupEnabled)
+    PreferenceLabel(playerData, panel.playerDataCleanup, "Remove player data after 10 days",
+        "Remove history and last-known positions for players not seen for 10 days. Enabled by default.\n\n"
+            .. "Enabling this cleans up now; cleanup also runs periodically. This preference saves across reloads and characters.")
+
+    panel.clearPlayerData = UI:Button(playerData, "Clear all player data", "danger")
+    panel.clearPlayerData:SetPoint("TOPLEFT", 16, -154)
+    panel.clearPlayerData:SetSize(188, 32)
+    local function ResetPlayerDataConfirmation()
+        panel.confirmClearPlayerData = false
+        panel.clearPlayerData:SetText("Clear all player data")
+    end
+    panel.clearPlayerData:SetScript("OnClick", function()
+        if addon.savedDataReadOnly then
+            SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
+            return
+        end
+        if not panel.confirmClearPlayerData then
+            panel.confirmClearPlayerData = true
+            panel.clearPlayerData:SetText("Confirm clear")
+            SetFeedback(panel, "Click Confirm clear to remove all saved player history and last-known positions.", true)
+            return
+        end
+        local success, message = addon:ClearPlayerData()
+        ResetPlayerDataConfirmation()
+        SetFeedback(panel, success and "Player data cleared. Active players can appear again as updates arrive."
+            or (message or "Unable to clear player data."), not success)
+    end)
+    OptionTooltip(playerData, panel.clearPlayerData, "Clear all player data",
+        "Remove all cached player history and last-known positions. Confirmation is required.\n\n"
+            .. "Active players can appear again through fresh updates, and your current character remains visible. "
+            .. "Your group key, preferences and personal Burned status stay saved.")
+    playerData:SetScript("OnHide", ResetPlayerDataConfirmation)
+
     CreateRestedXPPage(panel)
 
     for _, page in pairs(panel.pages) do
@@ -795,7 +840,7 @@ local function CreateOptionsPanel()
     end
     panel.SelectTab = SelectTab
     local categories = { { "group", "Group", 88 }, { "sharing", "Sharing", 104 },
-        { "ranking", "Ranking", 96 }, { "restedxp", "RestedXP", 110 } }
+        { "ranking", "Ranking", 96 }, { "playerData", "Player data", 116 }, { "restedxp", "RestedXP", 110 } }
     local tabX = 20
     for _, category in ipairs(categories) do
         local name = category[1]
@@ -859,6 +904,9 @@ function addon:RefreshOptions()
     panel.autoJoin:SetEnabled(editable)
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
+    panel.playerDataCleanup:SetChecked(self:GetPlayerDataCleanupEnabled())
+    panel.playerDataCleanup:SetEnabled(editable)
+    panel.clearPlayerData:SetEnabled(editable)
     for channel, checkbox in pairs(panel.dataChannels) do
         checkbox:SetChecked(self:GetDataChannelEnabled(channel))
         checkbox:SetEnabled(editable)

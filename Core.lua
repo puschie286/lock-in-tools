@@ -7,7 +7,7 @@ local function DefaultChatSettings()
 end
 
 local function DefaultDataSettings()
-    return { channels = { party = true, guild = true, global = true } }
+    return { channels = { party = true, guild = true, global = true }, cleanupOldPlayers = true }
 end
 
 addon.name = addonName
@@ -60,6 +60,7 @@ function addon:Initialize()
             database.chat.autoJoin = true
         end
         if type(database.data) ~= "table" then database.data = DefaultDataSettings() end
+        if type(database.data.cleanupOldPlayers) ~= "boolean" then database.data.cleanupOldPlayers = true end
         if type(database.data.channels) ~= "table" then database.data.channels = {} end
         for _, channel in ipairs({ "party", "guild", "global" }) do
             if type(database.data.channels[channel]) ~= "boolean" then database.data.channels[channel] = true end
@@ -87,6 +88,7 @@ function addon:Initialize()
     self:InitializeRanking()
     self:InitializeRestedXP()
     self:InitializeRestedXPSkin()
+    self:InitializePlayerDataCleanup()
 
     -- Also support loading after login through an addon manager.
     if IsLoggedIn() then
@@ -117,6 +119,7 @@ function addon:OnLogin()
     self:OnPositionLogin()
     self:OnRosterLogin()
     if self.OnRankingLogin then self:OnRankingLogin() end
+    self:UpdatePlayerDataCleanupTimer()
     if self.db.showWelcome and self.db.setupComplete ~= true and not self:HasGroup()
         and not self.savedDataReadOnly then
         self:OpenContent()

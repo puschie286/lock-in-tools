@@ -1,6 +1,7 @@
 local _, addon = ...
 local PREFIX, MAX_MESSAGE_BYTES = "LockInToolsData", 255
 local REQUEST_WINDOW, MAX_REQUEST_SEQUENCE = 10, 999999999
+local PLAYER_DATA_MAX_AGE, PLAYER_DATA_CLEANUP_INTERVAL = 10 * 86400, 3600
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
@@ -256,4 +257,100 @@ function addon:OnDataMessage(sender, message)
     if not registration then return false end
     local ok, accepted = pcall(registration.receive, sender, body)
     return ok and accepted ~= false
+end
+
+function addon:GetPlayerDataCleanupEnabled()
+    return not self.db or type(self.db.data) ~= "table" or self.db.data.cleanupOldPlayers ~= false
+end
+
+local function CanChangePlayerData(self)
+    if not self.initialized or not self.rosterState or not self.positionState then
+        return false, "Still loading. Please try again after login."
+    end
+    if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
+    return true
+end
+
+local function PlayerDataMaps(self)
+    return { self.db.roster.peers, self.db.position.peers, self.rosterState.peers, self.rosterState.progress,
+        self.positionState.peers, self.positionState.latest, self.positionState.classes,
+        self.burnedState.peers, self.dataState.status.received }
+end
+
+local function RefreshPlayerData(self)
+    if not next(self.burnedState.peers) and self.burnedState.timer then
+        self.burnedState.timer:Cancel()
+        self.burnedState.timer = nil
+    end
+    self:Notify("ROSTER_CHANGED")
+    self:Notify("POSITIONS_CHANGED")
+    self:Notify("BURNED_CHANGED")
+end
+
+function addon:PrunePlayerData()
+    if not CanChangePlayerData(self) or not self:GetPlayerDataCleanupEnabled() then return 0 end
+    local lastSeen, cutoff = {}, GetServerTime() - PLAYER_DATA_MAX_AGE
+    -- Expire a player's history together, using the most recent local contact.
+    -- Legacy positions have only the sender's activity stamp; coordinate age
+    -- (positionStamp) must not expire a player who still sends fresh status.
+    for _, peers in ipairs({ self.db.roster.peers, self.db.position.peers,
+        self.rosterState.peers, self.positionState.peers }) do
+        for id, peer in pairs(peers) do
+            local stamp = peer.seenAt or peer.stamp
+            if type(stamp) == "number" then lastSeen[id] = math.max(lastSeen[id] or 0, stamp) end
+        end
+    end
+    local maps, count = PlayerDataMaps(self), 0
+    for id, stamp in pairs(lastSeen) do
+        if stamp <= cutoff then
+            for _, map in ipairs(maps) do map[id] = nil end
+            count = count + 1
+        end
+    end
+    if count > 0 then RefreshPlayerData(self) end
+    return count
+end
+
+function addon:ClearPlayerData()
+    local allowed, message = CanChangePlayerData(self)
+    if not allowed then return false, message end
+    for _, map in ipairs(PlayerDataMaps(self)) do
+        for id in pairs(map) do map[id] = nil end
+    end
+    ResetRequests(self.dataState)
+    RefreshPlayerData(self)
+    return true
+end
+
+function addon:UpdatePlayerDataCleanupTimer()
+    if self.playerDataCleanupTimer then
+        self.playerDataCleanupTimer:Cancel()
+        self.playerDataCleanupTimer = nil
+    end
+    if not self.ready or self.playerDataCleanupStopped or self.savedDataReadOnly
+        or not self:GetPlayerDataCleanupEnabled() then return end
+    self.playerDataCleanupTimer = C_Timer.NewTimer(PLAYER_DATA_CLEANUP_INTERVAL, function()
+        self.playerDataCleanupTimer = nil
+        self:PrunePlayerData()
+        self:UpdatePlayerDataCleanupTimer()
+    end)
+end
+
+function addon:SetPlayerDataCleanupEnabled(enabled)
+    local allowed, message = CanChangePlayerData(self)
+    if not allowed then return false, message end
+    if type(enabled) ~= "boolean" then return false, "Choose on or off." end
+    self.db.data.cleanupOldPlayers = enabled
+    self:PrunePlayerData()
+    self:UpdatePlayerDataCleanupTimer()
+    self:Notify("DATA_CHANGED")
+    return true
+end
+
+function addon:InitializePlayerDataCleanup()
+    self:PrunePlayerData()
+    self.playerDataCleanupEvents = self:RegisterGameEvents({ "PLAYER_LOGOUT" }, function(self)
+        self.playerDataCleanupStopped = true
+        self:UpdatePlayerDataCleanupTimer()
+    end)
 end

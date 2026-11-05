@@ -217,6 +217,60 @@ do
     end
 end
 
+-- Player cleanup saves on user actions; clearing data requires a fresh confirmation.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    local writes, clears, setter = 0, 0, addon.SetPlayerDataCleanupEnabled
+    addon.SetPlayerDataCleanupEnabled = function(self, enabled)
+        writes = writes + 1
+        return setter(self, enabled)
+    end
+    addon.ClearPlayerData = function() clears = clears + 1; return true end
+    loadOptions(addon, api)
+    addon:OpenOptions("playerData")
+    local panel = addon.optionsPanel
+    assert(panel.playerDataCleanup:GetChecked() and panel.playerDataCleanup:IsEnabled()
+        and panel.clearPlayerData:IsEnabled())
+    panel.playerDataCleanup:SetChecked(false)
+    addon:RefreshOptions()
+    assert(panel.playerDataCleanup:GetChecked() and writes == 0,
+        "refreshing the cleanup control does not save")
+    panel.playerDataCleanup.labelButton:Click()
+    assert(not addon:GetPlayerDataCleanupEnabled() and not panel.playerDataCleanup:GetChecked() and writes == 1)
+    addon.mainPanel:Hide()
+    addon:OpenOptions("playerData")
+    assert(not panel.playerDataCleanup:GetChecked() and writes == 1)
+
+    panel.clearPlayerData:Click()
+    assert(clears == 0 and panel.confirmClearPlayerData)
+    addon:Notify("POSITIONS_CHANGED")
+    assert(panel.confirmClearPlayerData, "live notifications preserve an outstanding clear confirmation")
+    panel.tabs.sharing:Click()
+    panel.tabs.playerData:Click()
+    assert(not panel.confirmClearPlayerData, "changing tabs cancels clear confirmation")
+    panel.clearPlayerData:Click()
+    assert(clears == 0 and panel.confirmClearPlayerData)
+    addon.mainPanel:Hide()
+    addon:OpenOptions("playerData")
+    assert(not panel.confirmClearPlayerData, "closing Settings cancels clear confirmation")
+    panel.clearPlayerData:Click()
+    panel.clearPlayerData:Click()
+    assert(clears == 1 and not panel.confirmClearPlayerData and panel.feedback:GetText() ~= "")
+    addon.ClearPlayerData = function() clears = clears + 1; return false, "Clear rejected" end
+    panel.clearPlayerData:Click()
+    panel.clearPlayerData:Click()
+    assert(clears == 2 and not panel.confirmClearPlayerData and panel.feedback:GetText() == "Clear rejected",
+        "failed clearing resets confirmation and displays the returned error")
+
+    local reloaded, reloadedAPI, _, _, reloadedWorld = loadAddon(api.LockInToolsDB, false)
+    reloadedWorld:initialize()
+    loadOptions(reloaded, reloadedAPI)
+    reloaded:OpenOptions("playerData")
+    assert(not reloaded:GetPlayerDataCleanupEnabled() and not reloaded.optionsPanel.playerDataCleanup:GetChecked(),
+        "the cleanup opt-out survives a saved-variable reload")
+end
+
 -- Future-schema profiles allow navigation while every editing path preserves saved data.
 do
     local saved = { schemaVersion = 4, showWelcome = false, important = "keep",
@@ -231,12 +285,21 @@ do
     local panel = addon.optionsPanel
     for _, control in ipairs({ panel.secret, panel.applyGroup, panel.createGroup,
         panel.autoJoin, panel.positionSharing, panel.positionRetention, panel.rankingBurningEffect,
-        panel.rankingTransparencySlider }) do
+        panel.rankingTransparencySlider, panel.playerDataCleanup, panel.clearPlayerData }) do
         assert(not control:IsEnabled())
     end
     panel.rankingTransparencySlider:SetValue(42)
     assert(panel.rankingTransparencySlider:GetValue() == 0 and transparencyWrites == 0,
         "even a directly invoked slider callback cannot save read-only ranking transparency")
+    local cleanup = addon:GetPlayerDataCleanupEnabled()
+    panel.playerDataCleanup:SetChecked(not cleanup)
+    panel.playerDataCleanup.scripts.OnClick(panel.playerDataCleanup)
+    assert(addon:GetPlayerDataCleanupEnabled() == cleanup and panel.playerDataCleanup:GetChecked() == cleanup)
+    local clearCalls = 0
+    addon.ClearPlayerData = function() clearCalls = clearCalls + 1; return true end
+    panel.clearPlayerData.scripts.OnClick(panel.clearPlayerData)
+    assert(clearCalls == 0 and not panel.confirmClearPlayerData,
+        "a directly invoked clear callback cannot begin confirmation in read-only mode")
     for _, preference in ipairs({ { panel.autoJoin, addon.db.chat, "autoJoin" },
         { panel.positionSharing, addon.db.position, "sharing" },
         { panel.positionRetention, addon.db.position, "keepLastKnown" },
@@ -334,4 +397,4 @@ do
         "closing Settings preserves a tooltip owned by another control")
 end
 
-print("PASS: Settings group lifecycle, data channel controls, preference callbacks, read-only settings and key privacy")
+print("PASS: Settings group lifecycle, data channel and player data controls, preference callbacks, read-only settings and key privacy")
