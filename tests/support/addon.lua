@@ -176,19 +176,20 @@ local function loadAddon(savedVariables, loggedIn)
             return unpack(result)
         end,
         JoinPermanentChannel = function(name, password, frameID)
-            assert(type(password) == "string" and #password == 31, "every join uses a derived password")
+            assert(password == "", "chat joins without a password")
             assert(frameID == 1, "join into the default native chat frame")
             world.joinCalls[#world.joinCalls + 1] = name
             world.lastJoinPassword = password
             return 0, name
         end,
         JoinTemporaryChannel = function(name, password)
-            assert(name:match("^LITDATA") and type(password) == "string" and #password == 31,
-                "group data uses its own derived credentials")
+            assert(name:match("^LITDATA") and password == "", "group data joins without a password")
             world.dataJoinCalls[#world.dataJoinCalls + 1] = name
             return 0, name
         end,
         SetChannelPassword = function(name, password)
+            assert(password == "", "channel passwords may only be cleared")
+            if world.passwordThrows then error("Native password change unavailable") end
             world.passwordCalls[#world.passwordCalls + 1] = { name = name, password = password }
         end,
         UnitGUID = function(unit) assert(unit == "player"); return "Player-Test-Self" end,

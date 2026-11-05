@@ -112,13 +112,13 @@ assert(reloadWorld.contentOpened == 0, "configured groups do not reopen Content 
 assert(reloaded:GetGroupSecret() == SECRET, "retain group across reload")
 assert(reloaded:GetGroupFingerprint() == addon:GetGroupFingerprint())
 assert(reloaded:GetGroupChannelName() == addon:GetGroupChannelName())
-assert(reloaded:GetGroupChannelPassword() == addon:GetGroupChannelPassword())
+assert(reloaded:GetGroupDataChannelName() == addon:GetGroupDataChannelName())
 reloadEvent("PLAYER_LOGIN")
 reloadEvent("ADDON_LOADED", "LockInTools")
 assert(reloadWorld.minimapButtonCreations == 1 and #reloadedMessages == 0,
     "loading after login then receiving delayed startup events performs initialization only once")
 reloadWorld:advance(1)
-assert(reloadWorld.lastJoinPassword == reloaded:GetGroupChannelPassword())
+assert(reloadWorld.lastJoinPassword == "", "reload joins the existing group channel without a password")
 assert(not contains(messages, SECRET) and not contains(reloadedMessages, SECRET), "never print the group secret")
 for _, legacy in ipairs({
     { schemaVersion = 1, showWelcome = false },

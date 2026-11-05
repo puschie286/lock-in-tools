@@ -8,7 +8,7 @@ local function newAddon(saved, readOnly, withPositions, native)
     local world = {
         now = 0, epoch = 2000000000, timers = {}, sent = {}, messages = {}, frames = {},
         x = 0.25, y = 0.75, map = 37, joins = {}, leaves = {}, channels = {}, nativeSends = {}, prefixCalls = {},
-        sendResult = 0, sendCalls = 0, sendAttempts = {},
+        sendResult = 0, sendCalls = 0, sendAttempts = {}, roster = {}, passwordCalls = {}, passwordAttempts = 0,
         guild = native.guild == true, party = native.party == true, raid = native.raid == true,
     }
     world.sent = world.nativeSends
@@ -22,6 +22,18 @@ local function newAddon(saved, readOnly, withPositions, native)
         IsInGroup = function() return world.party or world.raid end,
         IsInRaid = function() return world.raid end,
         UnitFullName = function(unit) assert(unit == "player"); return native.playerName or "Self", "Test Realm" end,
+        UnitGUID = function(unit) assert(unit == "player"); return "Player-Test-Self" end,
+        GetNumDisplayChannels = function() return #world.roster end,
+        GetChannelDisplayInfo = function(displayIndex)
+            local entry = assert(world.roster[displayIndex], "Use a display-list index for the roster")
+            return entry.name, entry.header, false, entry.id, #(entry.members or {}), true, "CHANNEL_CATEGORY_CUSTOM"
+        end,
+        SetChannelPassword = function(name, password)
+            assert(password == "", "Existing data-channel passwords may only be cleared")
+            world.passwordAttempts = world.passwordAttempts + 1
+            if world.passwordThrows then error("Native password change unavailable") end
+            world.passwordCalls[#world.passwordCalls + 1] = { name = name, password = password }
+        end,
         CreateFrame = function(kind)
             assert(kind == "Frame")
             local frame = { events = {} }
@@ -61,6 +73,7 @@ local function newAddon(saved, readOnly, withPositions, native)
         return 0, nil
     end
     environment.JoinTemporaryChannel = function(name, password)
+        assert(password == "", "Data channels always join without a password")
         world.joins[#world.joins + 1] = { name = name, password = password, at = world.now }
         if world.joinThrows then error("Native join unavailable") end
         return 0, name
@@ -71,6 +84,10 @@ local function newAddon(saved, readOnly, withPositions, native)
         if not world.holdLeaves then world.channels[name:lower()] = nil end
     end
     environment.C_ChatInfo = {
+        GetChannelRosterInfo = function(displayIndex, rosterIndex)
+            local member = assert(world.roster[displayIndex].members[rosterIndex])
+            return member.name, member.owner, member.moderator, member.guid
+        end,
         RegisterAddonMessagePrefix = function(prefix)
             world.prefixCalls[#world.prefixCalls + 1] = prefix
             if world.prefixThrows then error("Prefix registration unavailable") end
@@ -278,13 +295,12 @@ assert(addon:SendData("echo", "current payload") and #world.sent == attempts + 1
 assert(world.sent[#world.sent].message == "1|echo|current payload")
 assert(equal(addon.db, database), "The communication helper must not persist its runtime state")
 
--- Shared data credentials are group-derived without changing established chat credentials.
+-- Shared data names remain group-derived and distinct from established chat names.
 local same = newAddon()
-local channel, password = addon:GetGroupDataChannelName(), addon:GetGroupDataChannelPassword()
+local channel = addon:GetGroupDataChannelName()
 assert(type(channel) == "string" and #channel == 31 and channel:sub(1, 7) == "LITDATA")
-assert(type(password) == "string" and #password == 31)
-assert(same:GetGroupDataChannelName() == channel and same:GetGroupDataChannelPassword() == password)
-assert(channel ~= addon:GetGroupChannelName() and password ~= addon:GetGroupChannelPassword())
+assert(same:GetGroupDataChannelName() == channel)
+assert(channel ~= addon:GetGroupChannelName())
 local oldFingerprint = addon:GetGroupFingerprint()
 local lifecycle = {}
 addon.OnGroupChanged = function(self)
@@ -306,7 +322,7 @@ world:connect()
 assert(addon:ReceiveData("Friend", "1|echo|handler retained"), "Features survive a group change and can use the new connection")
 addon:LeaveGroup()
 world:advance(0)
-assert(not addon:IsDataConnected() and addon:GetGroupDataChannelName() == nil and addon:GetGroupDataChannelPassword() == nil)
+assert(not addon:IsDataConnected() and addon:GetGroupDataChannelName() == nil)
 world:connect()
 assert(not addon:IsDataConnected() and not addon:SendData("echo", "no group"))
 
@@ -326,6 +342,84 @@ readOnlyWorld:advance(30)
 assert(equal(saved, original) and #readOnlyWorld.joins == 0 and #readOnlyWorld.leaves == 0
     and #readOnlyWorld.sent == 0,
     "Read-only startup cannot leave a disabled global channel or change its saved preference")
+
+-- Clear old data-channel passwords only after membership and our own permission
+-- arrive. Display-list indexes differ from native channel numbers.
+do
+    local function supplyRoster(clock, name, owner, moderator)
+        clock.roster = {
+            { name = "General", id = 1, members = {
+                { name = "Self", guid = "Player-Test-Self", owner = true, moderator = true },
+            } },
+            { name = name:lower(), id = 7, members = {
+                { name = "Friend", guid = "Player-Test-Friend", owner = true, moderator = true },
+                { name = "Self", guid = "Player-Test-Self", owner = owner, moderator = moderator },
+            } },
+        }
+    end
+
+    local current, clock = newAddon()
+    local name = current:GetGroupDataChannelName()
+    supplyRoster(clock, name, true, false)
+    clock:login()
+    clock:fire("CHANNEL_ROSTER_UPDATE", 2)
+    assert(#clock.passwordCalls == 0, "A pending join cannot clear channel passwords")
+    clock.roster = {}
+    clock:member(7)
+    assert(#clock.passwordCalls == 0, "Membership can precede the channel roster")
+    supplyRoster(clock, name, false, false)
+    clock:fire("CHANNEL_ROSTER_UPDATE", 2)
+    assert(#clock.passwordCalls == 0, "Another player's ownership grants us no permission")
+    clock.roster[2].members[2].moderator = true
+    clock:fire("CHANNEL_FLAGS_UPDATED", 2)
+    assert(#clock.passwordCalls == 1 and clock.passwordCalls[1].name:lower() == name:lower()
+        and clock.passwordCalls[1].password == "", "A moderator removes the existing data-channel password")
+    clock:fire("CHANNEL_ROSTER_UPDATE", 2)
+    clock:fire("PLAYER_REGEN_ENABLED")
+    clock:advance(15)
+    assert(#clock.passwordCalls == 1, "Do not repeat password changes on each roster or connection check")
+
+    clock.channels[name:lower()] = nil
+    clock:fire("CHANNEL_UI_UPDATE")
+    clock:advance(1)
+    clock:member(19)
+    assert(#clock.passwordCalls == 2, "A new membership clears a password installed while disconnected")
+
+    -- Restored native membership also needs cleanup, and a failed native call
+    -- must leave that cleanup eligible for a later event.
+    local restored, restoredClock = newAddon()
+    local restoredName = restored:GetGroupDataChannelName()
+    restoredClock.channels[restoredName:lower()] = { id = 23, name = restoredName }
+    supplyRoster(restoredClock, restoredName, true, false)
+    restoredClock.passwordThrows = true
+    restoredClock:login()
+    assert(#restoredClock.joins == 0 and #restoredClock.passwordCalls == 0
+        and restoredClock.passwordAttempts > 0, "Restored owners attempt cleanup without another join")
+    restoredClock.passwordThrows = false
+    restoredClock:fire("PLAYER_REGEN_ENABLED")
+    assert(#restoredClock.passwordCalls == 1 and restored:IsDataConnected(),
+        "A failed password change retries when the native API becomes available")
+
+    for _, gate in ipairs({ "disabled", "read-only", "switching", "stopped" }) do
+        local gated, gatedClock = newAddon()
+        local gatedName = gated:GetGroupDataChannelName()
+        gatedClock:connect()
+        if gate == "disabled" then
+            assert(gated:SetDataChannelEnabled("global", false))
+        elseif gate == "read-only" then
+            gated.savedDataReadOnly = true
+        elseif gate == "switching" then
+            assert(gated:SetGroupSecret("another-group"))
+        else
+            gatedClock:fire("PLAYER_LOGOUT")
+        end
+        supplyRoster(gatedClock, gatedName, true, true)
+        gatedClock:fire("CHANNEL_ROSTER_UPDATE", 2)
+        gatedClock:fire("CHANNEL_FLAGS_UPDATED", 2)
+        gatedClock:fire("PLAYER_REGEN_ENABLED")
+        assert(#gatedClock.passwordCalls == 0, gate .. " data routes cannot change channel passwords")
+    end
+end
 
 -- Missing joins retry indefinitely with capped delays and a single timer despite UI-event storms.
 do

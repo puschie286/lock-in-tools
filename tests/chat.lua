@@ -6,14 +6,14 @@ local contains = fixtures.contains
 local SECRET = fixtures.SECRET
 local OTHER_SECRET = fixtures.OTHER_SECRET
 
--- Matching group secrets derive one room and password; membership is asynchronous.
+-- Matching group keys derive one password-free room; membership is asynchronous.
 local chatAddon, _, chatMessages, _, chatWorld = loadAddon(settings(), false)
 chatWorld:initialize()
 local room = chatAddon:GetGroupChannelName()
 assert(#chatWorld.joinCalls == 0, "allow native membership restoration before joining")
 chatWorld:advance(2)
 assert(#chatWorld.joinCalls == 1 and chatWorld.joinCalls[1] == room)
-assert(chatWorld.lastJoinPassword == chatAddon:GetGroupChannelPassword())
+assert(chatWorld.lastJoinPassword == "")
 chatWorld:completeJoin(room, 5)
 chatWorld.fire("CHANNEL_UI_UPDATE")
 chatWorld:notice("YOU_JOINED", room, 5)
@@ -27,7 +27,9 @@ chatWorld:advance(0)
 assert(#chatWorld.openedChat == 1 and chatWorld.editBox.channelTarget == room)
 assert(chatWorld.editBox.chatType == "CHANNEL")
 chatWorld.roster = {
-    { name = "General", header = false, id = 1, members = {} },
+    { name = "General", header = false, id = 1, members = {
+        { name = "Self", owner = true, moderator = false, guid = "Player-Test-Self" },
+    } },
     { name = room, header = false, id = 8, members = {
         { name = "Friend", owner = true, moderator = false, guid = "Player-Test-Friend" },
         { name = "Self", owner = false, moderator = false, guid = "Player-Test-Self" },
@@ -38,17 +40,75 @@ assert(#chatWorld.passwordCalls == 0, "ordinary member must not change passwords
 chatWorld.roster[2].members[2].owner = true
 chatWorld.fire("CHANNEL_ROSTER_UPDATE", 2)
 assert(#chatWorld.passwordCalls == 1 and chatWorld.passwordCalls[1].name == room)
-assert(chatWorld.passwordCalls[1].password == chatAddon:GetGroupChannelPassword(),
-    "owner installs derived password after asynchronous roster arrives")
+assert(chatWorld.passwordCalls[1].password == "",
+    "owner clears an existing password after asynchronous roster arrives")
 chatWorld.fire("CHANNEL_ROSTER_UPDATE", 2)
 assert(#chatWorld.passwordCalls == 1, "do not repeat password changes on roster updates")
-assert(not contains(chatMessages, SECRET) and not contains(chatMessages, chatAddon:GetGroupChannelPassword()))
+assert(not contains(chatMessages, SECRET), "password cleanup must not disclose the group key")
 local restoredAddon, _, _, _, restoredWorld = loadAddon(settings(), false)
 restoredWorld:restore(room:lower(), 4)
+restoredWorld.roster = {
+    { name = room:upper(), header = false, id = 4, members = {
+        { name = "Self", owner = false, moderator = true, guid = "Player-Test-Self" },
+    } },
+}
 restoredWorld:initialize()
 restoredWorld:advance(20)
 assert(#restoredWorld.joinCalls == 0 and #restoredWorld.addCalls == 1)
 assert(restoredAddon:GetChatStatusText():find("Joined", 1, true))
+assert(#restoredWorld.passwordCalls == 1 and restoredWorld.passwordCalls[1].password == "",
+    "a moderator clears a password on restored membership without rejoining")
+restoredAddon:LeaveChatChannel()
+restoredWorld.fire("CHANNEL_ROSTER_UPDATE", 1)
+assert(#restoredWorld.passwordCalls == 1, "leaving stops cleanup despite a retained roster")
+assert(restoredAddon:JoinChatChannel(true))
+restoredWorld:completeJoin(room, 9)
+assert(#restoredWorld.passwordCalls == 2 and restoredWorld.lastJoinPassword == "",
+    "a new membership clears any password applied while the player was absent")
+
+-- Cleanup waits for permission and retries a native failure without exposing a password.
+do
+    local clearing, _, _, _, clock = loadAddon(settings(), false)
+    clock:initialize()
+    clock:advance(1)
+    clock:completeJoin(room, 7)
+    clock.roster = {
+        { name = room, header = false, id = 7, members = {
+            { name = "Self", owner = false, moderator = false, guid = "Player-Test-Self" },
+        } },
+    }
+    clock.fire("CHANNEL_FLAGS_UPDATED")
+    assert(#clock.passwordCalls == 0)
+    clock.roster[1].members[1].moderator = true
+    clock.passwordThrows = true
+    clock.fire("CHANNEL_FLAGS_UPDATED")
+    assert(#clock.passwordCalls == 0, "an unavailable native API must not count as cleared")
+    clock.passwordThrows = false
+    clock.fire("PLAYER_REGEN_ENABLED")
+    assert(#clock.passwordCalls == 1 and clock.passwordCalls[1].name == room
+        and clock.passwordCalls[1].password == "", "retry cleanup when native password changes become available")
+    clock.fire("CHANNEL_FLAGS_UPDATED")
+    assert(#clock.passwordCalls == 1, "successful cleanup is not repeated during the same membership")
+end
+
+-- Stale rosters and suspended sessions never change channel passwords.
+for _, guard in ipairs({ "membership", "readOnly", "switching", "stopped" }) do
+    local guarded, _, _, _, clock = loadAddon(settings(), false)
+    clock:initialize()
+    clock:advance(1)
+    clock:completeJoin(room, 7)
+    clock.roster = {
+        { name = room, header = false, id = 7, members = {
+            { name = "Self", owner = true, moderator = false, guid = "Player-Test-Self" },
+        } },
+    }
+    if guard == "membership" then clock.channels[room:lower()] = nil
+    elseif guard == "readOnly" then guarded.savedDataReadOnly = true
+    elseif guard == "switching" then guarded.groupSwitch = {}
+    else guarded.chatState.stopped = true end
+    clock.fire("CHANNEL_ROSTER_UPDATE", 1)
+    assert(#clock.passwordCalls == 0, guard .. " prevents password changes")
+end
 
 -- Feature settings and channel leaves retain shared group identity.
 local manual, manualEnvironment, _, _, manualWorld = loadAddon(settings(nil, false), false)

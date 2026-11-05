@@ -2,7 +2,7 @@ local _, addon = ...
 
 local RETRY_DELAYS = { 2, 4, 8, 8 }
 local TERMINAL_NOTICES = {
-    WRONG_PASSWORD = "The group chat password was rejected. Check that your friends use the same group secret.",
+    WRONG_PASSWORD = "The group chat still has a password. Ask its owner or a moderator to remove it and update LockInTools, then use Join.",
     BANNED = "You are banned from this channel.",
     YOU_KICKED = "You were removed from this channel. Use Join when you are ready to try again.",
     INVALID_NAME = "WoW rejected this channel name. Choose another name.",
@@ -122,6 +122,7 @@ function addon:ConfirmChatMembership()
     end
     local channelID, canonicalName = GetChannelName(configuredName)
     if not channelID or channelID <= 0 then
+        state.passwordCleared = false
         return false
     end
 
@@ -141,37 +142,19 @@ function addon:ConfirmChatMembership()
     state.pending = false
     state.attempts = 0
     self:SetChatPhase("joined")
-    self:RefreshChatPassword()
+    self:ClearChatChannelPassword()
     return true
 end
 
-function addon:RefreshChatPassword()
+function addon:ClearChatChannelPassword()
     local state = self.chatState
     local name = self:GetGroupChannelName()
-    if state.stopped or self:IsGroupSwitching() or not name or state.phase ~= "joined" or state.passwordSet then
+    if state.stopped or self:IsGroupSwitching() or not name or state.phase ~= "joined" or state.passwordCleared then
         return
     end
-    local playerGUID = UnitGUID("player")
-    if not playerGUID or IsSecret(playerGUID) then
-        return
-    end
-    -- Roster APIs use display-list indexes, not the local /channel number.
-    for displayIndex = 1, GetNumDisplayChannels() do
-        local displayName, header, _, _, count = GetChannelDisplayInfo(displayIndex)
-        if not header and SameChannel(displayName, name) then
-            for rosterIndex = 1, (count or 0) do
-                local _, owner, moderator, guid = C_ChatInfo.GetChannelRosterInfo(displayIndex, rosterIndex)
-                if not IsSecret(guid) and guid == playerGUID then
-                    if not IsSecret(owner) and not IsSecret(moderator) and (owner or moderator) then
-                        state.passwordSet = true
-                        SetChannelPassword(name, self:GetGroupChannelPassword())
-                    end
-                    return
-                end
-            end
-            return
-        end
-    end
+    -- Mark before the native call, which may trigger another channel event.
+    state.passwordCleared = true
+    if not self:ClearGroupChannelPassword(name) then state.passwordCleared = false end
 end
 
 function addon:ScheduleChatCheck(delay)
@@ -233,7 +216,7 @@ function addon:JoinChatChannel(manual)
     state.pending = true
     self:SetChatPhase("joining")
 
-    local channelType = JoinPermanentChannel(name, self:GetGroupChannelPassword(), DEFAULT_CHAT_FRAME:GetID(), 1)
+    local channelType = JoinPermanentChannel(name, "", DEFAULT_CHAT_FRAME:GetID(), 1)
     if not channelType then
         self:FailChatJoin("WoW rejected the group chat join request. Use Join to try again.")
         return false
@@ -255,7 +238,7 @@ function addon:LeaveChatChannel()
     state.paused = true
     state.pending = false
     state.failed = false
-    state.passwordSet = false
+    state.passwordCleared = false
     self:SetChatPhase("paused")
     local name = self:GetGroupChannelName()
     if name then
@@ -299,7 +282,7 @@ function addon:ResetChatForGroupSwitch()
     self:CancelChatTimer()
     local state = self.chatState
     state.attempts, state.pending, state.paused, state.failed = 0, false, false, false
-    state.passwordSet = false
+    state.passwordCleared = false
     state.wanted = false
     self:SetChatPhase("idle")
 end
@@ -374,7 +357,7 @@ local function ChannelLeft(self)
     state.paused = true
     state.pending = false
     state.wanted = false
-    state.passwordSet = false
+    state.passwordCleared = false
     if not state.failed then
         self:SetChatPhase("paused")
     end
@@ -424,7 +407,7 @@ function addon:InitializeChat()
             end
         elseif event == "CHANNEL_ROSTER_UPDATE" or event == "CHANNEL_FLAGS_UPDATED"
             or event == "PLAYER_REGEN_ENABLED" then
-            self:RefreshChatPassword()
+            self:ClearChatChannelPassword()
         elseif event == "CHANNEL_UI_UPDATE" then
             if not state.paused and not state.failed and not self:ConfirmChatMembership()
                 and state.phase == "joined" and state.wanted then

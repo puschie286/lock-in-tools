@@ -8,7 +8,7 @@ local CONNECTION_CHECK_INTERVAL, FAILURE_RETRY_DELAY = 15, 30
 local LEAVE_CACHE_CHECK_LIMIT = 5
 local CHANNEL_OPTIONS = { party = true, guild = true, global = true }
 local FAILURE_NOTICES = {
-    WRONG_PASSWORD = "The data-channel password was rejected.",
+    WRONG_PASSWORD = "The data channel still has a password. Ask its owner or a moderator to remove it and update LockInTools.",
     BANNED = "You are banned from the data channel.",
     YOU_KICKED = "You were removed from the data channel.",
     INVALID_NAME = "WoW rejected the data-channel name.",
@@ -71,6 +71,7 @@ local function DisableGlobalChannel(self)
     self:CancelDataTimer()
     state.phase, state.detail = "disabled", nil
     state.pending, state.failed, state.channelConnected = false, false, false
+    state.passwordCleared = false
     -- Preserve departure tracking when re-enabled before native caches drain.
     state.awaitingLeave, state.leaveChecks, state.attempts = true, 0, 0
     local name = self:GetGroupDataChannelName()
@@ -95,7 +96,8 @@ function addon:InitializeDataChannel()
         and type(GetChannelName) == "function"
     self.dataEvents = self:RegisterGameEvents({ "CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD", "CHANNEL_UI_UPDATE",
         "CHANNEL_LEFT", "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_PASSWORD_REQUEST", "GROUP_ROSTER_UPDATE",
-        "PLAYER_GUILD_UPDATE", "PLAYER_LOGOUT" }, self.OnDataEvent)
+        "PLAYER_GUILD_UPDATE", "PLAYER_LOGOUT", "CHANNEL_ROSTER_UPDATE", "CHANNEL_FLAGS_UPDATED",
+        "PLAYER_REGEN_ENABLED" }, self.OnDataEvent)
 end
 
 function addon:IsDataConnected()
@@ -122,6 +124,7 @@ function addon:RefreshDataRoutes()
             if id then routes.CHANNEL = tostring(id)
             else
                 state.channelConnected = false
+                state.passwordCleared = false
                 state.phase, state.attempts = "joining", 0
                 self:ScheduleDataCheck(1)
                 channelLost = true
@@ -144,7 +147,16 @@ end
 
 function addon:SetDataChannelConnected(connected)
     self.dataState.channelConnected = connected
+    if not connected then self.dataState.passwordCleared = false end
     self:RefreshDataRoutes()
+end
+
+function addon:ClearDataChannelPassword()
+    local state = self.dataState
+    if not GlobalWanted(self) or not state.channelConnected or state.awaitingLeave or state.passwordCleared then return end
+    -- Cache the request once per membership, allowing retries if the API throws.
+    state.passwordCleared = true
+    if not self:ClearGroupChannelPassword(self:GetGroupDataChannelName()) then state.passwordCleared = false end
 end
 
 function addon:SetDataChannelEnabled(channel, enabled)
@@ -186,6 +198,7 @@ function addon:ResetDataForGroupSwitch()
     if not state then return end
     self:CancelDataTimer()
     state.wanted, state.channelConnected, state.routes = false, false, {}
+    state.passwordCleared = false
     self:SetDataConnected(false)
     state.phase, state.detail = "idle", nil
     state.attempts, state.pending, state.failed, state.awaitingLeave = 0, false, false, false
@@ -243,6 +256,7 @@ function addon:ConfirmDataMembership()
     if state.channelConnected then
         self:RefreshDataRoutes()
         if not GlobalWanted(self) or not state.channelConnected then return false end
+        self:ClearDataChannelPassword()
         if not state.timer then self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL) end
         return true
     end
@@ -252,6 +266,7 @@ function addon:ConfirmDataMembership()
     self:SetDataChannelConnected(true)
     -- Connection callbacks can disable this route before membership is returned.
     if not GlobalWanted(self) or not state.channelConnected then return false end
+    self:ClearDataChannelPassword()
     self:ScheduleDataCheck(CONNECTION_CHECK_INTERVAL)
     Refresh(self)
     return true
@@ -316,7 +331,7 @@ function addon:JoinDataChannel(manual)
     if not GlobalWanted(self) then return false end
     state.attempts = math.min(state.attempts + 1, #RETRY_DELAYS)
     state.pending, state.phase, state.detail = true, "joining", nil
-    local ok = pcall(JoinTemporaryChannel, name, self:GetGroupDataChannelPassword())
+    local ok = pcall(JoinTemporaryChannel, name, "")
     if not ok then return self:FailDataJoin("The data-channel join request failed.") end
     if GlobalWanted(self) and not state.failed then
         local confirmed = self:ConfirmDataMembership()
@@ -349,6 +364,7 @@ function addon:OnDataEvent(event, ...)
     if event == "PLAYER_LOGOUT" then
         self:CancelDataTimer()
         state.stopped, state.wanted, state.channelConnected, state.routes = true, false, false, {}
+        state.passwordCleared = false
         self:SetDataConnected(false)
         return
     end
@@ -386,6 +402,8 @@ function addon:OnDataEvent(event, ...)
         if self:GetDataChannelEnabled("global") and state.pending and SameChannel(requestedName, name) then
             self:FailDataJoin(FAILURE_NOTICES.WRONG_PASSWORD)
         end
+    elseif event == "CHANNEL_ROSTER_UPDATE" or event == "CHANNEL_FLAGS_UPDATED" or event == "PLAYER_REGEN_ENABLED" then
+        self:ClearDataChannelPassword()
     elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
         self:RefreshDataRoutes()
         Refresh(self)

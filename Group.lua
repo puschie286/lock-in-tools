@@ -38,9 +38,7 @@ local function DeriveGroup(code, secret)
         code = code,
         fingerprint = Crypto.Hex(derive("identity")):sub(1, 24),
         channelName = "LIT" .. Crypto.Hex(derive("chat/channel")):sub(1, 28),
-        channelPassword = Crypto.Hex(derive("chat/password")):sub(1, 31),
         dataChannelName = "LITDATA" .. Crypto.Hex(derive("data/channel")):sub(1, 24),
-        dataChannelPassword = Crypto.Hex(derive("data/password")):sub(1, 31),
         authenticationKey = derive("authentication"),
     }
 end
@@ -231,12 +229,50 @@ function addon:GetGroupSecret()
 end
 function addon:GetGroupFingerprint() return self.groupState and self.groupState.fingerprint end
 function addon:GetGroupChannelName() return self.groupState and self.groupState.channelName end
-function addon:GetGroupChannelPassword() return self.groupState and self.groupState.channelPassword end
 function addon:GetGroupDataChannelName() return self.groupState and self.groupState.dataChannelName end
-function addon:GetGroupDataChannelPassword() return self.groupState and self.groupState.dataChannelPassword end
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
+end
+
+function addon:ClearGroupChannelPassword(name)
+    if not self.ready or self.savedDataReadOnly or self:IsGroupSwitching()
+        or IsSecret(name) or type(name) ~= "string" then return false end
+    local normalized = name:lower()
+    local chat, data = self:GetGroupChannelName(), self:GetGroupDataChannelName()
+    if (not chat or normalized ~= chat:lower()) and (not data or normalized ~= data:lower()) then return false end
+    if type(GetChannelName) ~= "function" or type(UnitGUID) ~= "function"
+        or type(GetNumDisplayChannels) ~= "function" or type(GetChannelDisplayInfo) ~= "function"
+        or not C_ChatInfo or type(C_ChatInfo.GetChannelRosterInfo) ~= "function"
+        or type(SetChannelPassword) ~= "function" then return false end
+    local channelID = GetChannelName(name)
+    if IsSecret(channelID) or not channelID or channelID <= 0 then return false end
+    local playerGUID = UnitGUID("player")
+    if not playerGUID or IsSecret(playerGUID) then return false end
+
+    -- Old versions installed passwords. Only joined owners/moderators can clear
+    -- them; a locked channel we cannot join still needs an existing member's help.
+    -- Roster APIs use display-list indexes, not the local /channel number.
+    for displayIndex = 1, GetNumDisplayChannels() do
+        local displayName, header, _, _, count = GetChannelDisplayInfo(displayIndex)
+        if not IsSecret(header) and not header and not IsSecret(displayName)
+            and type(displayName) == "string" and displayName:lower() == normalized then
+            if IsSecret(count) then return false end
+            for rosterIndex = 1, (count or 0) do
+                local _, owner, moderator, guid = C_ChatInfo.GetChannelRosterInfo(displayIndex, rosterIndex)
+                if not IsSecret(guid) and guid == playerGUID then
+                    if (not IsSecret(owner) and owner) or (not IsSecret(moderator) and moderator) then
+                        -- This confirms only that the request did not throw;
+                        -- native password removal still needs in-game validation.
+                        return pcall(SetChannelPassword, name, "")
+                    end
+                    return false
+                end
+            end
+            return false
+        end
+    end
+    return false
 end
 
 local function ForEachChatFrame(callback)
