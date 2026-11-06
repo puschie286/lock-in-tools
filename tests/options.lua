@@ -4,7 +4,7 @@ local loadAddon, settings = support.loadAddon, support.settings
 local SECRET = support.SECRET
 local loadOptions = dofile("tests/support/ui.lua")
 
--- Settings expose native sharing routes without custom group or chat controls.
+-- General Settings combine sharing, ranking and player data without status summaries.
 do
     local addon, api, _, _, world = loadAddon(settings("", false), false)
     world:initialize()
@@ -12,6 +12,18 @@ do
     api.SlashCmdList.LOCKINTOOLS("options")
     local panel = addon.optionsPanel
     assert(panel:IsVisible() and panel.selectedTab == "sharing")
+    for _, control in ipairs({ panel.dataChannels.party, panel.dataChannels.guild,
+        panel.positionSharing, panel.positionRetention, panel.rankingEnabled,
+        panel.rankingBurningEffect, panel.rankingTransparencySlider,
+        panel.playerDataCleanup, panel.clearPlayerData }) do
+        assert(control:IsVisible(), "all general preferences are available on one page")
+    end
+    assert(panel.tabs.sharing and panel.tabs.restedxp and not panel.tabs.ranking and not panel.tabs.playerData
+        and not panel.pages.ranking and not panel.pages.playerData,
+        "ranking and player data no longer require separate menus")
+    assert(not panel.dataStatus and not panel.dataStatusHelp
+        and not panel.positionStatus and not panel.positionStatusHelp,
+        "route and position summary lines are absent")
     assert(panel.dataChannels.party:IsEnabled() and panel.dataChannels.guild:IsEnabled())
     assert(not panel.tabs.group and not panel.secret and not panel.autoJoin
         and not panel.join and not panel.leave and not panel.dataChannels.global,
@@ -136,11 +148,12 @@ do
         assert(checkbox:GetChecked() and calls[channel] == 0,
             "data notifications refresh preferences without saving them")
     end
-    local previousStatus = panel.dataStatus:GetText()
     world.guild = true
     world.fire("PLAYER_GUILD_UPDATE")
-    assert(panel.dataStatus:GetText() == addon:GetDataStatusText() and panel.dataStatus:GetText() ~= previousStatus,
-        "the Sharing page reflects live route availability")
+    for channel, checkbox in pairs(panel.dataChannels) do
+        assert(checkbox:IsVisible() and checkbox:GetChecked() and calls[channel] == 0,
+            "route availability changes preserve visible preferences without saving")
+    end
     for channel, checkbox in pairs(panel.dataChannels) do
         checkbox:Click()
         assert(not addon:GetDataChannelEnabled(channel) and not checkbox:GetChecked() and calls[channel] == 1)
@@ -193,8 +206,8 @@ do
     assert(clears == 0 and panel.confirmClearPlayerData)
     addon:Notify("POSITIONS_CHANGED")
     assert(panel.confirmClearPlayerData, "live notifications preserve an outstanding clear confirmation")
+    panel.tabs.restedxp:Click()
     panel.tabs.sharing:Click()
-    panel.tabs.playerData:Click()
     assert(not panel.confirmClearPlayerData, "changing tabs cancels clear confirmation")
     panel.clearPlayerData:Click()
     assert(clears == 0 and panel.confirmClearPlayerData)
@@ -289,10 +302,10 @@ do
     end
     addon:OpenOptions("sharing")
     local panel, tooltip = addon.optionsPanel, api.GameTooltip
-    panel.dataStatusHelp.scripts.OnEnter(panel.dataStatusHelp)
-    assert(tooltip:IsShown() and tooltip:IsOwned(panel.dataStatusHelp) and tooltip.anchor == "ANCHOR_CURSOR",
+    panel.dataChannels.party.scripts.OnEnter(panel.dataChannels.party)
+    assert(tooltip:IsShown() and tooltip:IsOwned(panel.dataChannels.party) and tooltip.anchor == "ANCHOR_CURSOR",
         "Settings help follows the global tooltip position")
-    panel.tabs.ranking:Click()
+    panel.tabs.restedxp:Click()
     assert(not tooltip:IsShown(), "switching settings pages dismisses globally positioned help")
     panel.tabs.sharing:Click()
     panel.positionSharing:SetEnabled(false)
@@ -303,7 +316,6 @@ do
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown(), "leaving each control dismisses its own help")
     end
-    panel.tabs.ranking:Click()
     for _, widget in ipairs({ panel.rankingBurningEffect, panel.rankingBurningEffect.labelButton }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR"
@@ -319,11 +331,10 @@ do
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())
     end
-    panel.tabs.sharing:Click()
-    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.guild.labelButton, panel.dataStatusHelp }) do
+    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.guild.labelButton }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
-            "data controls and status use the shared tooltip position")
+            "data controls use the shared tooltip position")
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())
     end

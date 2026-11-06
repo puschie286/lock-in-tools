@@ -25,15 +25,18 @@ do
     assert(options:IsVisible() and not content:IsVisible())
     assert(options.positionSharing:IsVisible() and options.positionRetention:IsVisible()
         and options.dataChannels.party:IsVisible() and options.dataChannels.guild:IsVisible()
-        and not options.dataChannels.global, "Sharing contains native data routes and position preferences")
+        and options.rankingEnabled:IsVisible() and options.rankingBurningEffect:IsVisible()
+        and options.rankingTransparencySlider:IsVisible() and options.playerDataCleanup:IsVisible()
+        and options.clearPlayerData:IsVisible() and not options.dataChannels.global,
+        "General contains native data routes, position, ranking and player data preferences")
     options.content:Click()
     content.options:Click()
     assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible())
-    for _, entry in ipairs({ "position", "data" }) do
-        addon:OpenOptions("ranking")
+    for _, entry in ipairs({ "sharing", "position", "data", "ranking", "playerData" }) do
+        addon:OpenOptions("restedxp")
         addon:OpenOptions(entry)
         assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible(),
-            "existing sharing page links still open the combined settings")
+            "existing settings page links open the combined controls")
     end
     for _, entry in ipairs({ "", "content", "overview", "welcome" }) do
         command(entry)

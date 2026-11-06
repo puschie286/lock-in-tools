@@ -424,7 +424,7 @@ do
     options.rankingBurningEffect:Click()
     assert(not saved.ranking.burningEffect and not options.rankingBurningEffect:GetChecked()
         and stopped(group) and stopped(personal) and ordinaryFill(group, 70) and ordinaryFill(personal, 80)
-        and panel:IsVisible() and saved.ranking.enabled and options:IsVisible() and options.selectedTab == "ranking"
+        and panel:IsVisible() and saved.ranking.enabled and options:IsVisible() and options.selectedTab == "sharing"
         and ranking:GetBurnedStatus() == 80 and group.label:GetText() == groupLabel
         and personal.label:GetText() == personalLabel and modelWrites == beforeWrites and sends() == beforeSends,
         "disabling burning immediately clears both effects and retains plain meters, visibility, status and group traffic")
@@ -544,15 +544,15 @@ do
     loadOverlay(ranking, api)
     ranking:OpenOptions("ranking")
     local options = ranking.optionsPanel
-    assert(options.selectedTab == "ranking" and options.pages.ranking:IsVisible()
+    assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible()
         and not options.rankingEnabled:GetChecked()
         and not ranking.rankingOverlay,
-        "the Ranking Settings page exposes the default-off preference without a separate lock control")
+        "General Settings exposes the default-off ranking preference without a separate lock control")
     local tooltip = api.GameTooltip
     options.rankingEnabled:Click()
     local panel = ranking.rankingOverlay
     assert(saved.ranking.enabled and options.rankingEnabled:GetChecked()
-        and panel:IsVisible() and options:IsVisible() and options.selectedTab == "ranking",
+        and panel:IsVisible() and options:IsVisible() and options.selectedTab == "sharing",
         "enabling from Settings immediately saves and shows the independent overlay")
     panel.CloseButton:Click()
     assert(not saved.ranking.enabled and not options.rankingEnabled:GetChecked() and options:IsVisible()

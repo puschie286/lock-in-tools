@@ -196,15 +196,6 @@ local function CreateDataControls(panel, page)
             .. " Turning this off stops sending and receiving through this channel.\n\n"
             .. "Changes apply immediately and save across reloads and characters.", 260)
     end
-
-    panel.dataStatusHelp = CreateFrame("Frame", nil, page)
-    panel.dataStatusHelp:SetPoint("TOPLEFT", 16, -158)
-    panel.dataStatusHelp:SetSize(308, 112)
-    panel.dataStatusHelp:EnableMouse(true)
-    panel.dataStatus = UI:Label(page, "", 12, "muted")
-    panel.dataStatus:SetPoint("TOPLEFT", panel.dataStatusHelp, "TOPLEFT", 0, 0)
-    panel.dataStatus:SetSize(308, 112)
-    OptionTooltip(panel.dataStatusHelp, "Data status", function() return addon:GetDataStatusText() end)
 end
 
 local function GuideText(value)
@@ -277,10 +268,6 @@ local function CreateRestedXPPage(panel)
     local transparencyHelp = "Fade LockInTools theme backgrounds and borders without fading text."
     OptionTooltip(panel.restedxpTransparencyHelp, "Transparency", transparencyHelp)
     OptionTooltip(slider, "Transparency", transparencyHelp)
-
-    panel.restedxpSkinStatus = UI:Label(page, "", 12, "muted")
-    panel.restedxpSkinStatus:SetPoint("TOPLEFT", 16, -320)
-    panel.restedxpSkinStatus:SetSize(648, 28)
 
     local raw, buffer, bufferSize, quietTime, oversized = "", nil, 0, 0, false
     local pending, pendingCount, blockCount = nil, 0, 0
@@ -394,13 +381,11 @@ local function RefreshRestedXP(panel)
     local notice = not state.installed and "RestedXP is required. Install and enable RestedXP to import guides."
         or state.problem or (not state.loaded and "Enable RestedXP to import guides.") or ""
     panel.restedxpNotice:SetText(GuideText(notice))
-    local skin = addon:GetRestedXPSkinState()
     for _, preference in ipairs(RESTEDXP_APPEARANCE_PREFERENCES) do
         panel[preference.field]:SetChecked(addon[preference.getter](addon) == true)
         panel[preference.field]:SetEnabled(not addon.savedDataReadOnly)
     end
     page.RefreshTransparency()
-    panel.restedxpSkinStatus:SetText(GuideText(skin.problem or skin.status))
     panel.restedxpExport:SetEnabled(not page.readOnly and not page.busy)
     page.RefreshDraft()
     SetFeedback(panel, page.actionError or state.status, page.actionError ~= nil or state.error == true)
@@ -410,7 +395,7 @@ end
 local function CreateOptionsPanel()
     local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
-    local sharing = UI:Section(panel, 20, 116, 680, 414, "Sharing")
+    local sharing = UI:Section(panel, 20, 116, 680, 414, "General")
     panel.pages.sharing = sharing
     local positionHeading = UI:Label(sharing, "Shared positions", 14, "heading")
     positionHeading:SetPoint("TOPLEFT", 356, -52)
@@ -433,71 +418,53 @@ local function CreateOptionsPanel()
         "Keep the last location across reloads and characters. Gray offline markers mean no position update for at least 60 seconds.\n\n"
             .. "Turning this off removes stale locations and stops saving them.", 260)
 
-    panel.positionStatusHelp = CreateFrame("Frame", nil, sharing)
-    panel.positionStatusHelp:SetPoint("TOPLEFT", 356, -158)
-    panel.positionStatusHelp:SetSize(308, 48)
-    panel.positionStatusHelp:EnableMouse(true)
-    panel.positionStatus = UI:Label(sharing, "", 12, "muted")
-    panel.positionStatus:SetPoint("TOPLEFT", panel.positionStatusHelp, "TOPLEFT", 0, 0)
-    panel.positionStatus:SetWidth(308)
-    OptionTooltip(panel.positionStatusHelp, "Position status", function()
-        return addon:GetPositionStatusText() .. "\n\nTo hide player icons while sharing continues, use the world map's LockInTools filter."
-    end)
     CreateDataControls(panel, sharing)
 
-    local ranking = UI:Section(panel, 20, 116, 680, 414, "Player ranking")
-    panel.pages.ranking = ranking
-    local rankingIntroduction = UI:Label(ranking,
-        "Compare players' level and XP progress while you play.", 14)
-    rankingIntroduction:SetPoint("TOPLEFT", 16, -50)
-    rankingIntroduction:SetWidth(648)
+    local rankingHeading = UI:Label(sharing, "Player ranking", 14, "heading")
+    rankingHeading:SetPoint("TOPLEFT", 16, -174)
 
-    panel.rankingEnabled = UI:Checkbox(ranking)
-    panel.rankingEnabled:SetPoint("TOPLEFT", 12, -94)
+    panel.rankingEnabled = UI:Checkbox(sharing)
+    panel.rankingEnabled:SetPoint("TOPLEFT", 12, -200)
     panel.rankingEnabled:SetSize(28, 28)
     BindPreference(panel, panel.rankingEnabled, function() return addon:GetRankingSettings().enabled end,
         addon.SetRankingEnabled)
-    PreferenceLabel(ranking, panel.rankingEnabled, "Show ranking overlay",
+    PreferenceLabel(sharing, panel.rankingEnabled, "Show ranking overlay",
         "Show the top five characters, plus your own rank when outside the top five. Position sharing can stay off.\n\n"
-            .. "This preference saves across reloads and characters.")
+            .. "This preference saves across reloads and characters.", 260)
 
-    panel.rankingBurningEffect = UI:Checkbox(ranking)
-    panel.rankingBurningEffect:SetPoint("TOPLEFT", 12, -134)
+    panel.rankingBurningEffect = UI:Checkbox(sharing)
+    panel.rankingBurningEffect:SetPoint("TOPLEFT", 12, -236)
     panel.rankingBurningEffect:SetSize(28, 28)
     BindPreference(panel, panel.rankingBurningEffect, function() return addon:GetRankingSettings().burningEffect end,
         addon.SetRankingBurningEffect)
-    PreferenceLabel(ranking, panel.rankingBurningEffect, "Enable burning effect",
+    PreferenceLabel(sharing, panel.rankingBurningEffect, "Enable burning effect",
         "Add bright glow and animated flames to both burned meters at 70% and above. Turn this off to hide the effect.\n\n"
-            .. "This preference saves across reloads and characters.")
+            .. "This preference saves across reloads and characters.", 260)
 
-    local help, slider = CreateTransparencyControl(panel, ranking, "ranking", "Background transparency",
+    local help, slider = CreateTransparencyControl(panel, sharing, "ranking", "Background transparency",
         function() return addon:GetRankingSettings().backgroundTransparency or 0 end,
         function(value) return addon:SetRankingBackgroundTransparency(value) end)
-    help:SetPoint("TOPLEFT", 16, -182)
-    slider:SetPoint("TOPLEFT", 20, -210)
+    help:SetPoint("TOPLEFT", 16, -280)
+    slider:SetPoint("TOPLEFT", 20, -308)
     local transparencyHelp = "Fade the ranking overlay's background and border while keeping player rows and meters readable.\n\n"
         .. "Changes apply immediately and save across reloads and characters."
     OptionTooltip(panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
     OptionTooltip(slider, "Background transparency", transparencyHelp)
 
-    local playerData = UI:Section(panel, 20, 116, 680, 414, "Player data")
-    panel.pages.playerData = playerData
-    local playerDataIntroduction = UI:Label(playerData,
-        "Manage saved player history and last-known positions.", 14)
-    playerDataIntroduction:SetPoint("TOPLEFT", 16, -50)
-    playerDataIntroduction:SetWidth(648)
+    local playerDataHeading = UI:Label(sharing, "Player data", 14, "heading")
+    playerDataHeading:SetPoint("TOPLEFT", 356, -174)
 
-    panel.playerDataCleanup = UI:Checkbox(playerData)
-    panel.playerDataCleanup:SetPoint("TOPLEFT", 12, -94)
+    panel.playerDataCleanup = UI:Checkbox(sharing)
+    panel.playerDataCleanup:SetPoint("TOPLEFT", 352, -200)
     panel.playerDataCleanup:SetSize(28, 28)
     BindPreference(panel, panel.playerDataCleanup, function() return addon:GetPlayerDataCleanupEnabled() end,
         addon.SetPlayerDataCleanupEnabled)
-    PreferenceLabel(playerData, panel.playerDataCleanup, "Remove player data after 10 days",
+    PreferenceLabel(sharing, panel.playerDataCleanup, "Remove player data after 10 days",
         "Remove history and last-known positions for players not seen for 10 days. Enabled by default.\n\n"
-            .. "Enabling this cleans up now; cleanup also runs periodically. This preference saves across reloads and characters.")
+            .. "Enabling this cleans up now; cleanup also runs periodically. This preference saves across reloads and characters.", 260)
 
-    panel.clearPlayerData = UI:Button(playerData, "Clear all player data", "danger")
-    panel.clearPlayerData:SetPoint("TOPLEFT", 16, -154)
+    panel.clearPlayerData = UI:Button(sharing, "Clear all player data", "danger")
+    panel.clearPlayerData:SetPoint("TOPLEFT", 356, -244)
     panel.clearPlayerData:SetSize(188, 32)
     local function ResetPlayerDataConfirmation()
         panel.confirmClearPlayerData = false
@@ -523,7 +490,7 @@ local function CreateOptionsPanel()
         "Remove all cached player history and last-known positions. Confirmation is required.\n\n"
             .. "Active players can appear again through fresh updates, and your current character remains visible. "
             .. "Your preferences and personal Burned status stay saved.")
-    playerData:SetScript("OnHide", ResetPlayerDataConfirmation)
+    sharing:SetScript("OnHide", ResetPlayerDataConfirmation)
 
     CreateRestedXPPage(panel)
 
@@ -535,7 +502,7 @@ local function CreateOptionsPanel()
 
     local function SelectTab(name)
         -- Keep existing callers of the former pages opening the combined controls.
-        if name == "position" or name == "data" then name = "sharing" end
+        if name == "position" or name == "data" or name == "ranking" or name == "playerData" then name = "sharing" end
         if not panel.pages[name] then return end
         if panel.selectedTab == name then return end
         panel.selectedTab = name
@@ -548,8 +515,7 @@ local function CreateOptionsPanel()
         addon:RefreshOptions()
     end
     panel.SelectTab = SelectTab
-    local categories = { { "sharing", "Sharing", 104 },
-        { "ranking", "Ranking", 96 }, { "playerData", "Player data", 116 }, { "restedxp", "RestedXP", 110 } }
+    local categories = { { "sharing", "General", 104 }, { "restedxp", "RestedXP", 110 } }
     local tabX = 20
     for _, category in ipairs(categories) do
         local name = category[1]
@@ -582,9 +548,6 @@ function addon:RefreshOptions()
         return
     end
 
-    panel.positionStatus:SetText("Sharing: " .. self:GetPositionStatusText(true))
-    panel.dataStatus:SetText(self:GetDataStatusText())
-
     local editable = not self.savedDataReadOnly
     panel.positionSharing:SetEnabled(editable)
     panel.positionRetention:SetEnabled(editable)
@@ -600,7 +563,7 @@ function addon:RefreshOptions()
     panel.rankingEnabled:SetEnabled(editable)
     panel.rankingBurningEffect:SetChecked(ranking.burningEffect)
     panel.rankingBurningEffect:SetEnabled(editable)
-    panel.pages.ranking.RefreshTransparency()
+    panel.pages.sharing.RefreshTransparency()
     RefreshRestedXP(panel)
     if not editable then
         SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)

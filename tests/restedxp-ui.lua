@@ -126,8 +126,7 @@ do
     skin.available, skin.pending, skin.status = true, true, "The appearance will update after combat."
     addon:Notify("RESTEDXP_SKIN_CHANGED")
     assert(checkbox:IsEnabled() and checkbox.labelButton:IsEnabled() and chrome:IsEnabled()
-        and not panel.restedxpImport:IsEnabled()
-        and panel.restedxpSkinStatus:GetText() == skin.status,
+        and not panel.restedxpImport:IsEnabled() and not panel.restedxpSkinStatus,
         "skin state updates independently while native imports are busy")
     checkbox.labelButton:Click()
     chrome:Click()
@@ -144,9 +143,8 @@ do
     skin.enabled, skin.active, skin.pending, skin.status = true, true, false, "The appearance is active."
     skin.chromeHidden = true
     addon:Notify("RESTEDXP_SKIN_CHANGED")
-    assert(checkbox:GetChecked() and chrome:GetChecked()
-        and panel.restedxpSkinStatus:GetText() == skin.status,
-        "external appearance changes refresh every visible preference and status")
+    assert(checkbox:GetChecked() and chrome:GetChecked() and not panel.restedxpSkinStatus,
+        "external appearance changes refresh preferences without a skin status line")
 end
 
 do
