@@ -1,6 +1,7 @@
 local _, addon = ...
 local UI = addon.Theme
 local VISIBLE_ROWS, ROW_HEIGHT = 8, 40
+local PARTY_ACTION_LABELS = { invite = "Invite", suggest = "Suggest Invite", request = "Request to join" }
 
 local function Age(stamp, now)
     if type(stamp) ~= "number" then return "age unknown" end
@@ -88,19 +89,12 @@ local function ActionButton(menu, onResult, label, action, y)
     local button = UI:Button(menu.menu, label)
     button:SetPoint("TOPLEFT", 8, -y)
     button:SetSize(154, 28)
-    if button.SetMotionScriptsWhileDisabled then button:SetMotionScriptsWhileDisabled(true) end
-    button:HookScript("OnEnter", function()
-        if not GameTooltip then return end
-        GameTooltip_SetDefaultAnchor(GameTooltip, button)
-        GameTooltip:SetText(button.reason or label)
-        GameTooltip:Show()
-    end)
-    button:HookScript("OnLeave", function() HideTooltip(button) end)
-    button:SetScript("OnHide", function() HideTooltip(button) end)
-    button:SetScript("OnClick", function()
-        local playerID = menu.playerID
+    button.action = action
+    button:SetScript("OnClick", function(_, mouseButton)
+        if mouseButton ~= "LeftButton" then return end
+        local playerID, action = menu.playerID, button.action
         menu:Hide()
-        if not playerID then return end
+        if not playerID or not action then return end
         local success, message
         if action == "map" then success, message = addon:ShowPlayerOnMap(playerID)
         else success, message = addon:PerformOverviewAction(playerID, action) end
@@ -112,17 +106,17 @@ end
 
 local function RefreshActions(menu)
     local state = addon:GetOverviewActionState(menu.playerID)
-    menu.invite.reason, menu.request.reason = state.inviteReason, state.requestReason
-    local showMap, mapReason = addon:GetPlayerMapActionState(menu.playerID)
-    menu.showMap.reason = mapReason
-    menu.invite:SetEnabled(state.invite == true)
-    menu.request:SetEnabled(state.request == true)
+    local action = state.invite and "invite" or state.suggest and "suggest" or state.request and "request" or nil
+    local partyText = action and PARTY_ACTION_LABELS[action] or state.partyInfo
+    local showMap = addon:GetPlayerMapActionState(menu.playerID)
+    menu.party.action = action
+    menu.party:SetText(partyText or "")
+    menu.party:SetEnabled(action ~= nil)
+    if partyText then menu.party:Show() else menu.party:Hide() end
+    menu.showMap:ClearAllPoints()
+    menu.showMap:SetPoint("TOPLEFT", 8, partyText and -44 or -8)
     menu.showMap:SetEnabled(showMap == true)
-    for _, button in ipairs({ menu.invite, menu.request, menu.showMap }) do
-        if GameTooltip and GameTooltip:IsOwned(button) then
-            GameTooltip:SetText(button.reason or button:GetText())
-        end
-    end
+    menu.menu:SetHeight(partyText and 80 or 44)
 end
 
 function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
@@ -133,13 +127,12 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     -- Buttons default to left clicks; either button should dismiss the backdrop.
     menu:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     menu:EnableMouseWheel(true)
-    menu.menu = UI:Section(menu, 0, 0, 170, 116, "")
+    menu.menu = UI:Section(menu, 0, 0, 170, 80, "")
     menu.menu:SetFrameLevel(menu:GetFrameLevel() + 1)
     menu.menu:SetClampedToScreen(true)
     menu.menu:EnableMouse(true)
-    menu.invite = ActionButton(menu, onResult, "Invite", "invite", 8)
-    menu.request = ActionButton(menu, onResult, "Request to join", "request", 44)
-    menu.showMap = ActionButton(menu, onResult, "Show on map", "map", 80)
+    menu.party = ActionButton(menu, onResult, "", nil, 8)
+    menu.showMap = ActionButton(menu, onResult, "Show on map", "map", 44)
     menu:SetScript("OnClick", function() menu:Hide() end)
     menu:SetScript("OnMouseWheel", function(_, delta)
         menu:Hide()
@@ -148,24 +141,23 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     menu:SetScript("OnHide", function()
         menu.playerID, menu.anchor = nil, nil
         if addon.activePlayerActionMenu == menu then addon.activePlayerActionMenu = nil end
-        HideTooltip(menu.invite)
-        HideTooltip(menu.request)
-        HideTooltip(menu.showMap)
     end)
     parent:HookScript("OnHide", function() menu:Hide() end)
     function menu:Refresh()
         if self.playerID then RefreshActions(self) end
     end
-    function menu:Open(playerID, anchor, anchorTarget)
-        local wasOpen = self:IsShown() and self.playerID == playerID
+    function menu:Open(playerID, anchor)
         self:Hide()
-        if wasOpen or not playerID or not anchor or addon:IsDataSelf(playerID) then return end
+        if not playerID or not anchor or addon:IsDataSelf(playerID) then return end
         -- Roster and ranking share native action guards, and only one menu may
         -- own the screen at a time even when both player lists are visible.
         if addon.activePlayerActionMenu then addon.activePlayerActionMenu:Hide() end
         self.playerID, self.anchor = playerID, anchor
+        local x, y = GetCursorPosition()
+        -- Cursor pixels must be converted to the menu's inherited UI scale.
+        local scale = self.menu:GetEffectiveScale()
         self.menu:ClearAllPoints()
-        self.menu:SetPoint("TOPRIGHT", anchorTarget or anchor, "BOTTOMRIGHT", 0, -2)
+        self.menu:SetPoint("TOPLEFT", self, "BOTTOMLEFT", x / scale, y / scale)
         self:Refresh()
         self:Show()
         addon.activePlayerActionMenu = self
@@ -174,6 +166,14 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     tinsert(UISpecialFrames, name)
     return menu
 end
+
+addon:RegisterGameEvents({ "GLOBAL_MOUSE_UP" }, function(self, _, button)
+    local menu = self.activePlayerActionMenu
+    -- Global input also reaches disabled entries, whose click scripts do not run.
+    if button == "RightButton" and menu and menu.menu:IsMouseOver() then
+        menu:Open(menu.playerID, menu.anchor)
+    end
+end)
 
 local function SortPlayers(page, players)
     local key = page.sortKey
@@ -207,7 +207,7 @@ function addon:CreateOverviewPage(panel)
     page.empty:SetPoint("TOPLEFT", 16, -56)
     page.empty:SetSize(626, 50)
     for _, column in ipairs({ { "Name", "name", 16, 124 }, { "Level", "level", 148, 80 },
-        { "Region", "region", 236, 196 }, { "Last seen", "seen", 440, 88 } }) do
+        { "Region", "region", 236, 302 }, { "Last seen", "seen", 546, 96 } }) do
         local title, key = column[1], column[2]
         local header = UI:Button(page, title)
         header:SetPoint("TOPLEFT", column[3], -12)
@@ -222,9 +222,6 @@ function addon:CreateOverviewPage(panel)
         header.title = title
         page.headers[key] = header
     end
-    local actions = UI:Label(page, "Actions", 12, "muted")
-    actions:SetPoint("TOPLEFT", 536, -20)
-    actions:SetWidth(106)
     page.actionMenu = self:CreatePlayerActionMenu(page, "LockInToolsOverviewActions", function(success, message)
         panel.feedback:SetText(message or "")
         if success then panel.feedback:SetTextColor(0.4, 1, 0.4)
@@ -232,9 +229,17 @@ function addon:CreateOverviewPage(panel)
         addon:RefreshOverview()
     end, function(delta) page:SetOffset(page.offset - delta) end)
     for index = 1, VISIBLE_ROWS do
-        local row = CreateFrame("Frame", nil, page)
+        local row = CreateFrame("Button", nil, page)
         row:SetPoint("TOPLEFT", 16, -48 - (index - 1) * ROW_HEIGHT)
         row:SetSize(626, ROW_HEIGHT)
+        row:EnableMouse(true)
+        row:RegisterForClicks("RightButtonUp")
+        local function OpenActions(_, button)
+            if button ~= "RightButton" then return end
+            HideTooltip(row.levelCell)
+            page.actionMenu:Open(row.playerID, row)
+        end
+        row:SetScript("OnClick", OpenActions)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
         row.name:SetSize(124, 30)
@@ -245,6 +250,8 @@ function addon:CreateOverviewPage(panel)
         row.levelCell:SetScript("OnEnter", ProgressTooltip)
         row.levelCell:SetScript("OnLeave", HideTooltip)
         row.levelCell:SetScript("OnHide", HideTooltip)
+        -- The XP tooltip's mouse-enabled cell captures clicks before the row.
+        row.levelCell:SetScript("OnMouseUp", OpenActions)
         row:SetScript("OnHide", function() HideTooltip(row.levelCell) end)
         row.level = UI:Label(row.levelCell, "", 12)
         row.level:SetPoint("TOPLEFT", 0, -5)
@@ -261,17 +268,10 @@ function addon:CreateOverviewPage(panel)
         row.progressFill:SetHeight(3)
         row.position = UI:Label(row, "", 11, "muted")
         row.position:SetPoint("TOPLEFT", 220, -3)
-        row.position:SetSize(196, 36)
+        row.position:SetSize(302, 36)
         row.seen = UI:Label(row, "", 11, "muted")
-        row.seen:SetPoint("TOPLEFT", 424, -3)
-        row.seen:SetSize(88, 36)
-        row.actions = UI:Button(row, "Actions v")
-        row.actions:SetPoint("TOPLEFT", 520, -5)
-        row.actions:SetSize(106, 30)
-        row.actions:SetScript("OnClick", function()
-            if not row.playerID or addon:IsDataSelf(row.playerID) then return end
-            page.actionMenu:Open(row.playerID, row, row.actions)
-        end)
+        row.seen:SetPoint("TOPLEFT", 530, -3)
+        row.seen:SetSize(96, 36)
         page.rows[index] = row
     end
     local scrollbar = CreateFrame("Slider", nil, page)
@@ -353,13 +353,11 @@ function addon:RefreshOverview()
         row.playerID = player and player.id or nil
         if player then
             row.name:SetText(self:GetPlayerDisplayName(player.name))
-            row.actions:SetEnabled(not player.isSelf)
             RefreshProgress(row, player)
             row.position:SetText(Location(player))
             row.seen:SetText(player.online and "Active" or Age(player.seenAt, now))
             row:Show()
         else
-            row.actions:SetEnabled(false)
             row.levelCell.player = nil
             row.level:SetText("")
             row.progress:SetText("")

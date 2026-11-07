@@ -590,8 +590,7 @@ local function CreateRow(panel, ghost)
                 return
             end
             if not panel.actionMenu then
-                panel.actionMenu = addon:CreatePlayerActionMenu(panel, "LockInToolsRankingActions", function(_, message)
-                    if message then addon:Print(message) end
+                panel.actionMenu = addon:CreatePlayerActionMenu(panel, "LockInToolsRankingActions", function()
                     addon:RefreshRankingOverlay()
                 end)
             end

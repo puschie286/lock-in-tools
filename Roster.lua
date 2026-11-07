@@ -423,7 +423,7 @@ function addon:GetOverviewPlayers()
 end
 
 function addon:GetOverviewActionState(id)
-    local result = { invite = false, request = false }
+    local result = { invite = false, suggest = false, request = false }
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     local reason
@@ -435,14 +435,24 @@ function addon:GetOverviewActionState(id)
     elseif NativeBoolean(UnitInParty, row.name) or NativeBoolean(UnitInRaid, row.name) then
         reason = "Already in your party or raid."
     end
-    if reason then result.inviteReason, result.requestReason = reason, reason; return result end
+    if reason then
+        result.inviteReason, result.suggestReason, result.requestReason = reason, reason, reason
+        return result
+    end
+    local inviteReason
     if not C_PartyInfo or type(C_PartyInfo.InviteUnit) ~= "function" then
-        result.inviteReason = "Invitations are unavailable in this client."
-    elseif not NativeBoolean(C_PartyInfo.CanInvite) then result.inviteReason = "You cannot invite players right now."
-    elseif NativeBoolean(C_PartyInfo.IsPartyFull) then result.inviteReason = "Your party or raid is full."
-    elseif row.inParty == nil then result.inviteReason = "This player's party status is unavailable."
-    elseif row.inParty then result.inviteReason = "This player is already grouped."
-    else result.invite = true end
+        inviteReason = "Invitations are unavailable in this client."
+    elseif NativeBoolean(C_PartyInfo.IsPartyFull) then inviteReason = "Your party or raid is full."
+    elseif row.inParty == nil then inviteReason = "This player's party status is unavailable."
+    elseif row.inParty then
+        inviteReason = "This player is already grouped."
+        if Grouped() then result.partyInfo = "Already in another group" end
+    elseif Grouped() and not NativeBoolean(UnitIsGroupLeader, "player")
+        and not NativeBoolean(UnitIsGroupAssistant, "player") then result.suggest = true
+    elseif NativeBoolean(C_PartyInfo.CanInvite) then result.invite = true
+    else inviteReason = "You cannot invite players right now." end
+    if not result.invite then result.inviteReason = inviteReason or "You cannot invite players right now." end
+    if not result.suggest then result.suggestReason = inviteReason or "You cannot suggest an invitation right now." end
     if not C_PartyInfo or type(C_PartyInfo.RequestInviteFromUnit) ~= "function" then
         result.requestReason = "Join requests are unavailable in this client."
     elseif Grouped() then result.requestReason = "Leave your current party before requesting to join another."
@@ -454,13 +464,14 @@ function addon:GetOverviewActionState(id)
 end
 
 function addon:PerformOverviewAction(id, action)
-    if action ~= "invite" and action ~= "request" then return false, "Unknown party action." end
+    if action ~= "invite" and action ~= "suggest" and action ~= "request" then return false, "Unknown party action." end
     local state = self:GetOverviewActionState(id)
     if not state[action] then return false, state[action .. "Reason"] end
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     if not row then return false, "This player is no longer available." end
-    local callback = action == "invite" and C_PartyInfo.InviteUnit or C_PartyInfo.RequestInviteFromUnit
+    -- WoW routes InviteUnit from an ordinary member as a suggestion to the leader.
+    local callback = action == "request" and C_PartyInfo.RequestInviteFromUnit or C_PartyInfo.InviteUnit
     local ok = pcall(callback, row.name)
     if not ok then return false, "WoW could not process this party action. Try again." end
     return true, "Party action requested. Watch WoW's invitation notices for the result."

@@ -1418,7 +1418,7 @@ end
 -- Ranking targets current players without constructing Content; row reuse clears old interactions.
 do
     local saved = settings(SECRET, false)
-    local ranking, api, _, _, world = loadAddon(saved, false)
+    local ranking, api, messages, _, world = loadAddon(saved, false)
     local invites, requests, mayInvite, grouped = {}, {}, true, false
     local shiftDown = false
     api.IsShiftKeyDown = function() return shiftDown end
@@ -1468,12 +1468,19 @@ do
     end
     first.scripts.OnEnter(first)
     local menu = openMenu(first)
-    assert(not tooltip:IsShown() and menu.invite:IsEnabled()
-        and not menu.request:IsEnabled() and not ranking.mainPanel and not ranking.contentPanel,
+    assert(not tooltip:IsShown() and menu.party:IsShown() and menu.party.action == "invite"
+        and menu.party:GetText() == "Invite" and not ranking.mainPanel and not ranking.contentPanel,
         "right clicking dismisses hover details and offers the roster's actions independently of Content")
-    menu.invite:Click()
+    for _, button in ipairs({ menu.party, menu.showMap }) do
+        button.scripts.OnEnter(button)
+        assert(not tooltip:IsShown(), "ranking menu actions show no hover tooltips")
+        button.scripts.OnLeave(button)
+    end
+    local messageCount = #messages
+    menu.party:Click()
     assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and not menu:IsShown(),
         "the ranking invite uses the production permission check and complete player name")
+    assert(#messages == messageCount, "ranking player actions add no addon chat log entry")
     menu = openMenu(first)
     assert(menu.showMap:IsEnabled(), "right clicking a ranked player offers their shared map location")
     menu.showMap:Click()
@@ -1482,8 +1489,9 @@ do
         "ranking opens the selected player's map without creating Content or invoking party actions")
     menu = openMenu(first)
     assert(ranking:SetPositionSharing(false))
-    menu.showMap.scripts.OnClick(menu.showMap)
+    menu.showMap.scripts.OnClick(menu.showMap, "LeftButton")
     assert(#openedMaps == 1, "a stale ranking map action respects disabled position sharing")
+    assert(#messages == messageCount, "failed ranking player actions also leave addon chat unchanged")
     assert(ranking:SetPositionSharing(true))
     menu = openMenu(first)
     world.level = 35
@@ -1509,9 +1517,8 @@ do
     menu = openMenu(alpha)
     world.now = world.now + 90
     panel.scripts.OnUpdate(panel, 1)
-    assert(menu:IsShown() and not menu.invite:IsEnabled() and not menu.request:IsEnabled()
-        and menu.invite.reason == "No recent contact with this player.",
-        "offline players keep their ranking while current action eligibility becomes disabled")
+    assert(menu:IsShown() and not menu.party:IsShown() and not menu.party.action,
+        "offline players keep their ranking while the unavailable party action is hidden")
     alpha.scripts.OnEnter(alpha)
     api.UIParent:Hide()
     assert(not menu:IsShown() and not tooltip:IsShown(), "hiding the native interface dismisses ranking interactions")
@@ -1627,8 +1634,8 @@ do
     readonlyPanel.rows[1]:Click("RightButton")
     local readonlyMenu = readonlyPanel.actionMenu
     assert(readonlyMenu and readonlyMenu:IsShown(), "future-schema profiles permit viewing the action list")
-    assert(not readonlyMenu.invite:IsEnabled() and not readonlyMenu.request:IsEnabled(),
-        "read-only ranking party actions remain unavailable")
+    assert(not readonlyMenu.party:IsShown() and not readonlyMenu.party.action,
+        "read-only ranking hides the unavailable party action")
     readonly:OpenOptions("ranking")
     assert(not readonly.optionsPanel.rankingEnabled:IsEnabled()
         and not readonly.optionsPanel.rankingBurningEffect:IsEnabled()

@@ -70,6 +70,9 @@ local function loadOptions(uiAddon, uiEnvironment)
         self.visible = self:IsVisible()
     end
     function methods:SetScale(scale) self.scale = scale end
+    function methods:GetEffectiveScale()
+        return (self.scale or 1) * (self.parent and self.parent:GetEffectiveScale() or 1)
+    end
     function methods:GetFrameLevel() return self.frameLevel or 0 end
     function methods:SetFrameLevel(level) self.frameLevel = level end
     function methods:EnableMouseWheel(enabled) self.mouseWheel = enabled end
@@ -171,6 +174,7 @@ local function loadOptions(uiAddon, uiEnvironment)
         return texture
     end
     function methods:IsShown() return self.shown end
+    function methods:IsMouseOver() return self.mouseOver == true end
     function methods:IsVisible()
         return self.shown and (not self.parent or not self.parent.IsVisible or self.parent:IsVisible())
     end

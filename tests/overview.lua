@@ -342,6 +342,90 @@ do
     assert(#world.joins == 1 and #world.invites == 1)
 end
 
+-- Native invite suggestions are exclusive with direct invitations and recheck roles.
+do
+    local addon, world = newAddon()
+    world:login(); world:connect()
+    assert(world:peer("Solo-TestRealm", 20, false, true, false, false))
+    local function assertAction(action)
+        local state = addon:GetOverviewActionState("solo-testrealm")
+        for _, token in ipairs({ "invite", "suggest", "request" }) do
+            assert(state[token] == (token == action), "Only the currently available party action is enabled")
+        end
+    end
+    assertAction("invite")
+    world.grouped, world.members = true, 2
+    assertAction("suggest")
+    local canInvite = world.environment.C_PartyInfo.CanInvite
+    world.environment.C_PartyInfo.CanInvite = function() return true end
+    assertAction("suggest")
+    assert(not addon:PerformOverviewAction("solo-testrealm", "invite"),
+        "A stale direct invitation cannot become a suggestion after losing invite permission")
+    world.environment.C_PartyInfo.CanInvite = canInvite
+    assert(addon:PerformOverviewAction("solo-testrealm", "suggest"))
+    assert(#world.invites == 1 and world.invites[1] == "Solo-TestRealm" and #world.joins == 0,
+        "An ordinary member uses InviteUnit with the complete name for a native invitation suggestion")
+    world.leader = true
+    assertAction("invite")
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"),
+        "A stale suggestion cannot send a direct invite after becoming leader")
+    world.environment.C_PartyInfo.CanInvite = function() return false end
+    assertAction(nil)
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"),
+        "A leader without native invite permission cannot fall back to a suggestion")
+    world.environment.C_PartyInfo.CanInvite = canInvite
+    world.leader, world.assistant = false, true
+    assertAction("invite")
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"),
+        "An assistant retains the direct invitation action instead of a suggestion")
+    world.assistant, world.members = false, 5
+    assertAction(nil)
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "A full party cannot suggest another player")
+    world.members, world.raid = 40, true
+    assertAction(nil)
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "A full raid cannot suggest another player")
+    world.members, world.raid, world.sameParty["solo-testrealm"] = 2, false, true
+    assertAction(nil)
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "Existing members cannot be suggested again")
+    world.sameParty = {}
+    assert(not addon:PerformOverviewAction("self-testrealm", "suggest"), "The local player cannot be suggested")
+    assert(world:peer("Grouped-TestRealm", 20, true, true, false, false))
+    local groupedPeer = addon:GetOverviewActionState("grouped-testrealm")
+    assert(groupedPeer.partyInfo == "Already in another group" and not groupedPeer.invite and not groupedPeer.request
+        and not groupedPeer.suggest
+        and not addon:PerformOverviewAction("grouped-testrealm", "suggest"), "Already grouped peers cannot be suggested")
+    world.grouped = false
+    groupedPeer = addon:GetOverviewActionState("grouped-testrealm")
+    assert(groupedPeer.request and not groupedPeer.partyInfo, "Solo players retain Request to join without group information")
+    world.grouped, world.sameParty["grouped-testrealm"] = true, true
+    assert(not addon:GetOverviewActionState("grouped-testrealm").partyInfo, "Own group membership takes precedence over group information")
+    world.sameParty, world.members = {}, 5
+    assert(not addon:GetOverviewActionState("grouped-testrealm").partyInfo, "A full local party keeps its existing action guards")
+    world.members = 2
+    addon.rosterState.peers["grouped-testrealm"].statusSynchronized = false
+    assert(not addon:GetOverviewActionState("grouped-testrealm").partyInfo, "Unsynchronized status cannot claim another group")
+    addon.rosterState.peers["grouped-testrealm"].statusSynchronized = true
+    assert(world:status("Unknown-TestRealm", { level = 20, xpState = "unavailable" }))
+    assert(not addon:GetOverviewActionState("unknown-testrealm").suggest
+        and not addon:GetOverviewActionState("unknown-testrealm").partyInfo
+        and not addon:PerformOverviewAction("unknown-testrealm", "suggest"), "Missing party metadata cannot authorize a suggestion")
+    local inviteUnit = world.environment.C_PartyInfo.InviteUnit
+    world.environment.C_PartyInfo.InviteUnit = nil
+    assertAction(nil)
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "Suggestions require the native invitation API")
+    world.environment.C_PartyInfo.InviteUnit = inviteUnit
+    assertAction("suggest")
+    world.grouped, world.members = false, 0
+    assertAction("invite")
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "Leaving the group invalidates a stale suggestion")
+    world.grouped, world.members = true, 2
+    world:advance(91)
+    assertAction(nil)
+    assert(not addon:GetOverviewActionState("grouped-testrealm").partyInfo, "Offline status cannot claim another group")
+    assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "Stale contact cannot authorize a suggestion")
+    assert(#world.invites == 1 and #world.joins == 0, "Rejected suggestions make no native party calls")
+end
+
 -- Unsupported APIs, read-only settings and logout cannot mutate or send on a dead lifecycle.
 do
     local addon, world = newAddon()
