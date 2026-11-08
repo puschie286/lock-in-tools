@@ -12,6 +12,7 @@ local statusEntry = manifest:find("\nDataStatus.lua\n", 1, true)
 local burnedEntry = manifest:find("\nBurned.lua\n", 1, true)
 local positionEntry = manifest:find("\nPosition.lua\n", 1, true)
 local rosterEntry = manifest:find("\nRoster.lua\n", 1, true)
+local friendsEntry = manifest:find("\nFriends.lua\n", 1, true)
 local rankingEntry = manifest:find("\nRanking.lua\n", 1, true)
 local themeEntry = manifest:find("\nTheme.lua\n", 1, true)
 local skinEntry = manifest:find("\nRestedXPSkin.lua\n", 1, true)
@@ -24,8 +25,8 @@ assert(dataEntry and statusEntry and positionEntry and rosterEntry
     "the native addon manifest must load status synchronization after transport and before its consumers")
 assert(burnedEntry and statusEntry < burnedEntry and burnedEntry < overlayEntry,
     "the native manifest must load burned status after synchronization and before the ranking overlay")
-assert(rankingEntry and themeEntry and overlayEntry and optionsEntry
-    and rosterEntry < rankingEntry and rankingEntry < themeEntry
+assert(friendsEntry and rankingEntry and themeEntry and overlayEntry and optionsEntry
+    and rosterEntry < friendsEntry and friendsEntry < rankingEntry and rankingEntry < themeEntry
     and themeEntry < overlayEntry and overlayEntry < optionsEntry,
     "the native manifest must load the ranking model after its data and the overlay after its theme")
 assert(skinEntry and themeEntry < skinEntry and skinEntry < optionsEntry,

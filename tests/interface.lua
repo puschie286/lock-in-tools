@@ -146,4 +146,67 @@ do
         "reopening catches up native sharing preferences changed while hidden")
 end
 
+-- The Friends table and overlay consume the same native observation without a sharing route.
+do
+    local addon, api, _, fire, world = loadAddon(settings(), false)
+    local friend = { clientProgram = "WoW", wowProjectID = 18, isInCurrentRegion = true,
+        isOnline = true, isAppearOffline = false, characterName = "Dara Stone", characterLevel = 18,
+        areaName = "Elwynn Forest" }
+    local other = { clientProgram = "WoW", wowProjectID = 18, isInCurrentRegion = true,
+        isOnline = true, isAppearOffline = false, characterName = "Vela Ash", characterLevel = 28 }
+    api.WOW_PROJECT_CAMELOT, api.BNET_CLIENT_WOW = 18, "WoW"
+    api.WOW_PROJECT_ID = api.WOW_PROJECT_CAMELOT
+    api.BNConnected = function() return true end
+    api.BNGetNumFriends = function() return 2 end
+    api.C_BattleNet = {
+        GetFriendAccountInfo = function(index) return { bnetAccountID = index, appearOffline = false } end,
+        GetFriendNumGameAccounts = function() return 1 end,
+        GetFriendGameAccountInfo = function(index) return index == 1 and friend or other end,
+    }
+    world:initialize()
+    loadOptions(addon, api)
+    addon:OpenContent()
+    local content = addon.contentPanel
+    content.tabs.friends:Click()
+    local row, otherRow = unpack(content.pages.friends.rows, 1, 2)
+    assert(content.tabs.overview:GetText() == "Rankings")
+    assert(row.name:GetText() == "Dara Stone" and row.level:GetText() == "18" and row.status:GetText() == "Online")
+    assert(addon:SetRankingEnabled(true))
+    local overlay = addon.rankingOverlay
+    assert(not overlay.rows[1]:IsShown(), "native friend data is opt-in for ranking")
+    row.ranking:Click()
+    assert(row.ranking:GetChecked() and not otherRow.ranking:GetChecked()
+        and addon:IsRankingPlayerShown("dara-stone", false) and overlay.rows[1].name:GetText() == "Dara Stone"
+        and overlay.rows[1].progress:GetText() == "XP unavailable")
+    assert(#addon:GetPlayerRanking().players == 2, "one selected friend ranks alongside the local character")
+    friend.characterLevel, friend.areaName = 19, "Westfall"
+    fire("BN_FRIEND_INFO_CHANGED", 1)
+    assert(row.level:GetText() == "19" and row.zone:GetText() == "Westfall"
+        and overlay.rows[1].level:GetText() == "19", "native friend events update both visible views")
+    assert(not addon:IsDataConnected() and #world.dataSends == 0 and #world.statusSends == 0)
+
+    world.guild = true
+    fire("PLAYER_GUILD_UPDATE", "player")
+    local sharedName = "Dara Stone-OtherRealm"
+    assert(addon:ReceivePlayerStatus(sharedName, { level = 19, xp = 50, xpMax = 100, xpState = "known" }, 1, 1))
+    assert(row.name:GetText() == "Vela Ash" and not otherRow:IsShown(),
+        "a shared surname alias removes the duplicate while Friends is visible")
+    local standings = addon:GetPlayerRanking().players
+    assert(#standings == 2 and standings[1].id == sharedName:lower() and standings[1].xp == 50,
+        "different realm suffixes still produce one ranked friend with shared XP")
+    content.tabs.overview:Click()
+    local sharedRow = content.pages.overview.rows[2]
+    assert(sharedRow.playerID == sharedName:lower() and sharedRow.ranking:GetChecked())
+    sharedRow.ranking:Click()
+    assert(not sharedRow.ranking:GetChecked() and #addon:GetPlayerRanking().players == 1,
+        "unchecking the shared row also excludes its native friend entry")
+    content.tabs.friends:Click()
+    assert(row.name:GetText() == "Vela Ash" and not otherRow:IsShown(), "an unchecked shared player stays in Rankings")
+    world.guild = false
+    fire("PLAYER_GUILD_UPDATE", "player")
+    assert(row.name:GetText() == "Dara Stone" and not row.ranking:GetChecked(),
+        "the same visibility choice follows the character back to Friends")
+    assert(#world.notificationErrors == 0)
+end
+
 print("PASS: shared window navigation, placement and view refreshes")

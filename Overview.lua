@@ -1,6 +1,7 @@
 local _, addon = ...
 local UI = addon.Theme
 local VISIBLE_ROWS, ROW_HEIGHT = 8, 40
+local SHOWN_COLUMN_X, SHOWN_COLUMN_WIDTH = 562, 80
 local PARTY_ACTION_LABELS = { invite = "Invite", suggest = "Suggest Invite", request = "Request to join" }
 
 local function Age(stamp, now)
@@ -175,13 +176,18 @@ addon:RegisterGameEvents({ "GLOBAL_MOUSE_UP" }, function(self, _, button)
     end
 end)
 
-local function SortPlayers(page, players)
+local function SortPlayers(page, players, displayName)
     local key = page.sortKey
     if not key then return end
     local function Value(player)
-        if key == "name" then return addon:GetPlayerDisplayName(player.name):lower() end
+        if key == "name" then return displayName(player):lower() end
         if key == "region" then return player.region and player.region:lower() end
         if key == "seen" then return player.seenAt end
+        if key == "zone" then return player.zone and player.zone:lower() end
+        if key == "status" then
+            if player.online ~= nil then return player.online and 1 or 0 end
+            return nil
+        end
         return player.level
     end
     table.sort(players, function(left, right)
@@ -196,18 +202,16 @@ local function SortPlayers(page, players)
     end)
 end
 
-function addon:CreateOverviewPage(panel)
+local function CreatePlayerTable(panel, columns, refresh)
     local page = UI:Section(panel, 20, 116, 680, 414, "")
-    panel.pages.overview, panel.overviewPage = page, page
-    panel.feedback = UI:Label(page, "", 13)
-    panel.feedback:SetPoint("TOPLEFT", 16, -378)
-    panel.feedback:SetSize(648, 26)
+    page.feedback = UI:Label(page, "", 13)
+    page.feedback:SetPoint("TOPLEFT", 16, -378)
+    page.feedback:SetSize(648, 26)
     page.offset, page.rows, page.headers = 0, {}, {}
     page.empty = UI:Label(page, "", 13, "muted")
     page.empty:SetPoint("TOPLEFT", 16, -56)
     page.empty:SetSize(626, 50)
-    for _, column in ipairs({ { "Name", "name", 16, 124 }, { "Level", "level", 148, 80 },
-        { "Region", "region", 236, 302 }, { "Last seen", "seen", 546, 96 } }) do
+    for _, column in ipairs(columns) do
         local title, key = column[1], column[2]
         local header = UI:Button(page, title)
         header:SetPoint("TOPLEFT", column[3], -12)
@@ -216,16 +220,83 @@ function addon:CreateOverviewPage(panel)
         header:GetFontString():SetPoint("LEFT", 4, 0)
         header:SetScript("OnClick", function()
             if page.sortKey == key then page.sortDescending = not page.sortDescending
-            else page.sortKey, page.sortDescending = key, key == "seen" end
+            else page.sortKey, page.sortDescending = key, key == "seen" or key == "status" end
             page:SetOffset(0)
         end)
         header.title = title
         page.headers[key] = header
     end
+    local shownHeader = UI:Label(page, "Shown", 13, "heading")
+    shownHeader:SetPoint("TOPLEFT", SHOWN_COLUMN_X, -12)
+    shownHeader:SetSize(SHOWN_COLUMN_WIDTH, 28)
+    shownHeader:SetJustifyH("CENTER")
+    local scrollbar = CreateFrame("Slider", nil, page)
+    page.scrollbar = scrollbar
+    scrollbar:SetPoint("TOPLEFT", 650, -48)
+    scrollbar:SetSize(14, VISIBLE_ROWS * ROW_HEIGHT)
+    scrollbar:SetOrientation("VERTICAL")
+    scrollbar:SetValueStep(1)
+    local track = scrollbar:CreateTexture(nil, "BACKGROUND")
+    track:SetAllPoints(scrollbar)
+    track:SetColorTexture(0.025, 0.035, 0.05, 1)
+    scrollbar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    scrollbar:GetThumbTexture():SetSize(20, 28)
+    scrollbar:SetScript("OnValueChanged", function(_, value)
+        if not page.refreshing then page:SetOffset(value) end
+    end)
+    function page:SetOffset(value)
+        if self.ClearInteractions then self:ClearInteractions() end
+        self.offset = math.max(0, math.min(math.floor(value + 0.5), self.maxOffset or 0))
+        refresh(addon)
+    end
+    page:EnableMouseWheel(true)
+    scrollbar:EnableMouseWheel(true)
+    local function Scroll(_, delta) page:SetOffset(page.offset - delta) end
+    page:SetScript("OnMouseWheel", Scroll)
+    scrollbar:SetScript("OnMouseWheel", Scroll)
+    return page
+end
+
+local function CreateShownCheckbox(page, row, defaultShown)
+    local ranking = UI:Checkbox(row)
+    row.ranking = ranking
+    ranking:SetPoint("LEFT", SHOWN_COLUMN_X - 16 + (SHOWN_COLUMN_WIDTH - 28) / 2, 0)
+    ranking:SetSize(28, 28)
+    ranking:SetScript("OnClick", function(button)
+        local id = row.playerID
+        if not id or not row:IsVisible() then return end
+        local success, message = addon:SetRankingPlayerShown(id, button:GetChecked() and true or false)
+        if not success then button:SetChecked(addon:IsRankingPlayerShown(id, defaultShown)) end
+        page.feedback:SetText(success and "" or (message or "Unable to change ranking visibility."))
+        if not success then page.feedback:SetTextColor(1, 0.35, 0.35) end
+    end)
+    ranking:SetScript("OnEnter", function(button)
+        if not row.playerID or not GameTooltip then return end
+        GameTooltip_SetDefaultAnchor(GameTooltip, button)
+        GameTooltip:SetText("Show in ranking overlay")
+        GameTooltip:AddLine("Include this character when ranking data is available.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    ranking:SetScript("OnLeave", HideTooltip)
+    ranking:SetScript("OnHide", HideTooltip)
+    return ranking
+end
+
+local function RefreshShown(row, defaultShown)
+    row.ranking:SetChecked(addon:IsRankingPlayerShown(row.playerID, defaultShown))
+    row.ranking:SetEnabled(not addon.savedDataReadOnly)
+end
+
+function addon:CreateOverviewPage(panel)
+    local page = CreatePlayerTable(panel, { { "Name", "name", 16, 124 }, { "Level", "level", 148, 80 },
+        { "Region", "region", 236, 222 }, { "Last seen", "seen", 466, 88 } }, function(self)
+        self:RefreshOverview()
+    end)
+    panel.pages.overview, panel.overviewPage = page, page
     page.actionMenu = self:CreatePlayerActionMenu(page, "LockInToolsOverviewActions", function(success, message)
-        panel.feedback:SetText(message or "")
-        if success then panel.feedback:SetTextColor(0.4, 1, 0.4)
-        else panel.feedback:SetTextColor(1, 0.35, 0.35) end
+        page.feedback:SetText(message or "")
+        if success then page.feedback:SetTextColor(0.4, 1, 0.4)
+        else page.feedback:SetTextColor(1, 0.35, 0.35) end
         addon:RefreshOverview()
     end, function(delta) page:SetOffset(page.offset - delta) end)
     for index = 1, VISIBLE_ROWS do
@@ -237,9 +308,11 @@ function addon:CreateOverviewPage(panel)
         local function OpenActions(_, button)
             if button ~= "RightButton" then return end
             HideTooltip(row.levelCell)
+            HideTooltip(row.ranking)
             page.actionMenu:Open(row.playerID, row)
         end
         row:SetScript("OnClick", OpenActions)
+        CreateShownCheckbox(page, row, true):SetScript("OnMouseUp", OpenActions)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
         row.name:SetSize(124, 30)
@@ -268,37 +341,19 @@ function addon:CreateOverviewPage(panel)
         row.progressFill:SetHeight(3)
         row.position = UI:Label(row, "", 11, "muted")
         row.position:SetPoint("TOPLEFT", 220, -3)
-        row.position:SetSize(302, 36)
+        row.position:SetSize(222, 36)
         row.seen = UI:Label(row, "", 11, "muted")
-        row.seen:SetPoint("TOPLEFT", 530, -3)
-        row.seen:SetSize(96, 36)
+        row.seen:SetPoint("TOPLEFT", 450, -3)
+        row.seen:SetSize(88, 36)
         page.rows[index] = row
     end
-    local scrollbar = CreateFrame("Slider", nil, page)
-    page.scrollbar = scrollbar
-    scrollbar:SetPoint("TOPLEFT", 650, -48)
-    scrollbar:SetSize(14, VISIBLE_ROWS * ROW_HEIGHT)
-    scrollbar:SetOrientation("VERTICAL")
-    scrollbar:SetValueStep(1)
-    local track = scrollbar:CreateTexture(nil, "BACKGROUND")
-    track:SetAllPoints(scrollbar)
-    track:SetColorTexture(0.025, 0.035, 0.05, 1)
-    scrollbar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
-    scrollbar:GetThumbTexture():SetSize(20, 28)
-    scrollbar:SetScript("OnValueChanged", function(_, value)
-        if not page.refreshing then page:SetOffset(value) end
-    end)
-    function page:SetOffset(value)
+    function page:ClearInteractions()
         self.actionMenu:Hide()
-        for _, row in ipairs(self.rows) do HideTooltip(row.levelCell) end
-        self.offset = math.max(0, math.min(math.floor(value + 0.5), self.maxOffset or 0))
-        addon:RefreshOverview()
+        for _, row in ipairs(self.rows) do
+            HideTooltip(row.levelCell)
+            HideTooltip(row.ranking)
+        end
     end
-    page:EnableMouseWheel(true)
-    scrollbar:EnableMouseWheel(true)
-    local function Scroll(_, delta) page:SetOffset(page.offset - delta) end
-    page:SetScript("OnMouseWheel", Scroll)
-    scrollbar:SetScript("OnMouseWheel", Scroll)
     function page:Activate()
         if self.active or not self:IsVisible() then return end
         self.active, self.elapsed = true, 0
@@ -314,21 +369,15 @@ function addon:CreateOverviewPage(panel)
     function page:Deactivate()
         self.active = false
         self:SetScript("OnUpdate", nil)
-        self.actionMenu:Hide()
-        for _, row in ipairs(self.rows) do HideTooltip(row.levelCell) end
+        self:ClearInteractions()
     end
     page:SetScript("OnShow", function() page:Activate() end)
     page:SetScript("OnHide", function() page:Deactivate() end)
     return page
 end
 
-function addon:RefreshOverview()
-    local panel = self.contentPanel
-    local page = panel and panel.overviewPage
-    if not page or not page:IsVisible() or panel.selectedTab ~= "overview" then return end
-    local players, now = self:GetOverviewPlayers(), GetServerTime()
-    for _, player in ipairs(players) do player.region = Region(player) end
-    SortPlayers(page, players)
+local function RefreshPlayerTable(page, players, displayName)
+    SortPlayers(page, players, displayName)
     page.maxOffset = math.max(0, #players - VISIBLE_ROWS)
     page.offset = math.max(0, math.min(page.offset, page.maxOffset))
     page.refreshing = true
@@ -339,23 +388,41 @@ function addon:RefreshOverview()
     for key, header in pairs(page.headers) do
         header:SetText(header.title .. (key == page.sortKey and (page.sortDescending and " v" or " ^") or ""))
     end
+    if #players == 0 then page.empty:Show() else page.empty:Hide() end
+end
+
+local function OverviewName(player)
+    return addon:GetPlayerDisplayName(player.name)
+end
+
+function addon:RefreshOverview()
+    local panel = self.contentPanel
+    local page = panel and panel.overviewPage
+    if not page or not page:IsVisible() or panel.selectedTab ~= "overview" then return end
+    local players, now = self:GetOverviewPlayers(), GetServerTime()
+    for _, player in ipairs(players) do player.region = Region(player) end
+    RefreshPlayerTable(page, players, OverviewName)
     if not self:HasDataGroup() then
         page.empty:SetText("Join a guild, party or raid with sharing enabled to see your friends.")
     elseif #players == 0 then
         page.empty:SetText("Waiting for players on this realm and faction.")
     end
-    if #players == 0 then page.empty:Show() else page.empty:Hide() end
     local menu = page.actionMenu
     for index, row in ipairs(page.rows) do
         local player = players[page.offset + index]
-        if menu:IsShown() and row.playerID ~= (player and player.id) then menu:Hide() end
-        if row.playerID ~= (player and player.id) then HideTooltip(row.levelCell) end
-        row.playerID = player and player.id or nil
+        local id = player and player.id or nil
+        if row.playerID ~= id then
+            if menu:IsShown() then menu:Hide() end
+            HideTooltip(row.levelCell)
+            HideTooltip(row.ranking)
+        end
+        row.playerID = id
         if player then
-            row.name:SetText(self:GetPlayerDisplayName(player.name))
+            row.name:SetText(OverviewName(player))
             RefreshProgress(row, player)
             row.position:SetText(Location(player))
             row.seen:SetText(player.online and "Active" or Age(player.seenAt, now))
+            RefreshShown(row, true)
             row:Show()
         else
             row.levelCell.player = nil
@@ -369,10 +436,83 @@ function addon:RefreshOverview()
     if menu:IsShown() then menu:Refresh() end
 end
 
-function addon:OpenOverview()
-    self:OpenContent()
+local FRIEND_COLUMNS = { { "Name", "name", 16, 204 }, { "Level", "level", 228, 64 },
+    { "Zone", "zone", 300, 162 }, { "Status", "status", 470, 84 } }
+
+function addon:CreateFriendsPage(panel)
+    local page = CreatePlayerTable(panel, FRIEND_COLUMNS, function(self) self:RefreshFriends() end)
+    panel.pages.friends = page
+    for index = 1, VISIBLE_ROWS do
+        local row = CreateFrame("Frame", nil, page)
+        row:SetPoint("TOPLEFT", 16, -48 - (index - 1) * ROW_HEIGHT)
+        row:SetSize(626, ROW_HEIGHT)
+        for _, column in ipairs(FRIEND_COLUMNS) do
+            local key = column[2]
+            local primary = key == "name" or key == "level"
+            local label = UI:Label(row, "", primary and 12 or 11, primary and "text" or "muted")
+            label:SetPoint("TOPLEFT", column[3] - 16, -3)
+            label:SetSize(column[4], 36)
+            row[key] = label
+        end
+        CreateShownCheckbox(page, row, false)
+        page.rows[index] = row
+    end
+    page:SetScript("OnShow", function() addon:RefreshFriends() end)
+    return page
 end
 
-for _, notification in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED", "ROSTER_CHANGED" }) do
-    addon:RegisterNotification(notification, function() addon:RefreshOverview() end)
+local function FriendName(player)
+    return player.displayName or player.name
+end
+
+function addon:RefreshFriends()
+    local panel = self.contentPanel
+    local page = panel and panel.pages.friends
+    if not page or not page:IsVisible() or panel.selectedTab ~= "friends" then return end
+    local friends, players = self:GetFriendsPlayers(), {}
+    if #friends > 0 then
+        local inRankings = {}
+        for _, player in ipairs(self:GetOverviewPlayers()) do
+            inRankings[player.id] = true
+            local key = self:GetRankingPlayerKey(player.id)
+            if key then inRankings[key] = true end
+        end
+        -- Keep the native snapshot intact for the overlay. Only this tab omits
+        -- friends who can already be managed in Rankings.
+        for _, friend in ipairs(friends) do
+            if not inRankings[friend.id] and not inRankings[friend.aliasID] then
+                players[#players + 1] = friend
+            end
+        end
+    end
+    page.empty:SetText(#friends > 0 and "Your available friends are already listed in Rankings."
+        or "Your WoW friends appear here when their character information is available.")
+    RefreshPlayerTable(page, players, FriendName)
+    for index, row in ipairs(page.rows) do
+        local player = players[page.offset + index]
+        local id = player and player.id or nil
+        if row.playerID ~= id then HideTooltip(row.ranking) end
+        row.playerID = id
+        if player then
+            row.name:SetText(FriendName(player))
+            row.level:SetText(player.level and tostring(player.level) or "—")
+            row.zone:SetText(player.zone or "—")
+            row.status:SetText(player.online and "Online" or (player.online == false and "Offline" or "Unknown"))
+            RefreshShown(row, false)
+            row:Show()
+        else row:Hide() end
+    end
+end
+
+function addon:OpenOverview()
+    self:OpenContent("overview")
+end
+
+addon:RegisterNotification("POSITION_CONTACT_CHANGED", function() addon:RefreshOverview() end)
+for _, notification in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "ROSTER_CHANGED", "FRIENDS_CHANGED",
+    "RANKING_CHANGED" }) do
+    addon:RegisterNotification(notification, function()
+        addon:RefreshOverview()
+        addon:RefreshFriends()
+    end)
 end

@@ -585,20 +585,41 @@ function addon:OpenOptions(category)
     ShowPanel(self.optionsPanel)
 end
 
+local function RefreshContentFeedback(panel)
+    if addon.savedDataReadOnly then
+        SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
+    end
+end
+
 local function CreateContentPanel()
     local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
-    panel.selectedTab = "overview"
     addon:CreateOverviewPage(panel)
+    addon:CreateFriendsPage(panel)
 
-    panel.tabs.overview = UI:Button(panel, "Overview", "tab")
-    panel.tabs.overview:SetPoint("TOPLEFT", 20, -66)
-    panel.tabs.overview:SetSize(130, 34)
-    UI:SetTabSelected(panel.tabs.overview, true)
     panel.SelectTab = function(name)
-        if name == "overview" then panel.overviewPage:Activate() end
+        local page, previous = panel.pages[name], panel.selectedTab
+        if not page or previous == name then return end
+        if previous then
+            panel.pages[previous]:Hide()
+            UI:SetTabSelected(panel.tabs[previous], false)
+        end
+        panel.selectedTab, panel.feedback = name, page.feedback
+        SetFeedback(panel)
+        RefreshContentFeedback(panel)
+        UI:SetTabSelected(panel.tabs[name], true)
+        page:Show()
     end
-    panel.tabs.overview:SetScript("OnClick", function() panel.SelectTab("overview") end)
+    for index, entry in ipairs({ { "overview", "Rankings" }, { "friends", "Friends" } }) do
+        local name = entry[1]
+        local tab = UI:Button(panel, entry[2], "tab")
+        tab:SetPoint("TOPLEFT", 20 + (index - 1) * 140, -66)
+        tab:SetSize(130, 34)
+        tab:SetScript("OnClick", function() panel.SelectTab(name) end)
+        panel.tabs[name] = tab
+        panel.pages[name]:Hide()
+    end
+    panel.SelectTab("overview")
 
     panel.options = UI:Button(panel, "Settings")
     panel.options:SetPoint("TOPRIGHT", -54, -12)
@@ -607,36 +628,26 @@ local function CreateContentPanel()
 
     panel:SetScript("OnShow", function()
         SetFeedback(panel)
-        addon:RefreshContent()
-        panel.overviewPage:Activate()
-    end)
-    panel:SetScript("OnHide", function()
-        panel.overviewPage:Deactivate()
+        RefreshContentFeedback(panel)
     end)
     return panel
 end
 
-local function RefreshContentFeedback(self)
+function addon:RefreshContent()
     local panel = self.contentPanel
     if not panel or not self.initialized then return end
-    if self.savedDataReadOnly then
-        SetFeedback(panel, "Update LockInTools before changing saved preferences.", true)
-    end
+    if panel.selectedTab == "friends" then self:RefreshFriends() else self:RefreshOverview() end
+    RefreshContentFeedback(panel)
 end
 
-function addon:RefreshContent()
-    if not self.contentPanel or not self.initialized then return end
-    self:RefreshOverview()
-    RefreshContentFeedback(self)
-end
-
-function addon:OpenContent()
+function addon:OpenContent(tab)
     if not self.initialized then
         self:Print("Still loading. Please try again after login.")
         return
     end
 
     if not self.contentPanel then self.contentPanel = CreateContentPanel() end
+    if tab then self.contentPanel.SelectTab(tab) end
     ShowPanel(self.contentPanel)
     self:RefreshContent()
     if not self.savedDataReadOnly then

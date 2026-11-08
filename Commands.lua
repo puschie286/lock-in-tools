@@ -1,9 +1,9 @@
 local _, addon = ...
 
 function addon:ShowHelp()
-    self:Print("/lit or /lit content - Open Content and your player overview.")
+    self:Print("/lit or /lit content - Open Content.")
     self:Print("/lit options - Open Settings for sharing and features.")
-    self:Print("/lit overview - Show players and party actions.")
+    self:Print("/lit overview - Open the Rankings tab.")
     self:Print("/lit ranking [on|off] - Toggle the player ranking overlay; hold Shift and drag its title or a player row to move it.")
     self:Print("/lit rxp [import] - Open the local RestedXP import helper.")
     self:Print("/lit rxp cleanup - Remove old RestedXP data from LockInTools settings.")

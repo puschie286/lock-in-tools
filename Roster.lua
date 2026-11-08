@@ -361,8 +361,10 @@ end
 -- Rows cover discovered characters, not every guild/group member or distinct person.
 -- Progress is reported, not independently verified; online means recent contact,
 -- so contact expiry cannot confirm a logout.
-function addon:GetOverviewPlayers()
-    if not self.initialized or not self:HasDataGroup() or not self.rosterState then return {} end
+function addon:GetOverviewPlayers(includeSoloSelf)
+    if not self.initialized or not self.rosterState then return {} end
+    local hasDataGroup = self:HasDataGroup()
+    if not hasDataGroup and not includeSoloSelf then return {} end
     local rows, byID = {}, {}
     local function Add(id, peer, isSelf)
         local row = { id = id, name = peer.name, level = peer.level, seenAt = peer.seenAt, isSelf = isSelf,
@@ -401,6 +403,7 @@ function addon:GetOverviewPlayers()
             end
         end
     end
+    if not hasDataGroup then return rows end
     for id, peer in pairs(self.rosterState.peers) do
         if id ~= ownID and not self:IsDataSelf(peer.name) then Add(id, peer, false) end
     end

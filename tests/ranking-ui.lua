@@ -560,6 +560,39 @@ do
         "closing ranking refreshes its visibility checkbox while retaining the Settings page")
 end
 
+-- Native friend standings render while solo and update without a shared progress report.
+do
+    local saved = settings(SECRET, false)
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    loadOverlay(ranking, api)
+    local friend = { id = "alex-wren", name = "Alex-Wren", displayName = "Alex Wren", level = 30,
+        online = true, zone = "Elwynn Forest" }
+    local other = { id = "bea-ivy", name = "Bea-Ivy", level = 40, online = true }
+    function ranking:GetFriendsPlayers() return { friend, other } end
+    assert(ranking:SetRankingPlayerShown(friend.id, true) and ranking:SetRankingEnabled(true))
+    local panel = ranking.rankingOverlay
+    local first = panel.rows[1]
+    assert(saved.ranking.shownPlayers[friend.id] and first.player.friendOnly and first.name:GetText() == "Alex Wren"
+        and first.level:GetText() == "30" and first.rank:GetText() == "1" and not panel.empty:IsShown()
+        and first.progress:GetText() == "XP unavailable" and not first.progressTrack:IsShown()
+        and panel.rows[2].player.isSelf and panel.rows[2].rank:GetText() == "2",
+        "The solo ranking shows the native friend's full name and level beside the player's own XP")
+    first:Click("RightButton")
+    assert(not panel.actionMenu, "A native level-only friend cannot open actions that need a shared roster report")
+    first.scripts.OnEnter(first)
+    assert(api.GameTooltip:IsShown() and api.GameTooltip.lines[1] == "Lv 30 - XP unavailable"
+        and api.GameTooltip.lines[2] == "Elwynn Forest", "Friend tooltips use the native zone and describe the missing XP")
+    friend.level, friend.online = 31, false
+    ranking:Notify("FRIENDS_CHANGED")
+    assert(first.level:GetText() == "31" and first.player.stale and first.baseAlpha == 0.65,
+        "A native presence or level update immediately repaints the visible overlay")
+    assert(ranking:SetRankingPlayerShown(friend.id, false))
+    assert(saved.ranking.shownPlayers[friend.id] == false and panel:IsVisible() and panel.empty:IsShown()
+        and not panel.rows[1].player and not panel.rows[2].player,
+        "Turning off friend inclusion removes the solo standings while keeping the overlay enabled")
+end
+
 -- Five pooled leaders and a separate local row preserve actual ranks and progress states.
 do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)

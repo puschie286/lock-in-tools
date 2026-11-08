@@ -312,23 +312,151 @@ do
     assert(#ranking.players == 0 and ranking.own == nil)
 end
 
+-- Native friends add level-only standings without altering a shared XP report for the same character.
+do
+    local addon, world = newAddon()
+    world.environment.GetTime = function() return 0 end
+    local pin = { id = "alex wren-testrealm", name = "Alex Wren", map = 37, online = false }
+    local reporter = player("reporter-testrealm", 30, 80, 100)
+    reporter.seenAt = 2000000000
+    world.players = { player("self", 29, 25, 100, true), reporter, pin }
+    local friends = {
+        { id = "alex-wren", aliasID = pin.id, name = "Alex-Wren", displayName = "Alex Wren",
+            level = 30, online = true, zone = "Elwynn Forest" },
+        { id = "bea-ivy", name = "Bea-Ivy", level = 30, online = false },
+        { id = "reporter-surname", aliasID = "reporter-testrealm", name = "Reporter-Surname",
+            displayName = "Reporter Surname", level = 31, online = true, seenAt = 2000000010 },
+        { id = "self-testrealm", aliasID = "self", name = "Self-TestRealm", level = 29, online = true },
+        { id = "unavailable", name = "Unavailable", online = true },
+    }
+    local reads = 0
+    function addon:GetFriendsPlayers()
+        reads = reads + 1
+        return friends
+    end
+    function addon:GetPlayerDisplayName(name) return name:match("^[^-]+") end
+    assert(ids(addon:GetPlayerRanking().players) == "reporter-testrealm,self" and reads == 0,
+        "Friend inclusion defaults off without reading native friend data")
+    assert(addon:SetRankingPlayerShown(friends[1].id, true))
+    assert(ids(addon:GetPlayerRanking().players) == "reporter-testrealm,alex-wren,self"
+        and not addon:IsRankingPlayerShown(friends[2].id), "Selecting one friend does not add another")
+    for index = 2, #friends do assert(addon:SetRankingPlayerShown(friends[index].id, true)) end
+    local ranking = addon:GetPlayerRanking()
+    assert(ranking.hasFriends and ids(ranking.players) == "reporter-testrealm,alex-wren,bea-ivy,self"
+        and ranking.players[1].xp == 80 and ranking.players[1].level == 30 and not ranking.players[1].friendOnly
+        and ranking.players[1].displayName == "Reporter Surname",
+        "Native name aliases must not duplicate a shared progress report or add the local character twice")
+    local alex, bea = ranking.players[2], ranking.players[3]
+    assert(alex.friendOnly and alex.rank == 2 and bea.rank == 2 and ranking.own.rank == 4
+        and alex.xpState == "unavailable" and alex.xp == nil and alex.xpMax == nil
+        and alex.stale == false and bea.stale == true and not friends[1].rank,
+        "Native friends at the same level share a rank after known XP without gaining fabricated XP")
+    local lines = addon:GetCompactPlayerTooltipLines(alex)
+    assert(lines[1] == "#2 - Alex Wren" and lines[2] == "Lv 30 - XP unavailable" and lines[3] == "Elwynn Forest")
+    local pinMetadata = addon:GetPlayerTooltipPlayers()[pin.id]
+    assert(pinMetadata.rank == 2 and pinMetadata.level == 30 and pinMetadata.map == 37
+        and pinMetadata.online == false and not pinMetadata.friendOnly and not pin.rank,
+        "Ranking a friend enriches a matching shared pin while preserving the pin's location and contact")
+    reporter.online = false
+    local nativeLevel = addon:GetPlayerRanking().players[1]
+    assert(nativeLevel.id == "reporter-surname" and nativeLevel.level == 31 and nativeLevel.friendOnly
+        and nativeLevel.xpState == "unavailable" and nativeLevel.xp == nil and reporter.level == 30,
+        "A newer online friend level supersedes stale XP from an earlier level")
+    friends[3].seenAt = reporter.seenAt
+    assert(addon:GetPlayerRanking().players[1].id == reporter.id,
+        "An equally old native observation does not supersede the shared level")
+    friends[3].level, friends[3].seenAt = 29, reporter.seenAt + 10
+    assert(addon:GetPlayerRanking().players[1].id == reporter.id,
+        "A lower level in the native cache does not downgrade an existing shared level")
+    friends[3].level, friends[3].online = 31, false
+    assert(addon:GetPlayerRanking().players[1].id == reporter.id,
+        "An offline native friend does not supersede the shared level")
+    friends[3].online, reporter.online = true, true
+    assert(addon:SetRankingPlayerShown(friends[1].id, false))
+    assert(ids(addon:GetPlayerRanking().players) == "reporter-testrealm,bea-ivy,self"
+        and addon:IsRankingPlayerShown(friends[2].id), "Removing one friend leaves the other selected")
+    assert(addon:SetRankingPlayerShown(friends[2].id, false)
+        and addon:SetRankingPlayerShown(friends[3].id, false))
+    assert(ids(addon:GetPlayerRanking().players) == "self",
+        "A hidden friend cannot reappear through an aliased shared report")
+end
+
+-- A saved Shown choice applies to both sources and leaves discovery intact.
+do
+    local addon, world = newAddon()
+    local friend = { id = "alex-wren", aliasID = "alex wren-testrealm", name = "Alex-Wren", level = 30, online = true }
+    local own = player("self", 29, 25, 100, true)
+    local shared = player("alex wren-otherrealm", 30, 50, 100)
+    world.players = { own, shared }
+    function addon:GetFriendsPlayers() return { friend } end
+    function addon:GetRankingPlayerKey(id) return id:match("^alex wren%-") and friend.id or id end
+    assert(addon:IsRankingPlayerShown(shared.id, true) and not addon:IsRankingPlayerShown(friend.id))
+    assert(ids(addon:GetPlayerRanking().players) == shared.id .. ",self")
+
+    assert(addon:SetRankingPlayerShown(friend.id, true))
+    assert(addon:SetRankingPlayerShown(shared.id, false) and not addon:IsRankingPlayerShown(friend.id))
+    assert(ids(addon:GetPlayerRanking().players) == "self" and #world.players == 2,
+        "Hiding a shared row suppresses its native fallback and keeps the discovered row available")
+    assert(addon:SetRankingPlayerShown(shared.id, true) and addon:IsRankingPlayerShown(friend.id))
+    assert(ids(addon:GetPlayerRanking().players) == shared.id .. ",self")
+    world.players = { own }
+    assert(ids(addon:GetPlayerRanking().players) == "alex-wren,self",
+        "The same explicit selection applies after the character appears only through Friends")
+    assert(addon:SetRankingPlayerShown(own.id, false))
+    local ranking = addon:GetPlayerRanking()
+    assert(ids(ranking.players) == "alex-wren" and ranking.own == nil,
+        "Hiding your character also removes the separate own row")
+end
+
+-- Solo standings reuse the current character without opening the scope of the shared Overview.
+do
+    local addon, world = newRosterAddon()
+    world.guild = false
+    local friends = { { id = "alex-wren", name = "Alex-Wren", level = 30, online = true } }
+    function addon:GetFriendsPlayers() return friends end
+    assert(addon:SetRankingPlayerShown(friends[1].id, true))
+    local ranking = addon:GetPlayerRanking()
+    assert(not ranking.grouped and not ranking.connected and ranking.hasFriends
+        and ids(ranking.players) == "alex-wren,self-testrealm"
+        and ranking.own.xp == 25 and ranking.own.rank == 2 and #addon:GetOverviewPlayers() == 0)
+    local first = addon:GetPlayerTooltipPlayers()
+    friends[1].level = 28
+    addon:Notify("FRIENDS_CHANGED")
+    local updated = addon:GetPlayerTooltipPlayers()
+    assert(first ~= updated and updated["self-testrealm"].rank == 1,
+        "Friend changes invalidate live tooltip standings immediately")
+    friends[1].level = nil
+    ranking = addon:GetPlayerRanking()
+    assert(not ranking.hasFriends and not ranking.own and #ranking.players == 0,
+        "Enabling the preference alone does not start solo standings without a usable friend level")
+end
+
 -- Visibility defaults off and the burning effect on; preferences persist account-wide.
 do
     local saved = { schemaVersion = 4, otherSettings = { preserved = true }, futureField = "keep",
-        ranking = { futureField = { preserved = true } } }
+        ranking = { futureField = { preserved = true }, includeFriends = true,
+            includedFriends = { ["legacy-wren"] = true, ["bea-ivy"] = true, ["ignored-friend"] = false },
+            shownPlayers = { ["bea-ivy"] = false, ["invalid-value"] = "true" } } }
     local addon = newAddon(saved)
     local settings = addon:GetRankingSettings()
-    assert(settings.enabled == false and settings.position == nil
+    assert(settings.enabled == false and settings.includedFriends == nil and settings.includeFriends == nil and settings.position == nil
         and settings.burningEffect == true and settings.backgroundTransparency == 0)
-    assert(addon:SetRankingEnabled(true) and addon:SetRankingBurningEffect(false))
+    assert(equal(settings.shownPlayers, { ["legacy-wren"] = true, ["bea-ivy"] = false }),
+        "Previous friend opt-ins migrate without overriding explicit visibility choices or accepting damaged values")
+    assert(addon:SetRankingEnabled(true) and addon:SetRankingPlayerShown("alex-wren", true) and addon:SetRankingBurningEffect(false))
     assert(addon:SetRankingBackgroundTransparency(50))
     local position = { point = "TOPRIGHT", relativePoint = "TOPRIGHT", x = -80, y = -160 }
     assert(addon:SetRankingPosition(position))
-    assert(saved.ranking.enabled == true and saved.ranking.burningEffect == false
+    assert(saved.ranking.enabled == true and saved.ranking.shownPlayers["alex-wren"] == true and saved.ranking.burningEffect == false
         and saved.ranking.backgroundTransparency == 50 and equal(saved.ranking.position, position))
     assert(saved.otherSettings.preserved == true and saved.futureField == "keep" and saved.ranking.futureField.preserved)
-    assert(not addon:SetRankingEnabled("true") and not addon:SetRankingBurningEffect("true"),
+    assert(not addon:SetRankingEnabled("true") and not addon:SetRankingPlayerShown("alex-wren", "true")
+        and not addon:SetRankingBurningEffect("true"),
         "Saved overlay preferences accept booleans only")
+    for _, invalid in ipairs({ false, "", "bad\nname", "bad|name", string.rep("a", 129), {} }) do
+        assert(not addon:SetRankingPlayerShown(invalid, true) and not addon:IsRankingPlayerShown(invalid))
+    end
+    assert(not addon:SetRankingPlayerShown(nil, true))
     assert(not addon:SetRankingEnabled(nil) and not addon:SetRankingBurningEffect(nil))
     for _, invalid in ipairs({ 0, 1, {}, function() end }) do
         assert(not addon:SetRankingBurningEffect(invalid) and saved.ranking.burningEffect == false,
@@ -347,9 +475,11 @@ do
     end
     local reloaded = newAddon(saved)
     settings = reloaded:GetRankingSettings()
-    assert(settings.enabled and not settings.burningEffect
+    assert(settings.enabled and reloaded:IsRankingPlayerShown("alex-wren")
+        and reloaded:IsRankingPlayerShown("legacy-wren") and not reloaded:IsRankingPlayerShown("bea-ivy", true)
+        and not settings.burningEffect
         and settings.backgroundTransparency == 50 and equal(settings.position, position),
-        "Visibility, burning effect, transparency and position must survive reload and character changes")
+        "Visibility, selected friends, burning effect, transparency and position must survive reload and character changes")
 end
 
 -- Background edits are independent of visibility and player data; unchanged slider values do no work.
@@ -424,10 +554,15 @@ end
 do
     local position = { point = "TOPLEFT", relativePoint = "TOPLEFT", x = 40, y = -60 }
     local saved = { schemaVersion = 999, ranking = { enabled = true, locked = false, burningEffect = false, backgroundTransparency = 65,
+        includedFriends = { ["alex-wren"] = true },
+        shownPlayers = { ["bea-ivy"] = false },
         position = position, futureField = "keep" }, otherSettings = { preserved = true } }
     local before = copy(saved)
     local addon = newAddon(saved, true)
-    assert(not addon:SetRankingEnabled(false) and not addon:SetRankingBurningEffect(true))
+    assert(not addon:SetRankingEnabled(false) and not addon:SetRankingPlayerShown("alex-wren", false)
+        and not addon:SetRankingPlayerShown("bea-ivy", true) and addon:IsRankingPlayerShown("alex-wren")
+        and not addon:IsRankingPlayerShown("bea-ivy", true)
+        and not addon:SetRankingBurningEffect(true))
     assert(not addon:SetRankingBackgroundTransparency(50) and not addon:SetRankingBackgroundTransparency(65))
     local moved = { point = "BOTTOMRIGHT", relativePoint = "BOTTOMRIGHT", x = -90, y = 120 }
     assert(addon:SetRankingPosition(moved), "Read-only profiles still permit temporary overlay movement")

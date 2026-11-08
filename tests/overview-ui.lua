@@ -65,12 +65,17 @@ do
     command("overview")
     local content = overview.contentPanel
     local page = content.overviewPage
-    assert(content.selectedTab == "overview" and not options:IsVisible()
+    assert(content.selectedTab == "overview" and content.tabs.overview:GetText() == "Rankings" and not options:IsVisible()
         and page:IsVisible() and page.active and snapshotCalls == 0,
-        "overview command opens Content without requesting an Overview snapshot")
+        "the Overview command opens Rankings without requesting a snapshot")
     local ownRow = page.rows[1]
     assert(ownRow.name:GetText() == "Self" and not ownRow.actions,
         "the local player's name has no self suffix or Actions button")
+    local shown = ownRow.ranking
+    assert(shown:GetChecked() and page.rows[2].ranking:GetChecked(), "shared ranking entries default to shown")
+    shown:Click()
+    assert(not shown:GetChecked() and not overview:IsRankingPlayerShown(ownRow.playerID, true)
+        and page.rows[2].ranking:GetChecked(), "hiding the local character leaves another character shown")
     ownRow:Click("RightButton")
     ownRow.scripts.OnClick(ownRow, "RightButton")
     ownRow.levelCell.scripts.OnMouseUp(ownRow.levelCell, "RightButton")
@@ -198,6 +203,7 @@ do
     assert(not menu:IsShown() and page.offset == 1 and page.rows[1].playerID == "alpha-testrealm"
         and page.scrollbar:GetValue() == 1,
         "scrolling recycles the self row for a peer and dismisses the old menu")
+    assert(shown:GetChecked(), "a recycled Rankings checkbox adopts the newly visible character's setting")
     openMenu(1)
     page.scripts.OnMouseWheel(page, -1)
     assert(page.offset > 1, "mouse wheel down moves through the roster")
@@ -291,6 +297,110 @@ do
     overviewWorld.fire("PLAYER_GUILD_UPDATE", "player")
     assert(page.empty:IsShown() and not page.rows[1]:IsShown() and not page.rows[1].playerID,
         "leaving every native sharing context hides the disconnected roster")
+end
+
+-- Friends uses the native player snapshot even with no sharing context.
+do
+    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    world:initialize()
+    local friends, shared, reads = {}, {}, 0
+    function addon:GetFriendsPlayers()
+        reads = reads + 1
+        return friends
+    end
+    function addon:GetOverviewPlayers() return shared end
+    loadOptions(addon, api)
+    addon:OpenContent()
+    local content = addon.contentPanel
+    local overview, page = content.pages.overview, content.pages.friends
+    assert(overview.active and overview.empty:IsShown() and not page:IsShown() and reads == 0)
+    content.tabs.friends:Click()
+    assert(content.selectedTab == "friends" and page:IsVisible() and page.empty:IsShown()
+        and not page.scripts.OnUpdate and not overview.active and not overview.scripts.OnUpdate,
+        "Friends has its own empty view and only the selected page does live UI work")
+    friends = {
+        { id = "ada-ironwood", aliasID = "ada ironwood-testrealm", name = "Ada-Ironwood", displayName = "Ada Ironwood",
+            level = 22, zone = "Westfall", online = true },
+        { id = "brin-testrealm", name = "Brin", level = 31, online = false },
+        { id = "cora-testrealm", name = "Cora" },
+    }
+    for index = 1, 7 do
+        friends[#friends + 1] = { id = "friend" .. index, name = "Friend " .. index, level = 40 + index, online = true }
+    end
+    addon:Notify("FRIENDS_CHANGED")
+    assert(not page.empty:IsShown() and page.scrollbar:IsShown()
+        and page.rows[1].name:GetText() == "Ada Ironwood" and page.rows[1].level:GetText() == "22"
+        and page.rows[1].zone:GetText() == "Westfall" and page.rows[1].status:GetText() == "Online"
+        and page.rows[2].status:GetText() == "Offline" and page.rows[2].zone:GetText() == "—"
+        and page.rows[3].status:GetText() == "Unknown" and page.rows[3].level:GetText() == "—",
+        "native friend rows preserve surnames, known level and zone, and three distinct presence states")
+    local ranking = page.rows[1].ranking
+    assert(not ranking:GetChecked() and not page.rows[2].ranking:GetChecked())
+    ranking:Click()
+    assert(ranking:GetChecked() and not page.rows[2].ranking:GetChecked()
+        and addon:IsRankingPlayerShown("ada-ironwood", false), "clicking Shown opts in only its friend")
+    page.scrollbar:SetValue(2)
+    assert(page.rows[8].name:GetText() == "Friend 7" and page.offset == 2 and not ranking:GetChecked(),
+        "a pooled checkbox adopts the visible friend's saved selection on scroll")
+    ranking:Click()
+    assert(addon:IsRankingPlayerShown("cora-testrealm", false) and addon:IsRankingPlayerShown("ada-ironwood", false)
+        and not addon:IsRankingPlayerShown("brin-testrealm", false),
+        "the reused checkbox targets the current friend even before a level is available")
+    page.headers.level:Click()
+    assert(page.offset == 0 and page.rows[1].name:GetText() == "Ada Ironwood" and ranking:GetChecked())
+    ranking:Click()
+    assert(not addon:IsRankingPlayerShown("ada-ironwood", false) and addon:IsRankingPlayerShown("cora-testrealm", false),
+        "unchecking one friend leaves another friend's ranking inclusion selected")
+    page.headers.level:Click()
+    assert(page.rows[1].name:GetText() == "Friend 7" and friends[1].id == "ada-ironwood",
+        "Friends sorts levels numerically without mutating the shared snapshot")
+    page.headers.status:Click()
+    page:SetOffset(2)
+    assert(page.rows[8].status:GetText() == "Unknown" and page.rows[7].status:GetText() == "Offline",
+        "status sorts online first by default and leaves unknown status last")
+
+    shared = { { id = "ada ironwood-testrealm" }, { id = "brin-testrealm" } }
+    addon:Notify("POSITIONS_CHANGED")
+    assert(page.offset == 0 and not page.scrollbar:IsShown() and #friends == 10
+        and page.rows[8].playerID == "cora-testrealm" and page.rows[8].ranking:GetChecked(),
+        "shared IDs and surname aliases disappear from Friends while selected native-only rows remain editable")
+    for _, row in ipairs(page.rows) do
+        assert(row.playerID ~= "ada-ironwood" and row.playerID ~= "brin-testrealm")
+    end
+    shared = {}
+    addon:Notify("ROSTER_CHANGED")
+    assert(page.scrollbar:IsShown(), "friends reappear when their Rankings entries are removed")
+
+    content.options:Click()
+    local hiddenReads = reads
+    friends = { friends[2] }
+    addon:Notify("FRIENDS_CHANGED")
+    assert(reads == hiddenReads, "native updates do not rebuild a hidden Friends page")
+    addon.optionsPanel.content:Click()
+    assert(content.selectedTab == "friends" and page:IsVisible() and page.offset == 0
+        and page.rows[1].name:GetText() == "Brin" and not ranking:GetChecked()
+        and not page.rows[2]:IsShown() and not page.rows[2].playerID
+        and not page.scrollbar:IsShown(), "returning to Friends refreshes rows and clamps the scroll offset")
+    api.SlashCmdList.LOCKINTOOLS("overview")
+    assert(content.selectedTab == "overview" and overview.active and not page:IsVisible(),
+        "the Overview command selects Rankings even after viewing Friends")
+end
+
+-- Newer saved profiles display existing selections and disable editing.
+do
+    local saved = settings(SECRET, false)
+    saved.schemaVersion, saved.ranking = 5, { includedFriends = { ["ada-ironwood"] = true } }
+    local addon, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    function addon:GetFriendsPlayers() return { { id = "ada-ironwood", name = "Ada Ironwood", level = 22 } } end
+    loadOptions(addon, api)
+    addon:OpenContent("friends")
+    local ranking = addon.contentPanel.pages.friends.rows[1].ranking
+    assert(ranking:GetChecked() and not ranking:IsEnabled())
+    ranking:SetChecked(false)
+    ranking.scripts.OnClick(ranking)
+    assert(ranking:GetChecked() and saved.ranking.includedFriends["ada-ironwood"] == true,
+        "the checkbox restores the saved selection when a write is rejected")
 end
 
 -- Player actions also work on independent surfaces without opening Content.
@@ -478,4 +588,4 @@ do
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: Overview navigation, scrolling, sorting, actions and progress")
+print("PASS: Overview and Friends navigation, scrolling, sorting, actions and progress")

@@ -40,7 +40,7 @@ local function PlayerTooltip(row)
     if row.motionInteractive == false then HideTooltip(row); return end
     local player = row.player
     if not player then return end
-    if not player.isSelf then
+    if not player.isSelf and not player.friendOnly then
         local position = addon:GetSharedPositions()[player.id]
         if position or addon.db.position.keepLastKnown == false then
             local current = {}
@@ -585,7 +585,7 @@ local function CreateRow(panel, ghost)
         row:SetScript("OnClick", function(_, button)
             if button ~= "RightButton" or not row.playerID or row.motionInteractive == false then return end
             HideTooltips(panel)
-            if not row.player or row.player.isSelf then
+            if not row.player or row.player.isSelf or row.player.friendOnly then
                 if panel.actionMenu then panel.actionMenu:Hide() end
                 return
             end
@@ -632,7 +632,8 @@ end
 local function PaintRow(row, player)
     -- A pooled row must never keep a tooltip or menu for its previous character.
     local playerID = player and player.id or nil
-    if not row.isGhost and row.playerID ~= playerID then ClearRowInteractions(row) end
+    if not row.isGhost and (row.playerID ~= playerID
+        or (row.player and player and row.player.friendOnly ~= player.friendOnly)) then ClearRowInteractions(row) end
     row.playerID = playerID
     row.player = player
     if not player then
@@ -656,7 +657,7 @@ local function PaintRow(row, player)
     row.baseAlpha = stale and 0.65 or 1
     row:SetAlpha(row.baseAlpha)
     row.rank:SetText(rank and tostring(rank) or "—")
-    row.name:SetText(addon:GetPlayerDisplayName(player.name))
+    row.name:SetText(player.displayName or addon:GetPlayerDisplayName(player.name))
     row.level:SetText(player.level and tostring(player.level) or "—")
     row.highlight:SetColorTexture(red, green, blue, 0.14)
     if player.isSelf then
@@ -703,7 +704,7 @@ local function PaintRow(row, player)
         row.progress:SetPoint("TOPLEFT", 30, -21)
         row.progress:SetWidth(230)
         row.progress:SetJustifyH("LEFT")
-        row.progress:SetText("Waiting for XP")
+        row.progress:SetText(player.friendOnly and "XP unavailable" or "Waiting for XP")
     end
     row:Show()
     if not row.isGhost and GameTooltip and GameTooltip:IsOwned(row) and GameTooltip:IsShown() then PlayerTooltip(row) end
@@ -877,13 +878,13 @@ function addon:RefreshRankingOverlay()
     RefreshBackground(panel)
     local ranking = self:GetPlayerRanking()
 
-    local hasStandings = ranking.grouped
+    local hasStandings = ranking.grouped or ranking.hasFriends
     local players, own = hasStandings and ranking.players or {}, ranking.own
-    if not ranking.grouped then
-        panel.empty:SetText("Join a guild, party or raid with sharing enabled to see standings.")
+    if not hasStandings then
+        panel.empty:SetText("Choose friends in Content > Friends or enable guild or group sharing.")
         own = nil
     else
-        panel.empty:SetText("Waiting for usable player progress.")
+        panel.empty:SetText("Waiting for shown players with usable progress.")
     end
 
     panel.empty:SetPoint("TOPLEFT", 12, -ROW_TOP - 4)
@@ -940,6 +941,10 @@ end
 for _, notification in ipairs({ "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshRankingOverlay() end)
 end
+addon:RegisterNotification("FRIENDS_CHANGED", function()
+    local settings = addon:GetRankingSettings()
+    if settings and next(settings.shownPlayers) then addon:RefreshRankingOverlay() end
+end)
 
 -- Coordinates change tooltips, not XP standings or row layout. The visible
 -- one-second tick still refreshes contact expiry and the local player's map.

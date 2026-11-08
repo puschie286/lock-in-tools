@@ -6,7 +6,7 @@ A World of Warcraft Forever addon for playing with friends.
 
 1. Link this repository into the Forever client's `Interface/AddOns/LockInTools` folder using the PowerShell script below, or copy it there with `LockInTools.toc` directly inside the folder. Selected libraries are bundled in `Libs/`; no build step or separate library installation is required.
 2. Restart WoW and enable **LockInTools** in the AddOns list.
-3. Content opens the player overview on your first login. Sharing uses your native guild and party or raid, with no setup required. Use `/lit` for the player overview, `/lit options` → Sharing to choose routes, and `/lit status` to check the addon version, client build and data-send failures.
+3. Content opens the Rankings tab on your first login. Sharing uses your native guild and party or raid, with no setup required. Use `/lit` to open Content, `/lit options` → General to choose routes, and `/lit status` to check the addon version, client build and data-send failures.
 
 From the repository root on Windows, preview the detected destination, then create the directory junction:
 

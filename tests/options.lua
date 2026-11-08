@@ -24,6 +24,7 @@ do
     assert(not panel.dataStatus and not panel.dataStatusHelp
         and not panel.positionStatus and not panel.positionStatusHelp,
         "route and position summary lines are absent")
+    assert(not panel.rankingIncludeFriends, "friend ranking inclusion is controlled on each Friends row")
     assert(panel.dataChannels.party:IsEnabled() and panel.dataChannels.guild:IsEnabled())
     assert(not panel.tabs.group and not panel.secret and not panel.autoJoin
         and not panel.join and not panel.leave and not panel.dataChannels.global,

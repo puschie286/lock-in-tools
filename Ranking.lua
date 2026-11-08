@@ -23,12 +23,37 @@ local function Position(position)
     return { point = position.point, relativePoint = position.relativePoint, x = position.x, y = position.y }
 end
 
+local function PlayerKey(self, id)
+    if (issecretvalue and issecretvalue(id)) or type(id) ~= "string"
+        or #id == 0 or #id > 128 or id:find("[|%c]") then return nil end
+    return self.GetRankingPlayerKey and self:GetRankingPlayerKey(id) or id
+end
+
+local function PlayerVisibility(self, saved)
+    local shown = {}
+    if type(saved.shownPlayers) == "table" then
+        for id, value in pairs(saved.shownPlayers) do
+            local key = PlayerKey(self, id)
+            if key and type(value) == "boolean" and (shown[key] == nil or id == key) then shown[key] = value end
+        end
+    end
+    if type(saved.includedFriends) == "table" then
+        for id, included in pairs(saved.includedFriends) do
+            local key = PlayerKey(self, id)
+            if key and included == true and shown[key] == nil then shown[key] = true end
+        end
+    end
+    return shown
+end
+
 function addon:InitializeRanking()
     if self.rankingSettings then return end
     local database = self.savedDataReadOnly and type(LockInToolsDB) == "table" and LockInToolsDB or self.db
     local saved = type(database.ranking) == "table" and database.ranking or {}
     local settings = self.savedDataReadOnly and {} or saved
     settings.enabled = saved.enabled == true
+    settings.shownPlayers = PlayerVisibility(self, saved)
+    settings.includeFriends, settings.includedFriends = nil, nil
     settings.burningEffect = saved.burningEffect ~= false
     settings.backgroundTransparency = Transparency(saved.backgroundTransparency) or 0
     local savedPosition = saved.position
@@ -56,6 +81,7 @@ local function Age(stamp)
 end
 
 local function LocationName(self, player)
+    if player.friendOnly then return player.zone or "Unknown location" end
     -- Cached coordinates stay private when either side has stopped sharing.
     if not self.db.position or not self.db.position.sharing then return "Position sharing is off" end
     if player.sharing == false then return "Not sharing" end
@@ -68,9 +94,9 @@ local function LocationName(self, player)
 end
 
 function addon:GetCompactPlayerTooltipLines(player)
-    local lines = { "#" .. (player.rank or "?") .. " - " .. self:GetPlayerDisplayName(player.name) }
+    local lines = { "#" .. (player.rank or "?") .. " - " .. (player.displayName or self:GetPlayerDisplayName(player.name)) }
     if player.xpState ~= "max" then
-        local progress = "Awaiting XP"
+        local progress = player.friendOnly and "XP unavailable" or "Awaiting XP"
         if player.level and player.xpState == "known" and type(player.xp) == "number"
             and type(player.xpMax) == "number" and player.xpMax > 0 then
             local missing = math.max(0, player.xpMax - player.xp)
@@ -113,7 +139,7 @@ end
 
 local function Editable(self, value)
     if not self.initialized or not self.rankingSettings then return false, "Still loading. Please try again after login." end
-    if type(value) ~= "boolean" then return false, "Choose on or off." end
+    if (issecretvalue and issecretvalue(value)) or type(value) ~= "boolean" then return false, "Choose on or off." end
     if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
     return true
 end
@@ -123,6 +149,27 @@ function addon:SetRankingEnabled(enabled)
     if not success then return false, message end
     self.rankingSettings.enabled, self.rankingOverlayDismissed = enabled, nil
     self:Notify("RANKING_CHANGED")
+    return true
+end
+
+function addon:IsRankingPlayerShown(id, defaultShown)
+    local settings = self.rankingSettings
+    local key = settings and PlayerKey(self, id)
+    if not key then return false end
+    local shown = settings.shownPlayers[key]
+    if shown ~= nil then return shown end
+    return defaultShown == true
+end
+
+function addon:SetRankingPlayerShown(id, shown)
+    local success, message = Editable(self, shown)
+    if not success then return false, message end
+    local key = PlayerKey(self, id)
+    if not key then return false, "Choose a player to show in rankings." end
+    if self.rankingSettings.shownPlayers[key] ~= shown then
+        self.rankingSettings.shownPlayers[key] = shown
+        self:Notify("RANKING_CHANGED")
+    end
     return true
 end
 
@@ -170,6 +217,9 @@ end
 
 local function CompareProgress(left, right)
     if left.level ~= right.level then return left.level < right.level and -1 or 1 end
+    -- The relative XP of friends with only a level is unknown.
+    if left.friendOnly then return right.friendOnly and 0 or -1 end
+    if right.friendOnly then return 1 end
     local a, b = Fraction(left)
     local c, d = Fraction(right)
     -- Continued fractions compare the integers exactly without cross-products
@@ -199,25 +249,82 @@ local function SameProgress(player, previous)
         and player.xp == previous.xp and player.xpMax == previous.xpMax
 end
 
+local function FriendLevel(friend)
+    return Number(friend.level, 1000) and friend.level > 0
+end
+
+local function HasNewerFriendLevel(row, friend)
+    return row.stale and friend and friend.online and FriendLevel(friend) and friend.level > row.level
+        and Number(friend.seenAt, 9999999999) and Number(row.seenAt, 9999999999) and friend.seenAt > row.seenAt
+end
+
 function addon:GetPlayerRanking(overviewPlayers)
-    local result = { players = {}, connected = false, grouped = false }
+    local result = { players = {}, connected = false, grouped = false, hasFriends = false }
     if not self.initialized or not self.ready then return result end
     result.grouped = self:HasDataGroup()
     result.connected = self:IsDataConnected()
-    if not result.grouped then return result end
-    local cached, ranked = self.rankingOrderCache, {}
-    local changed = cached == nil
-    for _, player in ipairs(overviewPlayers or self:GetOverviewPlayers()) do
-        local row = Copy(player)
-        row.stale = not player.isSelf and (not result.connected or not player.online
-            or player.xpStale == true or player.statusSynchronized == false)
-        row.xpStale = row.stale
-        if player.isSelf then result.own = row end
-        if Complete(player) then
-            result.players[#result.players + 1] = row
-            ranked[row.id] = row
-            if not cached or not SameProgress(row, cached.progress[row.id]) then changed = true end
+    local friends, friendsByID, hiddenFriendIDs = {}, {}, {}
+    local shownPlayers = self.rankingSettings and self.rankingSettings.shownPlayers
+    local hasPreferences = shownPlayers and next(shownPlayers) ~= nil
+    if hasPreferences and self.GetFriendsPlayers then
+        for _, friend in ipairs(self:GetFriendsPlayers()) do
+            local key, aliasKey = PlayerKey(self, friend.id), PlayerKey(self, friend.aliasID)
+            local shown, aliasShown = shownPlayers[key], shownPlayers[aliasKey]
+            if key and (shown == false or aliasShown == false) then
+                hiddenFriendIDs[key] = true
+                if aliasKey then hiddenFriendIDs[aliasKey] = true end
+            elseif key and (shown == true or aliasShown == true) then
+                friends[#friends + 1] = friend
+                friendsByID[key] = friend
+                if aliasKey then friendsByID[aliasKey] = friend end
+            end
         end
+    end
+    if not result.grouped and #friends == 0 then return result end
+    -- A solo Overview snapshot is empty. Only use the local row for a friend ranking.
+    local overview = result.grouped and (overviewPlayers or self:GetOverviewPlayers()) or self:GetOverviewPlayers(true)
+    local cached, ranked, rankedCharacters = self.rankingOrderCache, {}, {}
+    local changed = cached == nil
+    local function Add(row, key)
+        result.players[#result.players + 1] = row
+        ranked[row.id] = row
+        if key then rankedCharacters[key] = true end
+        if not cached or not SameProgress(row, cached.progress[row.id]) then changed = true end
+    end
+    local ownKey
+    for _, player in ipairs(overview) do
+        local key = hasPreferences and PlayerKey(self, player.id)
+        if player.isSelf then ownKey = key end
+        if not hasPreferences or (not hiddenFriendIDs[key] and shownPlayers[key] ~= false) then
+            local row = Copy(player)
+            row.stale = not player.isSelf and (not result.connected or not player.online
+                or player.xpStale == true or player.statusSynchronized == false)
+            row.xpStale = row.stale
+            if player.isSelf then result.own = row end
+            if Complete(player) then
+                local friend = not player.isSelf and friendsByID[key]
+                -- XP from the previous level cannot rank a friend at their new level.
+                if not HasNewerFriendLevel(row, friend) then
+                    if friend then row.displayName = friend.displayName end
+                    Add(row, key)
+                end
+            end
+        end
+    end
+    for _, friend in ipairs(friends) do
+        local key, aliasKey = PlayerKey(self, friend.id), PlayerKey(self, friend.aliasID)
+        if FriendLevel(friend) and not rankedCharacters[key] and not rankedCharacters[aliasKey]
+            and not (ownKey and (ownKey == key or ownKey == aliasKey)) then
+            local row = Copy(friend)
+            row.friendOnly, row.stale = true, not friend.online
+            row.xpState, row.xp, row.xpMax = "unavailable", nil, nil
+            Add(row, key)
+            result.hasFriends = true
+        end
+    end
+    if not result.grouped and not result.hasFriends then
+        result.players, result.own = {}, nil
+        return result
     end
     if cached and #result.players ~= #cached.order then changed = true end
     if changed then
@@ -257,12 +364,25 @@ function addon:GetPlayerTooltipPlayers()
     local ranking = self:GetPlayerRanking(overview)
     local players = {}
     for _, player in ipairs(overview) do players[player.id] = player end
-    for _, player in ipairs(ranking.players) do players[player.id] = player end
+    for _, player in ipairs(ranking.players) do
+        if player.friendOnly then
+            -- The map pin owns its shared contact and position. Only attach the
+            -- native ranking when it describes the same level.
+            local discovered = players[player.id] or players[player.aliasID]
+            if discovered and (not discovered.level or discovered.level == player.level) then
+                local row = Copy(discovered)
+                row.level, row.rank = player.level, player.rank
+                players[row.id] = row
+            end
+        else
+            players[player.id] = player
+        end
+    end
     if ranking.own then players[ranking.own.id] = ranking.own end
     self.rankingTooltipCache = { at = now, players = players }
     return players
 end
 
-for _, notification in ipairs({ "ROSTER_CHANGED", "DATA_CHANGED" }) do
+for _, notification in ipairs({ "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED", "FRIENDS_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon.rankingTooltipCache = nil end)
 end

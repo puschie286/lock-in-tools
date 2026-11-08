@@ -111,6 +111,7 @@ function addon:OnLogin()
     self:OnDataLogin()
     self:OnPositionLogin()
     self:OnRosterLogin()
+    self:OnFriendsLogin()
     if self.OnRankingLogin then self:OnRankingLogin() end
     self:UpdatePlayerDataCleanupTimer()
     if self.db.showWelcome and self.db.setupComplete ~= true

@@ -43,7 +43,10 @@ local function loadOptions(uiAddon, uiEnvironment)
     function methods:SetUserPlaced(placed) self.userPlaced = placed end
     function methods:StartMoving() self.moving, self.userPlaced = true, true end
     function methods:StopMovingOrSizing() self.moving = false end
-    function methods:SetSize(width, height) self.width, self.height = width, height end
+    function methods:SetSize(width, height)
+        assert(type(width) == "number" and type(height) == "number", "SetSize requires a numeric width and height")
+        self.width, self.height = width, height
+    end
     function methods:SetAllPoints(widget) self.allPoints = widget or self.parent end
     function methods:SetWidth(width) self.width = width end
     function methods:SetHeight(height) self.height = height end

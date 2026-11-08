@@ -19,6 +19,7 @@ DataStatus.lua
 Burned.lua
 Position.lua
 Roster.lua
+Friends.lua
 Ranking.lua
 RestedXPCodec.lua
 RestedXPAdapter.lua
