@@ -1478,8 +1478,8 @@ do
     end
     local messageCount = #messages
     menu.party:Click()
-    assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and not menu:IsShown(),
-        "the ranking invite uses the production permission check and complete player name")
+    assert(#invites == 1 and invites[1] == "Alpha" and not menu:IsShown(),
+        "the ranking invite uses the production permission check and local native name")
     assert(#messages == messageCount, "ranking player actions add no addon chat log entry")
     menu = openMenu(first)
     assert(menu.showMap:IsEnabled(), "right clicking a ranked player offers their shared map location")

@@ -120,8 +120,8 @@ do
     assert(menu.party:IsShown() and menu.party.action == "request" and menu.party:GetText() == "Request to join",
         "a grouped peer offers Request to join in the same party entry")
     menu.party:Click()
-    assert(#invites == 1 and invites[1] == "Alpha-TestRealm" and #requests == 1 and requests[1] == "Bravo-TestRealm",
-        "overview clicks invoke the real guarded native actions with complete names")
+    assert(#invites == 1 and invites[1] == "Alpha" and #requests == 1 and requests[1] == "Bravo",
+        "overview clicks invoke the real guarded actions with local native names")
     menu = openMenu(2)
     assert(menu.showMap:IsEnabled(), "a player with a shared location offers Show on map")
     menu.showMap.scripts.OnEnter(menu.showMap)
@@ -164,7 +164,7 @@ do
     assert(menu.party:IsShown() and menu.party.action == "suggest" and menu.party:GetText() == "Suggest Invite",
         "an open party entry changes to Suggest Invite for a member without invite permission")
     menu.party:Click()
-    assert(#invites == 2 and invites[2] == "Alpha-TestRealm" and #requests == 1,
+    assert(#invites == 2 and invites[2] == "Alpha" and #requests == 1,
         "Suggest Invite uses the native invitation path for the selected player")
     menu = openMenu(2)
     mayInvite = true

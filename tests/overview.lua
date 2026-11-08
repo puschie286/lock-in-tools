@@ -307,7 +307,7 @@ do
     local state = addon:GetOverviewActionState("solo-testrealm")
     assert(state.invite == true and not state.request)
     assert(addon:PerformOverviewAction("solo-testrealm", "invite"))
-    assert(#world.invites == 1 and world.invites[1] == "Solo-TestRealm" and #world.joins == 0)
+    assert(#world.invites == 1 and world.invites[1] == "Solo" and #world.joins == 0)
     assert(not addon:PerformOverviewAction("self-testrealm", "invite"))
     assert(not addon:PerformOverviewAction("missing-testrealm", "invite"))
     assert(not addon:PerformOverviewAction("solo-testrealm", "invalid"))
@@ -323,7 +323,7 @@ do
     assert(world:peer("Leader-TestRealm", 30, true, true, false, false))
     assert(addon:GetOverviewActionState("leader-testrealm").request == true)
     assert(addon:PerformOverviewAction("leader-testrealm", "request"))
-    assert(#world.joins == 1 and world.joins[1] == "Leader-TestRealm" and #world.invites == 1,
+    assert(#world.joins == 1 and world.joins[1] == "Leader" and #world.invites == 1,
         "Request to join uses the native request API without accepting or inviting automatically")
     assert(world:peer("Member-TestRealm", 30, true, false, false, false))
     assert(addon:GetOverviewActionState("member-testrealm").request == true,
@@ -363,8 +363,8 @@ do
         "A stale direct invitation cannot become a suggestion after losing invite permission")
     world.environment.C_PartyInfo.CanInvite = canInvite
     assert(addon:PerformOverviewAction("solo-testrealm", "suggest"))
-    assert(#world.invites == 1 and world.invites[1] == "Solo-TestRealm" and #world.joins == 0,
-        "An ordinary member uses InviteUnit with the complete name for a native invitation suggestion")
+    assert(#world.invites == 1 and world.invites[1] == "Solo" and #world.joins == 0,
+        "An ordinary member uses InviteUnit with the local native name for an invitation suggestion")
     world.leader = true
     assertAction("invite")
     assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"),
@@ -424,6 +424,44 @@ do
     assert(not addon:GetOverviewActionState("grouped-testrealm").partyInfo, "Offline status cannot claim another group")
     assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "Stale contact cannot authorize a suggestion")
     assert(#world.invites == 1 and #world.joins == 0, "Rejected suggestions make no native party calls")
+end
+
+-- Native party targets omit only our current realm, without rewriting player history.
+do
+    for _, case in ipairs({
+        { sender = "Friend-TestRealm", id = "friend-testrealm", target = "Friend" },
+        { sender = "Friend-OtherRealm", id = "friend-otherrealm", target = "Friend-OtherRealm" },
+        { sender = "Friend", id = "friend-testrealm", target = "Friend" },
+        { sender = "Friend-TestRealm", id = "friend-testrealm", target = "Friend-TestRealm", unknownRealm = true },
+        { sender = "Friend-Surname", id = "friend-surname", target = "Friend-Surname", surname = true },
+        { sender = "Restored", id = "restored-camwoweu5realm8pvp", target = "Restored",
+            realm = "camwoweu5realm8pvp", savedName = "Restored-Cam Wow EU5 Realm8 PvP" },
+    }) do
+        local profile = case.savedName and { schemaVersion = 4, position = { sharing = false }, roster = { peers = {
+            [case.id] = { name = case.savedName, level = 20, seenAt = 2000000000 },
+        } } } or nil
+        local addon, world = newAddon(profile, false, nil, function(environment)
+            if case.realm then environment.GetNormalizedRealmName = function() return case.realm end end
+            if case.unknownRealm then environment.GetNormalizedRealmName = function() return nil end end
+            if case.surname then
+                environment.NameUtil.GetUnmodifiedUnitFullName = function() return "Self-Surname" end
+            end
+        end)
+        world:login(); world:connect()
+        for sequence, action in ipairs({ "invite", "suggest", "request" }) do
+            world.grouped, world.members = action == "suggest", action == "suggest" and 2 or 0
+            assert(world:peer(case.sender, 20, action == "request", true, false, false, nil, sequence))
+            local row = assert(world:find(case.id))
+            local storedName, history = row.name, copy(addon.db)
+            local calls = action == "request" and world.joins or world.invites
+            local count = #calls
+            assert(addon:PerformOverviewAction(case.id, action))
+            assert(#calls == count + 1 and calls[#calls] == case.target,
+                action .. " must use the native target " .. case.target)
+            assert(world:find(case.id).name == storedName and equal(history, addon.db),
+                "Native target formatting preserves canonical player identities and saved history")
+        end
+    end
 end
 
 -- Unsupported APIs, read-only settings and logout cannot mutate or send on a dead lifecycle.

@@ -470,9 +470,14 @@ function addon:PerformOverviewAction(id, action)
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     if not row then return false, "This player is no longer available." end
+    local target = row.name
+    local character, realm = target:match("^([^%-]+)%-(.+)$")
+    local localRealm = NativeGroupRealm()
+    -- Match native party-menu naming without shortening foreign realms or surnames.
+    if realm and localRealm and realm:gsub("%s", ""):lower() == localRealm:lower() then target = character end
     -- WoW routes InviteUnit from an ordinary member as a suggestion to the leader.
     local callback = action == "request" and C_PartyInfo.RequestInviteFromUnit or C_PartyInfo.InviteUnit
-    local ok = pcall(callback, row.name)
+    local ok = pcall(callback, target)
     if not ok then return false, "WoW could not process this party action. Try again." end
     return true, "Party action requested. Watch WoW's invitation notices for the result."
 end
