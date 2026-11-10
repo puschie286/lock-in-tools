@@ -120,6 +120,10 @@ function addon:GetNativeGroupMemberID(unit)
     if id and state.units[id] == unit then return id, name end
 end
 
+function addon:GetNativePlayerID()
+    return NativeGroupUnitID("player", NativeGroupRealm())
+end
+
 function addon:RefreshNativeGroupMembership()
     if not self.nativeGroupMembership then self:InitializeNativeGroupMembership(); return end
     local state, units, ambiguous = self.nativeGroupMembership, {}, {}

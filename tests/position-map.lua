@@ -283,9 +283,9 @@ local function LoadMap()
         environment.WorldMapFrame = map
     end
 
-    function world:fire(event, name)
+    function world:fire(event, ...)
         for _, frame in ipairs(self.frames) do
-            if frame.events[event] then frame.callback(frame, event, name) end
+            if frame.events[event] then frame.callback(frame, event, ...) end
         end
     end
     function world:openMenu(tag)
@@ -425,11 +425,13 @@ local filteredPeer = { name = "Alice-Realm", map = 101, x = 0.25, y = 0.5, onlin
 filtered.positions.alice = filteredPeer
 filtered:InitializePositionMap()
 local menu = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")
-assert(#menu == 4 and menu[1].kind == "native" and menu[2].kind == "divider"
+assert(#menu == 5 and menu[1].kind == "native" and menu[2].kind == "divider"
     and menu[3].text == "LockInTools", "append a distinct addon section without changing native filters")
-local icons = menu[4]
+local icons, deathMarkers = menu[4], menu[5]
 assert(icons.text == "Show player icons" and icons:IsSelected() and icons.enabled,
     "the world-map filter reflects the default-enabled preference")
+assert(deathMarkers.text == "Show death markers" and deathMarkers:IsSelected() and deathMarkers.enabled,
+    "the world-map death marker filter defaults on independently")
 assert(#filterWorld:openMenu("MENU_MINIMAP_TRACKING") == 1, "leave other map menus alone")
 filteredPeer.x = 0.3
 filtered:RefreshPositionPins()
@@ -449,20 +451,25 @@ filterWorld.map:show()
 assert(#filterWorld.map.pins == 0 and filterWorld.created == createdWhileFiltered
     and filtered.positions.alice == filteredPeer, "hidden updates and map changes preserve the model without creating pins")
 menu = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")
-icons = menu[4]
-assert(#menu == 4 and not icons:IsSelected(), "reopening has one checkbox with the current preference")
+icons, deathMarkers = menu[4], menu[5]
+assert(#menu == 5 and not icons:IsSelected() and deathMarkers:IsSelected(),
+    "reopening reflects both preferences without duplicating checkboxes")
 icons:Click()
 assert(filtered.db.position.showPlayerIcons and #filterWorld.map.pins == 1 and filterWorld.map.unrelatedPin,
     "checking the filter immediately restores only addon pins")
 Near(filterWorld.map.pins[1].x, 0.35)
 assert(filterWorld.map.pins[1]:GetScript("OnUpdate") == nil, "restored pins snap to the latest received position")
 filtered.savedDataReadOnly = true
-icons = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")[4]
-assert(not icons.enabled, "newer-schema settings disable the map checkbox")
+menu = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")
+icons, deathMarkers = menu[4], menu[5]
+assert(not icons.enabled and not deathMarkers.enabled, "newer-schema settings disable the map checkboxes")
 icons:Click()
-assert(filtered:GetShowPlayerIcons() and #filterWorld.map.pins == 1, "disabled checkbox preserves read-only settings")
+deathMarkers:Click()
+assert(filtered:GetShowPlayerIcons() and filtered:GetShowDeathMarkers() and #filterWorld.map.pins == 1,
+    "disabled checkboxes preserve read-only settings")
 filtered.savedDataReadOnly, filtered.initialized = false, false
-assert(not filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")[4].enabled, "disable the checkbox while settings are loading")
+menu = filterWorld:openMenu("MENU_WORLD_MAP_TRACKING")
+assert(not menu[4].enabled and not menu[5].enabled, "disable the checkboxes while settings are loading")
 
 local delayedMenu, delayedMenuWorld = LoadMap()
 local nativeMenu = delayedMenuWorld.environment.Menu
@@ -1266,6 +1273,7 @@ do
     local mapped, clock = LoadDeathMap()
     clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
     mapped.db.position.sharing, mapped.db.position.keepLastKnown = false, false
+    assert(mapped:GetShowDeathMarkers(), "death markers default on for a profile without the preference")
     mapped:InitializePositionMap()
     clock:setLife("party1", "dead", 101, 0.23, 0.42)
     clock:setLife("party1", "ghost", 102, 0.8, 0.9)
@@ -1290,12 +1298,25 @@ do
     clock.map:show()
     assert(#clock:deathPins() == 1 and not clock.tooltip:IsShown(), "reopening restores the skull without its tooltip")
 
-    assert(mapped:SetShowPlayerIcons(false) and #clock:deathPins() == 0, "the map filter hides death pins")
-    assert(mapped:SetShowPlayerIcons(true))
+    mapped.db.position.sharing = true
+    mapped.positions.bob = { name = "Bob-Realm", map = 101, x = 0.4, y = 0.5, online = true }
+    mapped:RefreshPositionPins()
+    local deathFilter = clock:openMenu("MENU_WORLD_MAP_TRACKING")[5]
+    deathFilter:Click()
+    assert(not mapped:GetShowDeathMarkers() and mapped.db.position.showDeathMarkers == false
+        and #clock:deathPins() == 0 and FindPin(clock, "Bob-Realm"),
+        "disabling death markers hides only skulls and saves the preference")
+    deathFilter = clock:openMenu("MENU_WORLD_MAP_TRACKING")[5]
+    assert(not deathFilter:IsSelected(), "reopening the menu reflects the saved death marker preference")
+    deathFilter:Click()
+    assert(mapped:GetShowDeathMarkers() and mapped.db.position.showDeathMarkers == true)
     pins = clock:deathPins()
-    assert(#pins == 1, "restoring the map filter shows the frozen location with sharing and retention off")
+    assert(#pins == 1, "re-enabling death markers restores the frozen location")
     Near(pins[1].x, 0.23)
     Near(pins[1].y, 0.42)
+    assert(mapped:SetShowPlayerIcons(false) and #clock.map.pins == 1 and #clock:deathPins() == 1,
+        "disabling player icons keeps the death marker visible")
+    assert(mapped:SetShowPlayerIcons(true))
 
     clock.rectangles["101:100"] = { 0.1, 0.5, 0.2, 0.6 }
     clock.map:changeMap(100)
@@ -1312,9 +1333,12 @@ do
     clock.nativeConnected.party1 = true
     clock:setLife("party1", "alive", 102, 0.8, 0.9)
     assert(#clock:deathPins() == 0, "reviving after release removes the visible death pin")
+    assert(mapped:SetShowDeathMarkers(false))
     clock:setLife("party1", "dead", 101, 0.6, 0.7)
+    assert(#clock:deathPins() == 0, "death markers stay hidden when another player dies")
+    assert(mapped:SetShowDeathMarkers(true))
     pins = clock:deathPins()
-    assert(#pins == 1, "a later death creates a new pin")
+    assert(#pins == 1, "a death that occurred while markers were hidden has a captured location")
     Near(pins[1].x, 0.6)
     Near(pins[1].y, 0.7)
     clock:hover(pins[1])
@@ -1372,6 +1396,78 @@ do
         "a missing death position cannot turn a retained player location into a death pin")
     clock:setLife("party1", "ghost", 101, 0.4, 0.5)
     assert(#clock:deathPins() == 0, "a readable ghost position cannot substitute for the missing death position")
+end
+
+do
+    local helpers = dofile("tests/support/helpers.lua")
+    local original, before = LoadDeathMap()
+    before.groupUnits.party1, before.partyCount = { "Alice", "Realm" }, 1
+    original:InitializePositionMap()
+    before:fire("PLAYER_ENTERING_WORLD", true, false)
+    before:setLife("party1", "dead", 101, 0.21, 0.43)
+    before:setLife("party1", "ghost", 102, 0.8, 0.9)
+    before:fire("PLAYER_LOGOUT")
+    local saved = helpers.copy(original.db)
+
+    local function Restore(scenario, database)
+        local mapped, clock = LoadDeathMap()
+        mapped.db = helpers.copy(database or saved)
+        mapped.savedDataReadOnly = scenario.readOnly
+        clock.groupUnits.player[1] = scenario.observer or "Self"
+        clock.serverNow = before.serverNow + (scenario.elapsed or 1)
+        if scenario.life ~= "departed" then
+            clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
+            clock.life.party1 = scenario.life or "ghost"
+            clock.nativeConnected.party1 = scenario.connected ~= false
+            clock.unitPositions.party1 = { map = 102, x = 0.8, y = 0.9 }
+        end
+        clock:loadNativeMap(true)
+        mapped:InitializePositionMap()
+        assert(#clock:deathPins() == 0, "saved locations stay hidden until entering the world on login or reload")
+        clock:fire("PLAYER_ENTERING_WORLD", scenario.initialLogin == true, scenario.reload ~= false)
+        return mapped, clock
+    end
+
+    local reloaded, clock = Restore({ elapsed = 3600 })
+    local pins = clock:deathPins()
+    assert(#pins == 1, "UI reload restores an old death location for the still-grouped ghost")
+    Near(pins[1].x, 0.21)
+    Near(pins[1].y, 0.43)
+    clock:fire("PLAYER_ENTERING_WORLD", false, false)
+    assert(#clock:deathPins() == 1, "a later zone entry preserves the confirmed death location")
+    clock.map:changeMap(102)
+    assert(#clock:deathPins() == 0, "reload does not move the marker to the ghost's current position")
+    clock.map:changeMap(101)
+    clock:setLife("party1", "alive", 102, 0.8, 0.9)
+    assert(#clock:deathPins() == 0, "revive removes a restored death location")
+    clock:fire("PLAYER_LOGOUT")
+    local _, afterRevive = Restore({ elapsed = 3601 }, reloaded.db)
+    assert(#afterRevive:deathPins() == 0, "a later reload cannot restore a cleared death location")
+
+    local _, loggedIn = Restore({ initialLogin = true, reload = false, elapsed = 7200 })
+    pins = loggedIn:deathPins()
+    assert(#pins == 1, "fresh login restores an old death location for the still-grouped ghost")
+    Near(pins[1].x, 0.21)
+    Near(pins[1].y, 0.43)
+
+    local _, zoned = Restore({ reload = false })
+    assert(#zoned:deathPins() == 0, "ordinary zone entry does not restore a saved death location")
+
+    for _, scenario in ipairs({
+        { life = "alive", description = "for a member who revived" },
+        { life = "departed", description = "for a member who left" },
+        { connected = false, description = "for a member whose status cannot be confirmed" },
+        { observer = "Other", description = "for a different observing character" },
+        { readOnly = true, description = "from a newer-schema database" },
+    }) do
+        local mapped, rejected = Restore(scenario)
+        assert(#rejected:deathPins() == 0, "skip restoring a death location " .. scenario.description)
+        if scenario.readOnly then
+            assert(helpers.equal(mapped.db, saved), "reload preserves newer-schema saved data")
+        else
+            assert(mapped.db.position.deathMarkers == nil, "entry consumes an ineligible saved snapshot")
+        end
+    end
 end
 
 local function CheckShowPlayerOnMap()

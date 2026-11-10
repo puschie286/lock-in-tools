@@ -105,6 +105,7 @@ function addon:InitializePositions()
     if type(settings.sharing) ~= "boolean" then settings.sharing = true end
     if type(settings.keepLastKnown) ~= "boolean" then settings.keepLastKnown = true end
     if type(settings.showPlayerIcons) ~= "boolean" then settings.showPlayerIcons = true end
+    if type(settings.showDeathMarkers) ~= "boolean" then settings.showDeathMarkers = true end
     if type(settings.peers) ~= "table" then settings.peers = {} end
     if not settings.keepLastKnown then settings.peers = {} end
     self.positionState = { peers = {}, latest = {}, classes = {}, generation = 0 }
@@ -211,6 +212,18 @@ function addon:SetShowPlayerIcons(enabled)
     if not allowed then return false, message end
     self.db.position.showPlayerIcons = enabled
     self:Notify("POSITION_VISIBILITY_CHANGED")
+    return true
+end
+
+function addon:GetShowDeathMarkers()
+    return not self.db or type(self.db.position) ~= "table" or self.db.position.showDeathMarkers ~= false
+end
+
+function addon:SetShowDeathMarkers(enabled)
+    local allowed, message = CanChange(self, enabled)
+    if not allowed then return false, message end
+    self.db.position.showDeathMarkers = enabled
+    self:Notify("DEATH_MARKER_VISIBILITY_CHANGED")
     return true
 end
 

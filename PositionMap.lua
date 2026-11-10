@@ -215,6 +215,61 @@ local function PruneDeathLocations(self)
     if changed and self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
 end
 
+local function SaveDeathLocations(self)
+    if self.savedDataReadOnly then return end
+    local settings = self.db.position
+    settings.deathMarkers = nil
+    if not next(deathLocations) then return end
+    local owner = self:GetNativePlayerID()
+    if not owner then return end
+    local entries = {}
+    for id, position in pairs(deathLocations) do
+        entries[id] = { map = position.map, x = position.x, y = position.y }
+    end
+    settings.deathMarkers = { owner = owner, entries = entries }
+end
+
+local function RestoreDeathLocations(self, initialLogin, reloading)
+    if self.savedDataReadOnly then return end
+    local saved = self.db.position.deathMarkers
+    -- Consume the snapshot once, while checking eligibility against the startup roster.
+    self.db.position.deathMarkers = nil
+    if IsSecret(initialLogin) or IsSecret(reloading) or (initialLogin ~= true and reloading ~= true)
+        or type(saved) ~= "table" or type(saved.entries) ~= "table" then return end
+    local owner = self:GetNativePlayerID()
+    if not owner or saved.owner ~= owner then return end
+
+    -- Other entering-world listeners may not have refreshed the roster yet.
+    self:RefreshNativeGroupMembership()
+    local changed = false
+    for id, position in pairs(saved.entries) do
+        if id ~= owner and type(position) == "table" and MapID(position.map) and Coordinate(position.x)
+            and Coordinate(position.y) and not deathLocations[id] then
+            local unit = self:GetNativeGroupUnit(id)
+            if unit and NativeValue(UnitIsConnected, unit) == true and NativeValue(UnitIsDeadOrGhost, unit) == true then
+                local memberID, name = self:GetNativeGroupMemberID(unit)
+                if memberID == id then
+                    deathLocations[id] = { map = position.map, x = position.x, y = position.y,
+                        name = self:GetPlayerDisplayName(name) }
+                    changed = true
+                end
+            end
+        end
+    end
+    if changed and self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+end
+
+local function OnDeathLocationEvent(self, event, unitOrInitialLogin, reloading)
+    if event == "PLAYER_ENTERING_WORLD" then
+        self.positionDeathEvents:UnregisterEvent(event)
+        RestoreDeathLocations(self, unitOrInitialLogin, reloading)
+    elseif event == "PLAYER_LOGOUT" then
+        SaveDeathLocations(self)
+    else
+        UpdateDeathLocation(self, event, unitOrInitialLogin)
+    end
+end
+
 local function DisplayPosition(motion, now)
     if motion.started then
         local progress = math.max(0, math.min(1, (now - motion.started) / INTERPOLATION_SECONDS))
@@ -250,12 +305,19 @@ local function RegisterMapFilter(self)
     Menu.ModifyMenu("MENU_WORLD_MAP_TRACKING", function(_, rootDescription)
         rootDescription:CreateDivider()
         rootDescription:CreateTitle("LockInTools")
-        local checkbox = rootDescription:CreateCheckbox("Show player icons", function()
+        local editable = self.initialized and not self.savedDataReadOnly
+        local playerIcons = rootDescription:CreateCheckbox("Show player icons", function()
             return self:GetShowPlayerIcons()
         end, function()
             self:SetShowPlayerIcons(not self:GetShowPlayerIcons())
         end)
-        checkbox:SetEnabled(self.initialized and not self.savedDataReadOnly)
+        playerIcons:SetEnabled(editable)
+        local deathMarkers = rootDescription:CreateCheckbox("Show death markers", function()
+            return self:GetShowDeathMarkers()
+        end, function()
+            self:SetShowDeathMarkers(not self:GetShowDeathMarkers())
+        end)
+        deathMarkers:SetEnabled(editable)
     end)
     self.positionMapFilterRegistered = true
 end
@@ -420,20 +482,24 @@ function Provider:OnUpdate()
     end
 end
 
-function Provider:RemoveAllData()
+function Provider:RemovePositionPins()
     self:GetMap():RemoveAllPinsByTemplate(PIN_TEMPLATE)
-    self:GetMap():RemoveAllPinsByTemplate(DEATH_PIN_TEMPLATE)
     self.positions, self.pins, self.pinsBySender = {}, {}, {}
     self.unmapped = {}
     self.nativeMarkers = {}
-    self.mapID = nil
     self.hasGroupedPeers, self.nativeCheckedAt = nil, nil
+end
+
+function Provider:RemoveAllData()
+    self:RemovePositionPins()
+    self:GetMap():RemoveAllPinsByTemplate(DEATH_PIN_TEMPLATE)
+    self.mapID = nil
 end
 
 function Provider:RefreshDeathPins()
     local map = self:GetMap()
     map:RemoveAllPinsByTemplate(DEATH_PIN_TEMPLATE)
-    if not map:IsShown() or not self.addon:GetShowPlayerIcons() then return end
+    if not map:IsShown() or not self.addon:GetShowDeathMarkers() then return end
     local mapID = map:GetMapID()
     for _, position in pairs(deathLocations) do
         local ok, x, y = pcall(PositionOnMap, position, mapID)
@@ -517,14 +583,15 @@ end
 
 function Provider:RefreshAllData(fromOnShow, incremental)
     local map = self:GetMap()
-    if not map:IsShown() or not self.addon:GetShowPlayerIcons() then self:RemoveAllData(); return end
-    if not self.pins then self:RemoveAllData() end
+    if not map:IsShown() then self:RemoveAllData(); return end
     local mapID = map:GetMapID()
-    if not incremental or self.mapID ~= mapID then self:RefreshDeathPins() end
     -- Native map/art changes must reproject even when the numeric map ID is unchanged.
     local keepMotion = incremental and self.mapID == mapID
-    if not keepMotion then self.unmapped, self.nativeMarkers = {}, {} end
     self.mapID = mapID
+    if not keepMotion then self:RefreshDeathPins() end
+    if not self.addon:GetShowPlayerIcons() then self:RemovePositionPins(); return end
+    if not self.pins then self:RemovePositionPins() end
+    if not keepMotion then self.unmapped, self.nativeMarkers = {}, {} end
     local now = GetTime()
     local party, raid
     local peers = {}
@@ -600,6 +667,9 @@ for _, notification in ipairs({ "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED",
     "POSITION_VISIBILITY_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
 end
+addon:RegisterNotification("DEATH_MARKER_VISIBILITY_CHANGED", function()
+    if addon.positionMapProvider then addon.positionMapProvider:RefreshDeathPins() end
+end)
 addon:RegisterNotification("NATIVE_GROUP_CHANGED", function()
     PruneDeathLocations(addon)
     addon:RefreshNativePositionPins()
@@ -613,7 +683,7 @@ function addon:InitializePositionMap()
     end
     if not self.positionDeathEvents then
         self.positionDeathEvents = self:RegisterGameEvents({ "UNIT_FLAGS", "UNIT_HEALTH", "PLAYER_FLAGS_CHANGED",
-            "UNIT_CONNECTION" }, UpdateDeathLocation)
+            "UNIT_CONNECTION", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }, OnDeathLocationEvent)
     end
     RegisterMapFilter(self)
     if not self.positionMapProvider and WorldMapFrame and WorldMapFrame.AddDataProvider

@@ -162,6 +162,7 @@ local addon, world = newAddon()
 assert(addon.db.schemaVersion == 4)
 assert(addon.db.position.sharing == true and addon.db.position.keepLastKnown == true)
 assert(addon:GetShowPlayerIcons() == true and addon.db.position.showPlayerIcons == true)
+assert(addon:GetShowDeathMarkers() == true and addon.db.position.showDeathMarkers == true)
 assert(addon.db.position.showTrails == nil and addon.db.position.trailLength == nil,
     "New profiles do not create retired movement-trail preferences")
 assert(next(addon:GetSharedPositions()) == nil)
@@ -200,15 +201,19 @@ end
 do
     local display, clock = newAddon()
     assert(display:SetShowPlayerIcons(false))
+    assert(display:SetShowDeathMarkers(false))
     local restored = newAddon(copy(display.db))
-    assert(restored:GetShowPlayerIcons() == false)
+    assert(restored:GetShowPlayerIcons() == false and restored:GetShowDeathMarkers() == false)
     local before = copy(display.db)
     assert(not display:SetShowPlayerIcons("false"))
+    assert(not display:SetShowDeathMarkers("false"))
     display.savedDataReadOnly = true
     assert(not display:SetShowPlayerIcons(true) and equal(display.db, before))
+    assert(not display:SetShowDeathMarkers(true) and equal(display.db, before))
     local invalid = copy(before)
-    invalid.position.showPlayerIcons = "false"
-    assert(newAddon(invalid):GetShowPlayerIcons() == true)
+    invalid.position.showPlayerIcons, invalid.position.showDeathMarkers = "false", "false"
+    local fallback = newAddon(invalid)
+    assert(fallback:GetShowPlayerIcons() and fallback:GetShowDeathMarkers())
 end
 -- Active preferences preserve retired values in both writable and read-only saved data.
 for _, readOnly in ipairs({ false, true }) do
