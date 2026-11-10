@@ -89,8 +89,15 @@ local function NativeGroupIdentity(name, realm)
     return Identity(name)
 end
 
-local function CacheNativeGroupUnit(units, ambiguous, name, realm, unit)
-    local id = NativeGroupIdentity(name, realm)
+local function NativeGroupUnitID(unit, fallbackRealm)
+    if type(UnitFullName) ~= "function" then return nil end
+    local ok, name, realm = pcall(UnitFullName, unit)
+    if not ok or IsSecret(realm) or (realm ~= nil and type(realm) ~= "string") then return nil end
+    if realm == nil or realm == "" then realm = fallbackRealm end
+    return NativeGroupIdentity(name, realm), name
+end
+
+local function CacheNativeGroupUnit(units, ambiguous, id, unit)
     if not id or ambiguous[id] then return end
     if units[id] and units[id] ~= unit then
         units[id], ambiguous[id] = nil, true
@@ -104,6 +111,13 @@ function addon:GetNativeGroupUnit(name)
     local state = self.nativeGroupMembership
     local id = NativeGroupIdentity(name, state.realm)
     return id and state.units[id] or nil
+end
+
+function addon:GetNativeGroupMemberID(unit)
+    local state = self.nativeGroupMembership
+    if not state then return nil end
+    local id, name = NativeGroupUnitID(unit, state.realm)
+    if id and state.units[id] == unit then return id, name end
 end
 
 function addon:RefreshNativeGroupMembership()
@@ -120,19 +134,13 @@ function addon:RefreshNativeGroupMembership()
         if count then
             for index = 1, count do
                 local unit = (inRaid and "raid" or "party") .. index
-                if type(UnitFullName) == "function" then
-                    local readable, name, realm = pcall(UnitFullName, unit)
-                    if readable and not IsSecret(realm) and (realm == nil or type(realm) == "string") then
-                        if realm == nil or realm == "" then realm = state.realm end
-                        CacheNativeGroupUnit(units, ambiguous, name, realm, unit)
-                    end
-                end
+                CacheNativeGroupUnit(units, ambiguous, NativeGroupUnitID(unit, state.realm), unit)
                 -- Addon senders use unmodified names, which can differ from
                 -- UnitFullName's internal realm. Cache both complete identities;
                 -- an alias shared by two units cannot safely identify either.
                 if NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" then
                     local readable, name = pcall(NameUtil.GetUnmodifiedUnitFullName, unit)
-                    if readable then CacheNativeGroupUnit(units, ambiguous, name, state.realm, unit) end
+                    if readable then CacheNativeGroupUnit(units, ambiguous, NativeGroupIdentity(name, state.realm), unit) end
                 end
             end
         end

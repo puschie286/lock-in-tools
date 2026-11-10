@@ -1,11 +1,14 @@
 local _, addon = ...
 local PIN_TEMPLATE = "LockInToolsPositionPinTemplate"
+local DEATH_PIN_TEMPLATE = "LockInToolsDeathPinTemplate"
 local DOT_TEXTURE = "Interface\\AddOns\\LockInTools\\Media\\PositionDot"
 local RING_TEXTURE = "Interface\\AddOns\\LockInTools\\Media\\PositionRing"
 local DOT_RADIUS, TOOLTIP_INTERVAL = 6, 0.1
 local INTERPOLATION_SECONDS, MAX_INTERPOLATION_DISTANCE = 2, 0.1
-local Provider, Pin = {}, {}
+local Provider, Pin, DeathPin = {}, {}, {}
+local deathLocations = {}
 LockInToolsPositionPinMixin = {}
+LockInToolsDeathPinMixin = {}
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
@@ -164,6 +167,54 @@ local function PositionOnMap(peer, mapID)
     return WorldPositionOnMap(peer, mapID)
 end
 
+local function NativeDeathPosition(unit)
+    local map = NativeValue(C_Map and C_Map.GetBestMapForUnit, unit)
+    if not MapID(map) then return nil end
+    local position = NativeValue(C_Map.GetPlayerMapPosition, map, unit)
+    if not position then return nil end
+    local ok, x, y = pcall(function() return position:GetXY() end)
+    if ok and Coordinate(x) and Coordinate(y) then return { map = map, x = x, y = y } end
+end
+
+local function UpdateDeathLocation(self, event, unit)
+    if IsSecret(unit) or type(unit) ~= "string" then return end
+    local raid = unit:match("^raid%d+$")
+    if not raid and not unit:match("^party[1-4]$") then return end
+    local dead = NativeValue(UnitIsDeadOrGhost, unit)
+    if type(dead) ~= "boolean" or (not dead and not next(deathLocations))
+        or NativeValue(UnitIsConnected, unit) ~= true then return end
+    local id, name = self:GetNativeGroupMemberID(unit)
+    if not id then return end
+    if not dead then
+        if not deathLocations[id] then return end
+        deathLocations[id] = nil
+    else
+        -- A released spirit's coordinates describe its current location.
+        -- Freeze the first readable corpse position until a confirmed revive.
+        if deathLocations[id] or event == "UNIT_CONNECTION"
+            or NativeValue(UnitIsDead, unit) ~= true or NativeValue(UnitIsGhost, unit) ~= false
+            or (raid and NativeValue(UnitIsUnit, unit, "player") ~= false) then return end
+        local position = NativeDeathPosition(unit)
+        if not position then return end
+        position.name = self:GetPlayerDisplayName(name)
+        deathLocations[id] = position
+    end
+    if self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+end
+
+local function PruneDeathLocations(self)
+    local changed = false
+    for id in pairs(deathLocations) do
+        local unit = self:GetNativeGroupUnit(id)
+        if not unit or (NativeValue(UnitIsConnected, unit) == true
+            and NativeValue(UnitIsDeadOrGhost, unit) == false) then
+            deathLocations[id] = nil
+            changed = true
+        end
+    end
+    if changed and self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+end
+
 local function DisplayPosition(motion, now)
     if motion.started then
         local progress = math.max(0, math.min(1, (now - motion.started) / INTERPOLATION_SECONDS))
@@ -319,6 +370,34 @@ function Pin:GetDisplayName()
     return addon:GetPlayerDisplayName(self.playerName)
 end
 
+function DeathPin:OnLoad()
+    self:SetScalingLimits(1, 1, 1)
+    self:SetIgnoreGlobalPinScale(true)
+    self:UseFrameLevelType("PIN_FRAME_LEVEL_CORPSE")
+end
+
+function DeathPin:OnAcquired(x, y, name)
+    self.playerName = name
+    self:SetPosition(x, y)
+end
+
+function DeathPin:OnMouseEnter()
+    if not self.playerName or not GameTooltip or not self:GetMap():IsShown() then return end
+    GameTooltip_SetDefaultAnchor(GameTooltip, self)
+    GameTooltip:SetText(self.playerName, 1, 0, 0)
+    GameTooltip:Show()
+end
+
+function DeathPin:OnMouseLeave()
+    if GameTooltip and GameTooltip:IsOwned(self) then GameTooltip:Hide() end
+end
+
+function DeathPin:OnReleased()
+    self:OnMouseLeave()
+    self.playerName = nil
+    MapCanvasPinMixin.OnReleased(self)
+end
+
 function Provider:OnAdded(map)
     MapCanvasDataProviderMixin.OnAdded(self, map)
     if map.RegisterDataProviderOnUpdate then map:RegisterDataProviderOnUpdate(self) end
@@ -343,11 +422,23 @@ end
 
 function Provider:RemoveAllData()
     self:GetMap():RemoveAllPinsByTemplate(PIN_TEMPLATE)
+    self:GetMap():RemoveAllPinsByTemplate(DEATH_PIN_TEMPLATE)
     self.positions, self.pins, self.pinsBySender = {}, {}, {}
     self.unmapped = {}
     self.nativeMarkers = {}
     self.mapID = nil
     self.hasGroupedPeers, self.nativeCheckedAt = nil, nil
+end
+
+function Provider:RefreshDeathPins()
+    local map = self:GetMap()
+    map:RemoveAllPinsByTemplate(DEATH_PIN_TEMPLATE)
+    if not map:IsShown() or not self.addon:GetShowPlayerIcons() then return end
+    local mapID = map:GetMapID()
+    for _, position in pairs(deathLocations) do
+        local ok, x, y = pcall(PositionOnMap, position, mapID)
+        if ok and x then map:AcquirePin(DEATH_PIN_TEMPLATE, x, y, position.name) end
+    end
 end
 
 function Provider:HasNativeMarker(peer, unit, party, raid, now)
@@ -380,6 +471,7 @@ function Provider:OnHide()
         pin:OnMouseLeave()
         pin:SetScript("OnUpdate", nil)
     end
+    self:GetMap():RemoveAllPinsByTemplate(DEATH_PIN_TEMPLATE)
 end
 
 local function ValidPeer(peer)
@@ -428,6 +520,7 @@ function Provider:RefreshAllData(fromOnShow, incremental)
     if not map:IsShown() or not self.addon:GetShowPlayerIcons() then self:RemoveAllData(); return end
     if not self.pins then self:RemoveAllData() end
     local mapID = map:GetMapID()
+    if not incremental or self.mapID ~= mapID then self:RefreshDeathPins() end
     -- Native map/art changes must reproject even when the numeric map ID is unchanged.
     local keepMotion = incremental and self.mapID == mapID
     if not keepMotion then self.unmapped, self.nativeMarkers = {}, {} end
@@ -507,7 +600,10 @@ for _, notification in ipairs({ "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED",
     "POSITION_VISIBILITY_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
 end
-addon:RegisterNotification("NATIVE_GROUP_CHANGED", function() addon:RefreshNativePositionPins() end)
+addon:RegisterNotification("NATIVE_GROUP_CHANGED", function()
+    PruneDeathLocations(addon)
+    addon:RefreshNativePositionPins()
+end)
 
 function addon:InitializePositionMap()
     self:InitializeNativeGroupMembership()
@@ -515,11 +611,16 @@ function addon:InitializePositionMap()
         self.positionNativeEvents = self:RegisterGameEvents({ "UNIT_CONNECTION", "ZONE_CHANGED_NEW_AREA" },
             function() self:RefreshNativePositionPins() end)
     end
+    if not self.positionDeathEvents then
+        self.positionDeathEvents = self:RegisterGameEvents({ "UNIT_FLAGS", "UNIT_HEALTH", "PLAYER_FLAGS_CHANGED",
+            "UNIT_CONNECTION" }, UpdateDeathLocation)
+    end
     RegisterMapFilter(self)
     if not self.positionMapProvider and WorldMapFrame and WorldMapFrame.AddDataProvider
         and MapCanvasDataProviderMixin and MapCanvasPinMixin then
         -- Keep the XML mixin table stable when native map code loads later.
         Mixin(LockInToolsPositionPinMixin, MapCanvasPinMixin, Pin)
+        Mixin(LockInToolsDeathPinMixin, MapCanvasPinMixin, DeathPin)
         local provider = CreateFromMixins(MapCanvasDataProviderMixin, Provider)
         provider.addon = self
         WorldMapFrame:AddDataProvider(provider)

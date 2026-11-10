@@ -1,5 +1,7 @@
 -- Native MapCanvas callback contracts are mocked; rendering needs in-game checks.
 local loadNotifications = dofile("tests/support/notifications.lua")
+local POSITION_PIN = "LockInToolsPositionPinTemplate"
+local DEATH_PIN = "LockInToolsDeathPinTemplate"
 local function Mix(...)
     local result = {}
     for index = 1, select("#", ...) do
@@ -142,6 +144,7 @@ local function LoadMap()
     end
     -- Simulate a virtual template retaining its mixin table before map load.
     world.templateMixin = assert(environment.LockInToolsPositionPinMixin)
+    world.deathTemplateMixin = environment.LockInToolsDeathPinMixin
 
     function world:loadNativeMap(shown)
         environment.MapCanvasDataProviderMixin = {
@@ -159,7 +162,9 @@ local function LoadMap()
             SetPosition = function(self, x, y) self.x, self.y = x, y end,
             SetScalingLimits = function() end,
             SetIgnoreGlobalPinScale = function() end,
-            UseFrameLevelType = function(_, level) assert(level == "PIN_FRAME_LEVEL_GROUP_MEMBER") end,
+            UseFrameLevelType = function(_, level)
+                assert(level == "PIN_FRAME_LEVEL_GROUP_MEMBER" or level == "PIN_FRAME_LEVEL_CORPSE")
+            end,
             OnReleased = function() world.released = world.released + 1 end,
         }
         local map = { shown = shown, id = 101, pins = {}, pool = {}, unrelatedPin = {},
@@ -207,20 +212,34 @@ local function LoadMap()
             assert(pin.playerName == nil and pin.online == nil and pin.provider == nil and not pin.hovered,
                 "release clears player state before returning the pin to the native pool")
             assert(pin:GetScript("OnUpdate") == nil, "released pins stop their animation callbacks")
-            self.pool[#self.pool + 1] = pin
+            local pool = self.pool[pin.template]
+            pool[#pool + 1] = pin
         end
         function map:RemoveAllPinsByTemplate(template)
-            assert(template == "LockInToolsPositionPinTemplate", "remove only LockInTools pins")
-            while #self.pins > 0 do self:RemovePin(self.pins[#self.pins]) end
+            assert(template == POSITION_PIN or template == DEATH_PIN, "remove only LockInTools pins")
+            for index = #self.pins, 1, -1 do
+                local pin = self.pins[index]
+                if pin.template == template then self:RemovePin(pin) end
+            end
         end
         function map:AcquirePin(template, ...)
-            assert(template == "LockInToolsPositionPinTemplate")
+            assert(template == POSITION_PIN or template == DEATH_PIN, "acquire only LockInTools pins")
             world.acquired = world.acquired + 1
             -- Native AcquirePin expects every mixin method before it calls OnLoad.
-            assert(environment.LockInToolsPositionPinMixin == world.templateMixin)
-            local pin = table.remove(self.pool)
+            local mixin
+            if template == POSITION_PIN then
+                mixin = world.templateMixin
+                assert(environment.LockInToolsPositionPinMixin == mixin)
+            else
+                mixin = assert(world.deathTemplateMixin)
+                assert(environment.LockInToolsDeathPinMixin == mixin)
+            end
+            local pool = self.pool[template]
+            if not pool then pool = {}; self.pool[template] = pool end
+            local pin = table.remove(pool)
             if not pin then
-                pin = Mix(world.templateMixin)
+                pin = Mix(mixin)
+                pin.template = template
                 pin.scripts = {}
                 function pin:SetScript(script, callback) self.scripts[script] = callback end
                 function pin:GetScript(script) return self.scripts[script] end
@@ -1209,6 +1228,152 @@ local function CheckNativeRaidRefreshCost()
 end
 CheckNativeRaidRefreshCost()
 
+local function LoadDeathMap()
+    local mapped, clock = LoadMap()
+    clock.life, clock.unitPositions = {}, {}
+    clock.groupUnits.player = { "Self", "Realm" }
+    local api = clock.environment
+    api.UnitIsUnit = function(unit, other)
+        return clock.groupUnits[unit] ~= nil and clock.groupUnits[unit] == clock.groupUnits[other]
+    end
+    api.UnitIsDead = function(unit) return clock.life[unit] == "dead" end
+    api.UnitIsGhost = function(unit) return clock.life[unit] == "ghost" end
+    api.UnitIsDeadOrGhost = function(unit) return api.UnitIsDead(unit) or api.UnitIsGhost(unit) end
+    clock.mapAPI.GetBestMapForUnit = function(unit)
+        local position = clock.unitPositions[unit]
+        return position and position.map
+    end
+    clock.mapAPI.GetPlayerMapPosition = function(mapID, unit)
+        local position = clock.unitPositions[unit]
+        if position and position.map == mapID and position.x then return Vector(position.x, position.y) end
+    end
+    function clock:setLife(unit, state, mapID, x, y)
+        self.life[unit] = state
+        self.unitPositions[unit] = mapID and { map = mapID, x = x, y = y } or nil
+        self:fire("UNIT_FLAGS", unit)
+    end
+    function clock:deathPins()
+        local pins = {}
+        for _, pin in ipairs(self.map.pins) do
+            if pin.template == DEATH_PIN then pins[#pins + 1] = pin end
+        end
+        return pins
+    end
+    return mapped, clock
+end
+
+do
+    local mapped, clock = LoadDeathMap()
+    clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
+    mapped.db.position.sharing, mapped.db.position.keepLastKnown = false, false
+    mapped:InitializePositionMap()
+    clock:setLife("party1", "dead", 101, 0.23, 0.42)
+    clock:setLife("party1", "ghost", 102, 0.8, 0.9)
+    clock:loadNativeMap(false)
+    clock:fire("ADDON_LOADED", "Blizzard_WorldMap")
+    clock.map:show()
+    local pins = clock:deathPins()
+    assert(#pins == 1, "a death before opening the map retains one pin through spirit release")
+    Near(pins[1].x, 0.23)
+    Near(pins[1].y, 0.42)
+
+    clock:hover(pins[1])
+    assert(clock.tooltip:IsShown() and clock.tooltip:IsOwned(pins[1]) and clock.tooltip.title == "Alice"
+        and clock.tooltip.anchor == "ANCHOR_NONE", "a skull shows the player's display name at the default tooltip anchor")
+    local color = clock.tooltip.titleColor
+    assert(color[1] == 1 and color[2] == 0 and color[3] == 0, "the skull tooltip displays the name in pure red")
+    clock:leave(pins[1])
+    assert(not clock.tooltip:IsShown(), "leaving a skull dismisses its tooltip")
+    clock:hover(pins[1])
+    clock.map:hide()
+    assert(not clock.tooltip:IsShown(), "closing the map dismisses the hovered skull's tooltip")
+    clock.map:show()
+    assert(#clock:deathPins() == 1 and not clock.tooltip:IsShown(), "reopening restores the skull without its tooltip")
+
+    assert(mapped:SetShowPlayerIcons(false) and #clock:deathPins() == 0, "the map filter hides death pins")
+    assert(mapped:SetShowPlayerIcons(true))
+    pins = clock:deathPins()
+    assert(#pins == 1, "restoring the map filter shows the frozen location with sharing and retention off")
+    Near(pins[1].x, 0.23)
+    Near(pins[1].y, 0.42)
+
+    clock.rectangles["101:100"] = { 0.1, 0.5, 0.2, 0.6 }
+    clock.map:changeMap(100)
+    pins = clock:deathPins()
+    assert(#pins == 1, "death pins project onto a parent map")
+    Near(pins[1].x, 0.192)
+    Near(pins[1].y, 0.368)
+    clock.map:changeMap(102)
+    assert(#clock:deathPins() == 0, "ghost movement does not place a pin on the release map")
+    clock.map:changeMap(101)
+    clock.nativeConnected.party1, clock.life.party1 = false, nil
+    clock:fire("UNIT_CONNECTION", "party1")
+    assert(#clock:deathPins() == 1, "an offline member's unavailable death state does not imply revival")
+    clock.nativeConnected.party1 = true
+    clock:setLife("party1", "alive", 102, 0.8, 0.9)
+    assert(#clock:deathPins() == 0, "reviving after release removes the visible death pin")
+    clock:setLife("party1", "dead", 101, 0.6, 0.7)
+    pins = clock:deathPins()
+    assert(#pins == 1, "a later death creates a new pin")
+    Near(pins[1].x, 0.6)
+    Near(pins[1].y, 0.7)
+    clock:hover(pins[1])
+    clock:setLife("party1", "alive", 101, 0.6, 0.7)
+    assert(#clock:deathPins() == 0 and not clock.tooltip:IsShown(),
+        "reviving before release removes the hovered death pin and its tooltip")
+end
+
+do
+    local mapped, clock = LoadDeathMap()
+    clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
+    clock:loadNativeMap(true)
+    mapped:InitializePositionMap()
+    clock:setLife("party1", "dead", 101, 0.2, 0.3)
+    clock.isRaid, clock.partyCount, clock.raidCount = true, 0, 3
+    clock.groupUnits.raid1 = clock.groupUnits.player
+    clock.groupUnits.raid2, clock.groupUnits.party1 = clock.groupUnits.party1, nil
+    clock.groupUnits.raid3 = { "Bob", "Realm" }
+    clock.life.raid2 = "ghost"
+    clock:fire("GROUP_ROSTER_UPDATE")
+    local pins = clock:deathPins()
+    assert(#pins == 1, "party to raid conversion preserves the same member's death location")
+    Near(pins[1].x, 0.2)
+    Near(pins[1].y, 0.3)
+
+    clock:setLife("raid3", "dead", 101, 0.7, 0.8)
+    assert(#clock:deathPins() == 2, "a second raid death displays a separate pin")
+    clock:setLife("raid1", "dead", 101, 0.5, 0.6)
+    assert(#clock:deathPins() == 2, "the observer's own raid unit uses the native corpse marker")
+    clock.groupUnits.raid2, clock.groupUnits.raid3 = clock.groupUnits.raid3, nil
+    clock.raidCount, clock.life.raid2 = 2, "dead"
+    clock:fire("GROUP_ROSTER_UPDATE")
+    pins = clock:deathPins()
+    assert(#pins == 1, "leaving removes the correct member's pin even when another member reuses the token")
+    Near(pins[1].x, 0.7)
+    Near(pins[1].y, 0.8)
+    clock.isRaid, clock.raidCount = false, 0
+    clock.groupUnits.raid1, clock.groupUnits.raid2 = nil, nil
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock:deathPins() == 0, "leaving the group clears all remaining death pins")
+    clock.groupUnits.party1, clock.partyCount = { "Bob", "Realm" }, 1
+    clock.life.party1 = "ghost"
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock:deathPins() == 0, "a later group does not restore a discarded death location")
+end
+
+do
+    local mapped, clock = LoadDeathMap()
+    clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
+    mapped.positions.alice = { name = "Alice-Realm", map = 101, x = 0.8, y = 0.9, online = false }
+    clock:loadNativeMap(true)
+    mapped:InitializePositionMap()
+    clock:setLife("party1", "dead", 101)
+    assert(#clock:deathPins() == 0 and FindPin(clock, "Alice-Realm"),
+        "a missing death position cannot turn a retained player location into a death pin")
+    clock:setLife("party1", "ghost", 101, 0.4, 0.5)
+    assert(#clock:deathPins() == 0, "a readable ghost position cannot substitute for the missing death position")
+end
+
 local function CheckShowPlayerOnMap()
     local mapped, clock = LoadMap()
     local id, calls = "alice-realm", 0
@@ -1315,4 +1480,4 @@ local function CheckShowPlayerOnMap()
 end
 CheckShowPlayerOnMap()
 
-print("PASS: map attachment/filter, player map action, compact player details, tooltip ownership, projection, movement and pooled lifecycle")
+print("PASS: map attachment/filter, player map action, compact player details, tooltip ownership, projection, movement, native death pins and pooled lifecycle")
