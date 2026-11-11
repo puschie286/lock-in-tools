@@ -52,6 +52,7 @@ function addon:InitializeRanking()
     local saved = type(database.ranking) == "table" and database.ranking or {}
     local settings = self.savedDataReadOnly and {} or saved
     settings.enabled = saved.enabled == true
+    settings.hideInCombat = saved.hideInCombat == true
     settings.shownPlayers = PlayerVisibility(self, saved)
     settings.includeFriends, settings.includedFriends = nil, nil
     settings.burningEffect = saved.burningEffect ~= false
@@ -148,6 +149,14 @@ function addon:SetRankingEnabled(enabled)
     local success, message = Editable(self, enabled)
     if not success then return false, message end
     self.rankingSettings.enabled, self.rankingOverlayDismissed = enabled, nil
+    self:Notify("RANKING_CHANGED")
+    return true
+end
+
+function addon:SetRankingHideInCombat(enabled)
+    local success, message = Editable(self, enabled)
+    if not success then return false, message end
+    self.rankingSettings.hideInCombat = enabled
     self:Notify("RANKING_CHANGED")
     return true
 end

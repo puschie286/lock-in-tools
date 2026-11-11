@@ -59,6 +59,66 @@ do
     assert(not saved.ranking.enabled and not panel:IsShown(), "the explicit off command hides and persists ranking")
 end
 
+-- Combat visibility follows its own preference while preserving the normal overlay toggle.
+do
+    local saved = settings(SECRET, false)
+    saved.ranking = { enabled = true }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    local inCombat = false
+    api.InCombatLockdown = function() return inCombat end
+    loadOverlay(ranking, api)
+    world:initialize()
+    local panel = ranking.rankingOverlay
+    local command = api.SlashCmdList.LOCKINTOOLS
+
+    inCombat = true
+    world.fire("PLAYER_REGEN_DISABLED")
+    assert(panel:IsVisible() and saved.ranking.hideInCombat == false,
+        "existing profiles keep showing the overlay in combat until they opt in")
+    command("options")
+    local options = ranking.optionsPanel
+    local hideInCombat = options.rankingHideInCombat
+    assert(hideInCombat:IsVisible() and not hideInCombat:GetChecked(),
+        "General Settings exposes the unchecked combat visibility preference")
+    hideInCombat:Click()
+    assert(hideInCombat:GetChecked() and saved.ranking.hideInCombat and not panel:IsShown()
+        and not panel.scripts.OnUpdate and saved.ranking.enabled and options.rankingEnabled:GetChecked(),
+        "opting in during combat hides the overlay and stops its refresh without disabling it")
+    ranking:Notify("DATA_CHANGED")
+    ranking:Notify("RANKING_CHANGED")
+    assert(not panel:IsShown() and not panel.scripts.OnUpdate, "refresh notifications keep the overlay hidden during combat")
+    hideInCombat:Click()
+    assert(not saved.ranking.hideInCombat and panel:IsVisible() and panel.scripts.OnUpdate,
+        "opting out during combat restores the enabled overlay immediately")
+    hideInCombat:Click()
+
+    inCombat = false
+    world.fire("PLAYER_REGEN_ENABLED")
+    assert(panel:IsVisible() and panel.scripts.OnUpdate, "leaving combat restores the enabled overlay and its refresh")
+    inCombat = true
+    world.fire("PLAYER_REGEN_DISABLED")
+    assert(not panel:IsShown() and saved.ranking.enabled, "entering combat hides the overlay without changing saved visibility")
+    command("ranking")
+    inCombat = false
+    world.fire("PLAYER_REGEN_ENABLED")
+    assert(not saved.ranking.enabled and not panel:IsShown(), "turning ranking off during combat prevents automatic restoration")
+    inCombat = true
+    world.fire("PLAYER_REGEN_DISABLED")
+    command("ranking on")
+    assert(saved.ranking.enabled and not panel:IsShown(), "turning ranking on during combat saves the intent without opening it")
+
+    local reloaded, reloadedAPI, _, _, reloadedWorld = loadAddon(saved, false)
+    reloadedAPI.InCombatLockdown = function() return inCombat end
+    loadOverlay(reloaded, reloadedAPI)
+    reloadedWorld:initialize()
+    assert(reloaded:GetRankingSettings().hideInCombat and not reloaded.rankingOverlay,
+        "the saved combat preference suppresses initial creation when loading during combat")
+    inCombat = false
+    reloadedWorld.fire("PLAYER_REGEN_ENABLED")
+    assert(reloaded.rankingOverlay and reloaded.rankingOverlay:IsVisible(),
+        "leaving combat opens the enabled overlay after loading during combat")
+end
+
 -- Transparency fades window decoration independently of foreground content and other windows.
 do
     local saved = settings(SECRET, false)
@@ -1631,7 +1691,7 @@ do
         "damaged saved placement falls back to a valid finite native anchor")
     local future = settings(SECRET, false)
     future.schemaVersion = 99
-    future.ranking = { enabled = true, locked = false, backgroundTransparency = 75,
+    future.ranking = { enabled = true, hideInCombat = true, locked = false, backgroundTransparency = 75,
         position = { point = "TOPRIGHT", relativePoint = "TOPRIGHT", x = -80, y = -70 }, future = "keep" }
     future.burned = { status = 61, future = "keep" }
     local originalPosition, originalBurned = future.ranking.position, future.burned
@@ -1671,9 +1731,12 @@ do
         "read-only ranking hides the unavailable party action")
     readonly:OpenOptions("ranking")
     assert(not readonly.optionsPanel.rankingEnabled:IsEnabled()
+        and readonly.optionsPanel.rankingHideInCombat:GetChecked() and not readonly.optionsPanel.rankingHideInCombat:IsEnabled()
         and not readonly.optionsPanel.rankingBurningEffect:IsEnabled()
         and not readonly.optionsPanel.rankingTransparencySlider:IsEnabled(),
-        "future-schema Ranking Settings cannot change saved visibility, burning effects or transparency")
+        "future-schema Ranking Settings display saved combat visibility and disable ranking preference edits")
+    assert(not readonly:SetRankingHideInCombat(false) and future.ranking.hideInCombat,
+        "changing combat visibility rejects writes to future saved data")
     readonlyPanel.header.scripts.OnDragStart(readonlyPanel.header, "LeftButton")
     assert(readonlyPanel.moving, "Shift movement remains available for a read-only profile")
     readonlyPanel:SetPoint("CENTER", readonlyAPI.UIParent, "CENTER", 20, 30)
@@ -1702,4 +1765,4 @@ do
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep ranking test environments isolated")
-print("PASS: Player ranking overlay visibility, rendering, burned meters, burning effects, hover details, actions, updates and placement")
+print("PASS: Player ranking overlay visibility, combat hiding, rendering, burned meters, burning effects, hover details, actions, updates and placement")

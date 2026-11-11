@@ -865,9 +865,9 @@ local function CreateOverlay()
 end
 
 function addon:RefreshRankingOverlay()
-    local panel = self.rankingOverlay
-    if not self.initialized or not self.ready or not self:GetRankingSettings().enabled
-        or self.rankingOverlayDismissed then
+    local panel, settings = self.rankingOverlay, self:GetRankingSettings()
+    if not self.initialized or not self.ready or not settings.enabled or self.rankingOverlayDismissed
+        or (settings.hideInCombat and type(InCombatLockdown) == "function" and InCombatLockdown()) then
         if panel then panel:Hide() end
         return
     end
@@ -955,6 +955,11 @@ end
 addon:RegisterNotification("BURNED_CHANGED", function()
     local panel = addon.rankingOverlay
     if panel and panel:IsVisible() then RefreshBurnedMeters(panel) end
+end)
+
+addon:RegisterGameEvents({ "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED" }, function(self)
+    local settings = self:GetRankingSettings()
+    if settings and settings.hideInCombat then self:RefreshRankingOverlay() end
 end)
 
 addon:RegisterGameEvents({ "PLAYER_LOGOUT", "UI_SCALE_CHANGED", "DISPLAY_SIZE_CHANGED" }, function(self, event)

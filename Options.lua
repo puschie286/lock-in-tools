@@ -432,8 +432,17 @@ local function CreateOptionsPanel()
         "Show the top five characters, plus your own rank when outside the top five. Position sharing can stay off.\n\n"
             .. "This preference saves across reloads and characters.", 260)
 
+    panel.rankingHideInCombat = UI:Checkbox(sharing)
+    panel.rankingHideInCombat:SetPoint("TOPLEFT", 12, -236)
+    panel.rankingHideInCombat:SetSize(28, 28)
+    BindPreference(panel, panel.rankingHideInCombat, function() return addon:GetRankingSettings().hideInCombat end,
+        addon.SetRankingHideInCombat)
+    PreferenceLabel(sharing, panel.rankingHideInCombat, "Hide ranking overlay in combat",
+        "Temporarily hide the overlay while you are in combat. It returns after combat if enabled.\n\n"
+            .. "This preference saves across reloads and characters.", 260)
+
     panel.rankingBurningEffect = UI:Checkbox(sharing)
-    panel.rankingBurningEffect:SetPoint("TOPLEFT", 12, -236)
+    panel.rankingBurningEffect:SetPoint("TOPLEFT", 12, -272)
     panel.rankingBurningEffect:SetSize(28, 28)
     BindPreference(panel, panel.rankingBurningEffect, function() return addon:GetRankingSettings().burningEffect end,
         addon.SetRankingBurningEffect)
@@ -444,8 +453,8 @@ local function CreateOptionsPanel()
     local help, slider = CreateTransparencyControl(panel, sharing, "ranking", "Background transparency",
         function() return addon:GetRankingSettings().backgroundTransparency or 0 end,
         function(value) return addon:SetRankingBackgroundTransparency(value) end)
-    help:SetPoint("TOPLEFT", 16, -280)
-    slider:SetPoint("TOPLEFT", 20, -308)
+    help:SetPoint("TOPLEFT", 16, -316)
+    slider:SetPoint("TOPLEFT", 20, -344)
     local transparencyHelp = "Fade the ranking overlay's background and border while keeping player rows and meters readable.\n\n"
         .. "Changes apply immediately and save across reloads and characters."
     OptionTooltip(panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
@@ -561,6 +570,8 @@ function addon:RefreshOptions()
     local ranking = self:GetRankingSettings()
     panel.rankingEnabled:SetChecked(ranking.enabled and not self.rankingOverlayDismissed)
     panel.rankingEnabled:SetEnabled(editable)
+    panel.rankingHideInCombat:SetChecked(ranking.hideInCombat)
+    panel.rankingHideInCombat:SetEnabled(editable)
     panel.rankingBurningEffect:SetChecked(ranking.burningEffect)
     panel.rankingBurningEffect:SetEnabled(editable)
     panel.pages.sharing.RefreshTransparency()
