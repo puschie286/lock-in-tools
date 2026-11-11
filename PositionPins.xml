@@ -12,7 +12,7 @@
             </Layer>
         </Layers>
     </Frame>
-    <Frame name="LockInToolsDeathPinTemplate" mixin="LockInToolsDeathPinMixin" enableMouseMotion="true" enableMouseClicks="false" virtual="true">
+    <Frame name="LockInToolsDeathMarkerTemplate" enableMouseMotion="true" enableMouseClicks="false" virtual="true">
         <Size x="24" y="24"/>
         <Layers>
             <Layer level="ARTWORK">
@@ -22,4 +22,5 @@
             </Layer>
         </Layers>
     </Frame>
+    <Frame name="LockInToolsDeathPinTemplate" inherits="LockInToolsDeathMarkerTemplate" mixin="LockInToolsDeathPinMixin" virtual="true"/>
 </Ui>

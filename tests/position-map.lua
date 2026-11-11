@@ -1269,6 +1269,146 @@ local function LoadDeathMap()
     return mapped, clock
 end
 
+local function MockDeathMinimap(clock, playerX, playerY)
+    local api = clock.environment
+    local minimap = { radius = 100, facing = 0, visible = true }
+    function minimap:GetWidth() return 200 end
+    function minimap:GetHeight() return 200 end
+    function minimap:IsVisible() return self.visible end
+    api.Minimap = minimap
+    api.C_Minimap = {
+        GetViewRadius = function() return minimap.radius end,
+        IsRotateMinimapIgnored = function() return minimap.ignoreRotation == true end,
+    }
+    api.GetCVarBool = function(name)
+        assert(name == "rotateMinimap")
+        return minimap.rotate == true
+    end
+    api.GetPlayerFacing = function() return minimap.facing end
+    api.GetMinimapShape = function() return "ROUND" end
+    clock.bounds[101] = { 1000, 0, 2000, 1000, continent = 1 }
+    clock.unitPositions.player = { map = 101, x = playerX, y = playerY }
+
+    local createFrame, advance = api.CreateFrame, clock.advance
+    local driver, pins = nil, {}
+    api.CreateFrame = function(kind, name, parent, template)
+        if parent ~= minimap and (not driver or parent ~= driver) then
+            return createFrame(kind, name, parent, template)
+        end
+        assert(kind == "Frame")
+        local frame = { scripts = {}, shown = true }
+        function frame:IsShown() return self.shown end
+        function frame:IsVisible() return self:IsShown() and parent:IsVisible() end
+        function frame:Show()
+            local wasVisible = self:IsVisible()
+            self.shown = true
+            if not wasVisible and self:IsVisible() and self.scripts.OnShow then self.scripts.OnShow(self) end
+        end
+        function frame:Hide()
+            local wasVisible = self:IsVisible()
+            self.shown = false
+            if not wasVisible then return end
+            if self.scripts.OnHide then self.scripts.OnHide(self) end
+            if self == driver then
+                for _, pin in ipairs(pins) do
+                    if pin:IsShown() and pin.scripts.OnHide then pin.scripts.OnHide(pin) end
+                end
+            end
+        end
+        function frame:SetSize() end
+        function frame:SetScript(script, callback) self.scripts[script] = callback end
+        function frame:ClearAllPoints() self.offsetX, self.offsetY = nil, nil end
+        function frame:SetPoint(point, relative, anchor, x, y)
+            assert(point == "CENTER" and relative == minimap and anchor == "CENTER")
+            self.offsetX, self.offsetY = x, y
+        end
+        if parent == minimap then
+            assert(not driver, "reuse one minimap update frame")
+            driver = frame
+        else
+            assert(template == "LockInToolsDeathMarkerTemplate", "reuse the death marker artwork")
+            pins[#pins + 1] = frame
+        end
+        return frame
+    end
+    function clock:advance(seconds)
+        advance(self, seconds)
+        if driver and driver:IsVisible() and driver.scripts.OnUpdate then driver.scripts.OnUpdate(driver, seconds) end
+    end
+    function clock:minimapPins()
+        local visible = {}
+        for _, pin in ipairs(pins) do
+            if pin:IsVisible() then visible[#visible + 1] = pin end
+        end
+        return visible
+    end
+    return minimap
+end
+
+do
+    local mapped, clock = LoadDeathMap()
+    local minimap = MockDeathMinimap(clock, 0.5, 0.5)
+    clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
+    mapped:InitializePositionMap()
+    clock:setLife("party1", "dead", 101, 0.52, 0.47)
+    local pins = clock:minimapPins()
+    assert(#pins == 1 and not clock.map, "a nearby death appears on the minimap before the World Map loads")
+    Near(pins[1].offsetX, 20)
+    Near(pins[1].offsetY, 30)
+
+    clock:setLife("party1", "ghost", 102, 0.8, 0.9)
+    clock:advance(0.1)
+    pins = clock:minimapPins()
+    assert(#pins == 1, "the minimap keeps the corpse marker through spirit release")
+    Near(pins[1].offsetX, 20)
+    Near(pins[1].offsetY, 30)
+
+    minimap.rotate, minimap.facing = true, math.pi / 2
+    clock:advance(0.1)
+    Near(pins[1].offsetX, 30)
+    Near(pins[1].offsetY, -20)
+    minimap.ignoreRotation, minimap.radius = true, 50
+    clock:advance(0.1)
+    Near(pins[1].offsetX, 40)
+    Near(pins[1].offsetY, 60)
+
+    clock.bounds[102] = clock.bounds[101]
+    clock.mapAPI.GetMapGroupID = function() return 1 end
+    clock.unitPositions.player.map = 102
+    clock:advance(0.1)
+    assert(#clock:minimapPins() == 0, "overlapping coordinates on another dungeon floor do not show the marker")
+    clock.unitPositions.player.map = 101
+    clock:advance(0.1)
+
+    local pin = pins[1]
+    pin.scripts.OnEnter(pin)
+    local color = clock.tooltip.titleColor
+    assert(clock.tooltip:IsShown() and clock.tooltip:IsOwned(pin) and clock.tooltip.title == "Alice"
+        and color[1] == 1 and color[2] == 0 and color[3] == 0,
+        "a minimap skull displays the same red player name")
+    clock.unitPositions.player.x, clock.unitPositions.player.y = 0.48, 0.51
+    clock:advance(0.1)
+    assert(#clock:minimapPins() == 0 and not clock.tooltip:IsShown(),
+        "a death outside the round minimap hides its marker and tooltip")
+    clock.unitPositions.player.x, clock.unitPositions.player.y = 0.5, 0.5
+    clock:advance(0.1)
+    pins = clock:minimapPins()
+    assert(#pins == 1, "moving back into range restores the marker")
+
+    pins[1].scripts.OnEnter(pins[1])
+    assert(mapped:SetShowDeathMarkers(false) and #clock:minimapPins() == 0 and not clock.tooltip:IsShown(),
+        "the shared visibility setting immediately hides minimap death markers and the tooltip")
+    assert(mapped:SetShowDeathMarkers(true) and #clock:minimapPins() == 1,
+        "the shared visibility setting restores nearby death markers")
+    clock:setLife("party1", "alive", 102, 0.8, 0.9)
+    assert(#clock:minimapPins() == 0, "revival immediately clears the minimap marker")
+    clock:setLife("party1", "dead", 101, 0.52, 0.47)
+    assert(#clock:minimapPins() == 1, "a subsequent death creates another minimap marker")
+    clock.groupUnits.party1, clock.partyCount = nil, 0
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(#clock:minimapPins() == 0, "leaving the group immediately clears the minimap marker")
+end
+
 do
     local mapped, clock = LoadDeathMap()
     clock.groupUnits.party1, clock.partyCount = { "Alice", "Realm" }, 1
@@ -1421,6 +1561,7 @@ do
             clock.nativeConnected.party1 = scenario.connected ~= false
             clock.unitPositions.party1 = { map = 102, x = 0.8, y = 0.9 }
         end
+        MockDeathMinimap(clock, 0.2, 0.4)
         clock:loadNativeMap(true)
         mapped:InitializePositionMap()
         assert(#clock:deathPins() == 0, "saved locations stay hidden until entering the world on login or reload")
@@ -1433,6 +1574,10 @@ do
     assert(#pins == 1, "UI reload restores an old death location for the still-grouped ghost")
     Near(pins[1].x, 0.21)
     Near(pins[1].y, 0.43)
+    local minimapPins = clock:minimapPins()
+    assert(#minimapPins == 1, "the minimap uses the same restored death location")
+    Near(minimapPins[1].offsetX, 10)
+    Near(minimapPins[1].offsetY, -30)
     clock:fire("PLAYER_ENTERING_WORLD", false, false)
     assert(#clock:deathPins() == 1, "a later zone entry preserves the confirmed death location")
     clock.map:changeMap(102)

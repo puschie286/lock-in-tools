@@ -1,12 +1,15 @@
 local _, addon = ...
 local PIN_TEMPLATE = "LockInToolsPositionPinTemplate"
 local DEATH_PIN_TEMPLATE = "LockInToolsDeathPinTemplate"
+local MINIMAP_DEATH_PIN_TEMPLATE = "LockInToolsDeathMarkerTemplate"
+local MINIMAP_PIN_SIZE, MINIMAP_UPDATE_INTERVAL = 14, 0.05
 local DOT_TEXTURE = "Interface\\AddOns\\LockInTools\\Media\\PositionDot"
 local RING_TEXTURE = "Interface\\AddOns\\LockInTools\\Media\\PositionRing"
 local DOT_RADIUS, TOOLTIP_INTERVAL = 6, 0.1
 local INTERPOLATION_SECONDS, MAX_INTERPOLATION_DISTANCE = 2, 0.1
 local Provider, Pin, DeathPin = {}, {}, {}
 local deathLocations = {}
+local minimapDeathPins
 LockInToolsPositionPinMixin = {}
 LockInToolsDeathPinMixin = {}
 
@@ -167,13 +170,152 @@ local function PositionOnMap(peer, mapID)
     return WorldPositionOnMap(peer, mapID)
 end
 
-local function NativeDeathPosition(unit)
+local function NativeMapPosition(unit)
     local map = NativeValue(C_Map and C_Map.GetBestMapForUnit, unit)
     if not MapID(map) then return nil end
     local position = NativeValue(C_Map.GetPlayerMapPosition, map, unit)
     if not position then return nil end
     local ok, x, y = pcall(function() return position:GetXY() end)
-    if ok and Coordinate(x) and Coordinate(y) then return { map = map, x = x, y = y } end
+    if ok and Coordinate(x) and Coordinate(y) then return map, x, y end
+end
+
+local function ShowDeathTooltip(pin)
+    if not pin.playerName or not GameTooltip then return end
+    GameTooltip_SetDefaultAnchor(GameTooltip, pin)
+    GameTooltip:SetText(pin.playerName, 1, 0, 0)
+    GameTooltip:Show()
+end
+
+local function HideDeathTooltip(pin)
+    if GameTooltip and GameTooltip:IsOwned(pin) then GameTooltip:Hide() end
+end
+
+local function MinimapView(minimap)
+    local map, x, y = NativeMapPosition("player")
+    if not map then return nil end
+    local radius = NativeValue(C_Minimap.GetViewRadius)
+    local width, height = NativeValue(minimap.GetWidth, minimap), NativeValue(minimap.GetHeight, minimap)
+    if not Number(radius) or radius <= 0 or not Number(width) or width <= 0
+        or not Number(height) or height <= 0 then return nil end
+
+    local rotate = NativeValue(C_CVar and C_CVar.GetCVarBool or GetCVarBool, "rotateMinimap")
+    if type(rotate) ~= "boolean" then return nil end
+    local facing = 0
+    if rotate then
+        local ignored = NativeValue(C_Minimap.IsRotateMinimapIgnored)
+        if type(ignored) ~= "boolean" then return nil end
+        if not ignored then facing = NativeValue(GetPlayerFacing) end
+        if not Number(facing) then return nil end
+    end
+
+    local ok, worldID, north, west = pcall(WorldPoint, map, x, y)
+    local group = NativeValue(C_Map.GetMapGroupID, map)
+    return { map = map, x = x, y = y, worldID = ok and worldID or nil, north = north, west = west,
+        group = Number(group) and group > 0 and group or nil, radius = radius, halfWidth = width / 2,
+        halfHeight = height / 2, cos = math.cos(facing), sin = math.sin(facing),
+        square = NativeValue(GetMinimapShape) == "SQUARE" }
+end
+
+local function MinimapOffset(position, view)
+    if not position.worldID then
+        local ok, worldID, north, west = pcall(WorldPoint, position.map, position.x, position.y)
+        if ok then position.worldID, position.north, position.west = worldID, north, west end
+    end
+    local east, north
+    if view.worldID and view.worldID == position.worldID then
+        -- Floors of the same dungeon can overlap in world coordinates.
+        if position.map ~= view.map and view.group
+            and NativeValue(C_Map.GetMapGroupID, position.map) == view.group then return nil end
+        east, north = view.west - position.west, position.north - view.north
+    elseif position.map == view.map and (not view.worldID or not position.worldID) then
+        local ok, width, height = pcall(C_Map.GetMapWorldSize, view.map)
+        if not ok or not Number(width) or width <= 0 or not Number(height) or height <= 0 then return nil end
+        east, north = (position.x - view.x) * width, (view.y - position.y) * height
+    else
+        return nil
+    end
+
+    -- Facing rotates east/north world offsets clockwise on screen.
+    local x = (east * view.cos + north * view.sin) * view.halfWidth / view.radius
+    local y = (north * view.cos - east * view.sin) * view.halfHeight / view.radius
+    local edgeX = (math.abs(x) + MINIMAP_PIN_SIZE / 2) / view.halfWidth
+    local edgeY = (math.abs(y) + MINIMAP_PIN_SIZE / 2) / view.halfHeight
+    if view.square then
+        if edgeX <= 1 and edgeY <= 1 then return x, y end
+    elseif edgeX * edgeX + edgeY * edgeY <= 1 then
+        return x, y
+    end
+end
+
+local function AcquireMinimapDeathPin(frame)
+    local pin = table.remove(frame.freePins)
+    if pin then return pin end
+    pin = CreateFrame("Frame", nil, frame, MINIMAP_DEATH_PIN_TEMPLATE)
+    pin:SetSize(MINIMAP_PIN_SIZE, MINIMAP_PIN_SIZE)
+    pin:SetScript("OnEnter", ShowDeathTooltip)
+    pin:SetScript("OnLeave", HideDeathTooltip)
+    pin:SetScript("OnHide", HideDeathTooltip)
+    return pin
+end
+
+local function UpdateMinimapDeathPins(frame)
+    local view = frame.minimap:IsVisible() and MinimapView(frame.minimap)
+    for id, position in pairs(deathLocations) do
+        local pin, x, y = frame.pins[id]
+        if view then x, y = MinimapOffset(position, view) end
+        if x then
+            if not pin then
+                pin = AcquireMinimapDeathPin(frame)
+                frame.pins[id] = pin
+                pin.playerName = position.name
+            end
+            if pin.x ~= x or pin.y ~= y then
+                pin:ClearAllPoints()
+                pin:SetPoint("CENTER", frame.minimap, "CENTER", x, y)
+                pin.x, pin.y = x, y
+            end
+            pin:Show()
+        elseif pin then
+            pin:Hide()
+        end
+    end
+end
+
+local function RefreshMinimapDeathPins(self)
+    local frame = minimapDeathPins
+    if frame then
+        for id, pin in pairs(frame.pins) do
+            if not deathLocations[id] then
+                pin:Hide()
+                pin.playerName = nil
+                frame.pins[id] = nil
+                frame.freePins[#frame.freePins + 1] = pin
+            end
+        end
+    end
+    if not self:GetShowDeathMarkers() or not next(deathLocations) then
+        if frame then frame:Hide() end
+        return
+    end
+    if not frame then
+        if not Minimap or not C_Minimap or type(C_Minimap.GetViewRadius) ~= "function" then return end
+        frame = CreateFrame("Frame", nil, Minimap)
+        minimapDeathPins = frame
+        frame.minimap, frame.pins, frame.freePins, frame.elapsed = Minimap, {}, {}, 0
+        frame:SetScript("OnShow", UpdateMinimapDeathPins)
+        frame:SetScript("OnUpdate", function(driver, elapsed)
+            driver.elapsed = driver.elapsed + elapsed
+            if driver.elapsed < MINIMAP_UPDATE_INTERVAL then return end
+            driver.elapsed = 0
+            UpdateMinimapDeathPins(driver)
+        end)
+    end
+    if frame:IsShown() then UpdateMinimapDeathPins(frame) else frame:Show() end
+end
+
+local function RefreshDeathMarkers(self)
+    if self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+    RefreshMinimapDeathPins(self)
 end
 
 local function UpdateDeathLocation(self, event, unit)
@@ -194,12 +336,11 @@ local function UpdateDeathLocation(self, event, unit)
         if deathLocations[id] or event == "UNIT_CONNECTION"
             or NativeValue(UnitIsDead, unit) ~= true or NativeValue(UnitIsGhost, unit) ~= false
             or (raid and NativeValue(UnitIsUnit, unit, "player") ~= false) then return end
-        local position = NativeDeathPosition(unit)
-        if not position then return end
-        position.name = self:GetPlayerDisplayName(name)
-        deathLocations[id] = position
+        local map, x, y = NativeMapPosition(unit)
+        if not map then return end
+        deathLocations[id] = { map = map, x = x, y = y, name = self:GetPlayerDisplayName(name) }
     end
-    if self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+    RefreshDeathMarkers(self)
 end
 
 local function PruneDeathLocations(self)
@@ -212,7 +353,7 @@ local function PruneDeathLocations(self)
             changed = true
         end
     end
-    if changed and self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+    if changed then RefreshDeathMarkers(self) end
 end
 
 local function SaveDeathLocations(self)
@@ -256,7 +397,7 @@ local function RestoreDeathLocations(self, initialLogin, reloading)
             end
         end
     end
-    if changed and self.positionMapProvider then self.positionMapProvider:RefreshDeathPins() end
+    if changed then RefreshDeathMarkers(self) end
 end
 
 local function OnDeathLocationEvent(self, event, unitOrInitialLogin, reloading)
@@ -444,15 +585,10 @@ function DeathPin:OnAcquired(x, y, name)
 end
 
 function DeathPin:OnMouseEnter()
-    if not self.playerName or not GameTooltip or not self:GetMap():IsShown() then return end
-    GameTooltip_SetDefaultAnchor(GameTooltip, self)
-    GameTooltip:SetText(self.playerName, 1, 0, 0)
-    GameTooltip:Show()
+    if self.playerName and self:GetMap():IsShown() then ShowDeathTooltip(self) end
 end
 
-function DeathPin:OnMouseLeave()
-    if GameTooltip and GameTooltip:IsOwned(self) then GameTooltip:Hide() end
-end
+DeathPin.OnMouseLeave = HideDeathTooltip
 
 function DeathPin:OnReleased()
     self:OnMouseLeave()
@@ -668,7 +804,7 @@ for _, notification in ipairs({ "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED",
     addon:RegisterNotification(notification, function() addon:RefreshPositionPins() end)
 end
 addon:RegisterNotification("DEATH_MARKER_VISIBILITY_CHANGED", function()
-    if addon.positionMapProvider then addon.positionMapProvider:RefreshDeathPins() end
+    RefreshDeathMarkers(addon)
 end)
 addon:RegisterNotification("NATIVE_GROUP_CHANGED", function()
     PruneDeathLocations(addon)
