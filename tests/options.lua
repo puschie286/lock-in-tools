@@ -13,7 +13,7 @@ do
     local panel = addon.optionsPanel
     assert(panel:IsVisible() and panel.selectedTab == "sharing")
     for _, control in ipairs({ panel.dataChannels.party, panel.dataChannels.guild,
-        panel.positionSharing, panel.positionRetention, panel.rankingEnabled,
+        panel.rankingEnabled,
         panel.rankingBurningEffect, panel.rankingTransparencySlider,
         panel.playerDataCleanup, panel.clearPlayerData }) do
         assert(control:IsVisible(), "all general preferences are available on one page")
@@ -21,9 +21,10 @@ do
     assert(panel.tabs.sharing and panel.tabs.restedxp and not panel.tabs.ranking and not panel.tabs.playerData
         and not panel.pages.ranking and not panel.pages.playerData,
         "ranking and player data no longer require separate menus")
-    assert(not panel.dataStatus and not panel.dataStatusHelp
+    assert(not panel.dataStatus and not panel.dataStatusHelp, "route summary lines are absent")
+    assert(not panel.positionSharing and not panel.positionRetention
         and not panel.positionStatus and not panel.positionStatusHelp,
-        "route and position summary lines are absent")
+        "position sharing has no Settings controls")
     assert(not panel.rankingIncludeFriends, "friend ranking inclusion is controlled on each Friends row")
     assert(panel.dataChannels.party:IsEnabled() and panel.dataChannels.guild:IsEnabled())
     assert(not panel.tabs.group and not panel.secret and not panel.autoJoin
@@ -36,40 +37,26 @@ end
 do
     local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world:initialize()
-    local calls = {}
-    for _, name in ipairs({ "SetPositionSharing", "SetPositionRetention", "SetRankingBurningEffect" }) do
-        local setter, name = addon[name], name
-        calls[name] = 0
-        addon[name] = function(self, ...)
-            calls[name] = calls[name] + 1
-            return setter(self, ...)
-        end
+    local calls, setter = 0, addon.SetRankingBurningEffect
+    addon.SetRankingBurningEffect = function(self, enabled)
+        calls = calls + 1
+        return setter(self, enabled)
     end
     loadOptions(addon, api)
-    addon:OpenOptions("position")
+    addon:OpenOptions("ranking")
     local panel = addon.optionsPanel
-    assert(panel.positionSharing:GetChecked(), "Position sharing defaults on in Settings")
-    panel.positionSharing:SetChecked(false)
-    panel.positionRetention:SetChecked(false)
+    assert(panel.rankingBurningEffect:GetChecked())
     panel.rankingBurningEffect:SetChecked(false)
     addon:RefreshOptions()
-    assert(addon.db.position.sharing
-        and addon.db.position.keepLastKnown
-        and addon:GetRankingSettings().burningEffect and panel.rankingBurningEffect:GetChecked())
-    for _, count in pairs(calls) do assert(count == 0) end
+    assert(addon:GetRankingSettings().burningEffect and panel.rankingBurningEffect:GetChecked() and calls == 0)
     addon.mainPanel:Hide()
     addon:OpenOptions()
-    panel.positionSharing:Click()
-    panel.positionRetention:Click()
     panel.rankingBurningEffect:Click()
     addon.mainPanel:Hide()
     addon:OpenOptions()
-    assert(not panel.positionSharing:GetChecked()
-        and not panel.positionRetention:GetChecked() and not panel.rankingBurningEffect:GetChecked())
-    assert(not addon.db.position.sharing and not addon.db.position.keepLastKnown)
+    assert(not panel.rankingBurningEffect:GetChecked() and calls == 1)
     assert(not addon.db.ranking.enabled and not addon.db.ranking.burningEffect,
         "The effect preference stays editable and persists independently of overlay visibility")
-    for _, count in pairs(calls) do assert(count == 1) end
 end
 
 -- Ranking transparency applies live, without refresh writes or changes to other preferences.
@@ -205,7 +192,7 @@ do
 
     panel.clearPlayerData:Click()
     assert(clears == 0 and panel.confirmClearPlayerData)
-    addon:Notify("POSITIONS_CHANGED")
+    addon:Notify("DATA_CHANGED")
     assert(panel.confirmClearPlayerData, "live notifications preserve an outstanding clear confirmation")
     panel.tabs.restedxp:Click()
     panel.tabs.sharing:Click()
@@ -244,7 +231,7 @@ do
     loadOptions(addon, api)
     addon:OpenOptions()
     local panel = addon.optionsPanel
-    for _, control in ipairs({ panel.positionSharing, panel.positionRetention, panel.rankingBurningEffect,
+    for _, control in ipairs({ panel.rankingBurningEffect,
         panel.rankingTransparencySlider, panel.playerDataCleanup, panel.clearPlayerData }) do
         assert(not control:IsEnabled())
     end
@@ -260,16 +247,11 @@ do
     panel.clearPlayerData.scripts.OnClick(panel.clearPlayerData)
     assert(clearCalls == 0 and not panel.confirmClearPlayerData,
         "a directly invoked clear callback cannot begin confirmation in read-only mode")
-    for _, preference in ipairs({ { panel.positionSharing, addon.db.position, "sharing" },
-        { panel.positionRetention, addon.db.position, "keepLastKnown" },
-        { panel.rankingBurningEffect, addon:GetRankingSettings(), "burningEffect" } }) do
-        local control, model, key = unpack(preference)
-        local previous = model[key]
-        control:SetChecked(not previous)
-        control.scripts.OnClick(control)
-        assert(model[key] == previous and control:GetChecked() == previous,
-            "even a directly invoked callback cannot write read-only preferences")
-    end
+    local effect, previous = panel.rankingBurningEffect, addon:GetRankingSettings().burningEffect
+    effect:SetChecked(not previous)
+    effect.scripts.OnClick(effect)
+    assert(addon:GetRankingSettings().burningEffect == previous and effect:GetChecked() == previous,
+        "even a directly invoked callback cannot write read-only preferences")
     panel.tabs.sharing:Click()
     for channel, checkbox in pairs(panel.dataChannels) do
         local previous = addon:GetDataChannelEnabled(channel)
@@ -283,11 +265,11 @@ do
     end
     panel.tabs.sharing:Click()
     panel.content:Click()
-    for _, event in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "RANKING_CHANGED" }) do
+    for _, event in ipairs({ "DATA_CHANGED", "RANKING_CHANGED" }) do
         addon:Notify(event)
     end
     addon.contentPanel.options:Click()
-    assert(panel.selectedTab == "sharing" and not panel.positionSharing:IsEnabled())
+    assert(panel.selectedTab == "sharing" and not panel.rankingBurningEffect:IsEnabled())
     assert(api.LockInToolsDB == saved and saved.schemaVersion == 5 and saved.important == "keep"
         and saved.group.secret == SECRET and not saved.chat.autoJoin and saved.ranking == nil
         and not saved.data.channels.party and saved.data.channels.guild and not saved.data.channels.global)
@@ -309,8 +291,8 @@ do
     panel.tabs.restedxp:Click()
     assert(not tooltip:IsShown(), "switching settings pages dismisses globally positioned help")
     panel.tabs.sharing:Click()
-    panel.positionSharing:SetEnabled(false)
-    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.party.labelButton, panel.positionSharing }) do
+    panel.playerDataCleanup:SetEnabled(false)
+    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.party.labelButton, panel.playerDataCleanup }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
             "checkboxes, labels and disabled control help share global tooltip positioning")

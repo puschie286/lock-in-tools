@@ -13,21 +13,6 @@ local function Age(stamp, now)
     return math.floor(seconds / 86400) .. "d ago"
 end
 
-local function Region(player)
-    if not player.map then return nil end
-    local zone = "Map " .. tostring(player.map)
-    if C_Map and type(C_Map.GetMapInfo) == "function" then
-        local ok, info = pcall(C_Map.GetMapInfo, player.map)
-        if ok and type(info) == "table" and type(info.name) == "string" then zone = info.name end
-    end
-    return zone
-end
-
-local function Location(player)
-    if not player.region then return player.sharing == false and "Not sharing" or "No position" end
-    return player.region
-end
-
 local function HideTooltip(button)
     if GameTooltip and GameTooltip:IsOwned(button) then GameTooltip:Hide() end
 end
@@ -86,38 +71,15 @@ local function RefreshProgress(row, player)
     if GameTooltip and GameTooltip:IsOwned(cell) and GameTooltip:IsShown() then ProgressTooltip(cell) end
 end
 
-local function ActionButton(menu, onResult, label, action, y)
-    local button = UI:Button(menu.menu, label)
-    button:SetPoint("TOPLEFT", 8, -y)
-    button:SetSize(154, 28)
-    button.action = action
-    button:SetScript("OnClick", function(_, mouseButton)
-        if mouseButton ~= "LeftButton" then return end
-        local playerID, action = menu.playerID, button.action
-        menu:Hide()
-        if not playerID or not action then return end
-        local success, message
-        if action == "map" then success, message = addon:ShowPlayerOnMap(playerID)
-        else success, message = addon:PerformOverviewAction(playerID, action) end
-        if onResult then onResult(success, message) end
-        menu:Refresh()
-    end)
-    return button
-end
-
-local function RefreshActions(menu)
-    local state = addon:GetOverviewActionState(menu.playerID)
+local function RefreshActions(menu, playerID)
+    local state = addon:GetOverviewActionState(playerID)
     local action = state.invite and "invite" or state.suggest and "suggest" or state.request and "request" or nil
     local partyText = action and PARTY_ACTION_LABELS[action] or state.partyInfo
-    local showMap = addon:GetPlayerMapActionState(menu.playerID)
+    if not partyText then return false end
     menu.party.action = action
-    menu.party:SetText(partyText or "")
+    menu.party:SetText(partyText)
     menu.party:SetEnabled(action ~= nil)
-    if partyText then menu.party:Show() else menu.party:Hide() end
-    menu.showMap:ClearAllPoints()
-    menu.showMap:SetPoint("TOPLEFT", 8, partyText and -44 or -8)
-    menu.showMap:SetEnabled(showMap == true)
-    menu.menu:SetHeight(partyText and 80 or 44)
+    return true
 end
 
 function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
@@ -128,12 +90,21 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     -- Buttons default to left clicks; either button should dismiss the backdrop.
     menu:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     menu:EnableMouseWheel(true)
-    menu.menu = UI:Section(menu, 0, 0, 170, 80, "")
+    menu.menu = UI:Section(menu, 0, 0, 170, 44, "")
     menu.menu:SetFrameLevel(menu:GetFrameLevel() + 1)
     menu.menu:SetClampedToScreen(true)
     menu.menu:EnableMouse(true)
-    menu.party = ActionButton(menu, onResult, "", nil, 8)
-    menu.showMap = ActionButton(menu, onResult, "Show on map", "map", 44)
+    menu.party = UI:Button(menu.menu, "")
+    menu.party:SetPoint("TOPLEFT", 8, -8)
+    menu.party:SetSize(154, 28)
+    menu.party:SetScript("OnClick", function(button, mouseButton)
+        if mouseButton ~= "LeftButton" then return end
+        local playerID, action = menu.playerID, button.action
+        menu:Hide()
+        if not playerID or not action then return end
+        local success, message = addon:PerformOverviewAction(playerID, action)
+        if onResult then onResult(success, message) end
+    end)
     menu:SetScript("OnClick", function() menu:Hide() end)
     menu:SetScript("OnMouseWheel", function(_, delta)
         menu:Hide()
@@ -145,11 +116,12 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
     end)
     parent:HookScript("OnHide", function() menu:Hide() end)
     function menu:Refresh()
-        if self.playerID then RefreshActions(self) end
+        if self.playerID and not RefreshActions(self, self.playerID) then self:Hide() end
     end
     function menu:Open(playerID, anchor)
         self:Hide()
         if not playerID or not anchor or addon:IsDataSelf(playerID) then return end
+        if not RefreshActions(self, playerID) then return end
         -- Roster and ranking share native action guards, and only one menu may
         -- own the screen at a time even when both player lists are visible.
         if addon.activePlayerActionMenu then addon.activePlayerActionMenu:Hide() end
@@ -159,7 +131,6 @@ function addon:CreatePlayerActionMenu(parent, name, onResult, onScroll)
         local scale = self.menu:GetEffectiveScale()
         self.menu:ClearAllPoints()
         self.menu:SetPoint("TOPLEFT", self, "BOTTOMLEFT", x / scale, y / scale)
-        self:Refresh()
         self:Show()
         addon.activePlayerActionMenu = self
     end
@@ -181,7 +152,6 @@ local function SortPlayers(page, players, displayName)
     if not key then return end
     local function Value(player)
         if key == "name" then return displayName(player):lower() end
-        if key == "region" then return player.region and player.region:lower() end
         if key == "seen" then return player.seenAt end
         if key == "zone" then return player.zone and player.zone:lower() end
         if key == "status" then
@@ -288,8 +258,8 @@ local function RefreshShown(row, defaultShown)
 end
 
 function addon:CreateOverviewPage(panel)
-    local page = CreatePlayerTable(panel, { { "Name", "name", 16, 124 }, { "Level", "level", 148, 80 },
-        { "Region", "region", 236, 222 }, { "Last seen", "seen", 466, 88 } }, function(self)
+    local page = CreatePlayerTable(panel, { { "Name", "name", 16, 310 }, { "Level", "level", 334, 124 },
+        { "Last seen", "seen", 466, 88 } }, function(self)
         self:RefreshOverview()
     end)
     panel.pages.overview, panel.overviewPage = page, page
@@ -315,10 +285,10 @@ function addon:CreateOverviewPage(panel)
         CreateShownCheckbox(page, row, true):SetScript("OnMouseUp", OpenActions)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
-        row.name:SetSize(124, 30)
+        row.name:SetSize(310, 30)
         row.levelCell = CreateFrame("Frame", nil, row)
-        row.levelCell:SetPoint("TOPLEFT", 132, -2)
-        row.levelCell:SetSize(80, 36)
+        row.levelCell:SetPoint("TOPLEFT", 318, -2)
+        row.levelCell:SetSize(124, 36)
         row.levelCell:EnableMouse(true)
         row.levelCell:SetScript("OnEnter", ProgressTooltip)
         row.levelCell:SetScript("OnLeave", HideTooltip)
@@ -339,9 +309,6 @@ function addon:CreateOverviewPage(panel)
         row.progressFill = row.levelCell:CreateTexture(nil, "ARTWORK")
         row.progressFill:SetPoint("TOPLEFT", row.progressTrack, "TOPLEFT")
         row.progressFill:SetHeight(3)
-        row.position = UI:Label(row, "", 11, "muted")
-        row.position:SetPoint("TOPLEFT", 220, -3)
-        row.position:SetSize(222, 36)
         row.seen = UI:Label(row, "", 11, "muted")
         row.seen:SetPoint("TOPLEFT", 450, -3)
         row.seen:SetSize(88, 36)
@@ -400,7 +367,6 @@ function addon:RefreshOverview()
     local page = panel and panel.overviewPage
     if not page or not page:IsVisible() or panel.selectedTab ~= "overview" then return end
     local players, now = self:GetOverviewPlayers(), GetServerTime()
-    for _, player in ipairs(players) do player.region = Region(player) end
     RefreshPlayerTable(page, players, OverviewName)
     if not self:HasDataGroup() then
         page.empty:SetText("Join a guild, party or raid with sharing enabled to see your friends.")
@@ -420,7 +386,6 @@ function addon:RefreshOverview()
         if player then
             row.name:SetText(OverviewName(player))
             RefreshProgress(row, player)
-            row.position:SetText(Location(player))
             row.seen:SetText(player.online and "Active" or Age(player.seenAt, now))
             RefreshShown(row, true)
             row:Show()
@@ -508,9 +473,7 @@ function addon:OpenOverview()
     self:OpenContent("overview")
 end
 
-addon:RegisterNotification("POSITION_CONTACT_CHANGED", function() addon:RefreshOverview() end)
-for _, notification in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "ROSTER_CHANGED", "FRIENDS_CHANGED",
-    "RANKING_CHANGED" }) do
+for _, notification in ipairs({ "DATA_CHANGED", "ROSTER_CHANGED", "FRIENDS_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function()
         addon:RefreshOverview()
         addon:RefreshFriends()

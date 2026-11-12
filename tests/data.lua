@@ -3,11 +3,11 @@ local loadNotifications = dofile("tests/support/notifications.lua")
 local helpers = dofile("tests/support/helpers.lua")
 local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
 
-local function newAddon(saved, readOnly, withPositions, native)
+local function newAddon(saved, readOnly, native)
     native = native or {}
     local world = {
         now = 0, epoch = 2000000000, timers = {}, sent = {}, messages = {}, frames = {},
-        x = 0.25, y = 0.75, map = 37, nativeSends = {}, prefixCalls = {},
+        nativeSends = {}, prefixCalls = {},
         sendResult = 0, sendCalls = 0, sendAttempts = {},
         guild = native.guild == true, raid = native.raid == true,
         party = native.party == true or (native.party == nil and native.guild == nil and native.raid == nil),
@@ -38,13 +38,6 @@ local function newAddon(saved, readOnly, withPositions, native)
             world.timers[#world.timers + 1] = timer
             return timer
         end },
-        C_Map = {
-            GetBestMapForUnit = function(unit) assert(unit == "player"); return world.map end,
-            GetPlayerMapPosition = function(map, unit)
-                assert(map == world.map and unit == "player")
-                return { GetXY = function() return world.x, world.y end }
-            end,
-        },
     }, { __index = _G })
     environment._G = environment
     environment.C_Timer.After = environment.C_Timer.NewTimer
@@ -79,16 +72,11 @@ local function newAddon(saved, readOnly, withPositions, native)
     function addon:Print(message) world.messages[#world.messages + 1] = message end
     world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
-    function addon:RefreshPositionPins() end
     for _, file in ipairs({ "DataChannel.lua", "Data.lua", "DataStatus.lua" }) do
         loadModule(file, addon, environment)
     end
     if native.configure then native.configure(environment, world) end
     addon:InitializeData()
-    if withPositions then
-        loadModule("Position.lua", addon, environment)
-        addon:InitializePositions()
-    end
     world.environment, world.addon = environment, addon
     function world:fire(event, ...)
         for _, frame in ipairs(self.frames) do
@@ -98,7 +86,6 @@ local function newAddon(saved, readOnly, withPositions, native)
     function world:login()
         addon.ready = true
         addon:OnDataLogin()
-        if withPositions then addon:OnPositionLogin() end
     end
     function world:incoming(message, sender, metadata)
         metadata = metadata or {}
@@ -247,7 +234,7 @@ do
     local saved = { schemaVersion = 99, custom = { untouched = true },
         data = { channels = { party = false, future = "preserved" } } }
     local original = copy(saved)
-    local current, clock = newAddon(saved, true, false, { guild = true })
+    local current, clock = newAddon(saved, true, { guild = true })
     current:RegisterDataFeature("echo", function() error("Read-only dispatch") end)
     clock:connect()
     assert(not current:IsDataConnected() and not current:SendData("echo", "payload")
@@ -258,13 +245,10 @@ do
 end
 
 -- Real channel fan-out: every client sees the request and response broadcasts, including its own echoes.
-local function newRequestBus(withPositions, beforeConnect)
+local function newRequestBus(beforeConnect)
     local bus = { clients = {}, queue = {}, delivered = 0 }
     function bus:add(name, now)
-        local profile = withPositions and {
-            schemaVersion = 4, position = { sharing = true },
-        } or nil
-        local current, clock = newAddon(profile, false, withPositions, { playerName = name })
+        local current, clock = newAddon(nil, false, { playerName = name })
         local client = { addon = current, world = clock, name = name, requests = {}, responses = {} }
         bus.clients[#bus.clients + 1] = client
         assert(current:RegisterDataRequest("snapshot", function(sender, payload)
@@ -331,7 +315,7 @@ do
 end
 
 local function requestFixture(onRequest, onResponse, native)
-    local current, clock = newAddon(nil, false, false, native or { playerName = "Self" })
+    local current, clock = newAddon(nil, false, native or { playerName = "Self" })
     clock:login()
     assert(current:RegisterDataRequest("snapshot", onRequest or function() return "own" end, onResponse or function() end))
     return current, clock
@@ -512,7 +496,7 @@ do
 end
 
 local function statusFixture(values, accepted, native)
-    local current, clock = newAddon(nil, false, false, native)
+    local current, clock = newAddon(nil, false, native)
     local samples, connections = {}, {}
     assert(current:RegisterDataStatusProvider("player", function() return values end,
         function(sender, fields, stamp, sequence, metadata)
@@ -530,16 +514,6 @@ local function receive(current, sender, payload)
     return current:ReceiveData(sender, "1|status|" .. payload)
 end
 
-local function positionStatusFixture(values, sharing)
-    local profile = { schemaVersion = 4, position = { sharing = sharing ~= false } }
-    local current, clock = newAddon(profile, false, true)
-    local samples = {}
-    assert(current:RegisterDataStatusProvider("player", function() return values end,
-        function(sender, fields) samples[#samples + 1] = { sender = sender, fields = fields } end))
-    clock:connect()
-    return current, clock, samples
-end
-
 -- Class uses a compact status enum; future numeric codes preserve compatible
 -- snapshot decoding without inventing a supported player class.
 do
@@ -552,65 +526,6 @@ do
     local current, _, samples = statusFixture({ class = "UNSUPPORTED" })
     assert(receive(current, "Friend", full("peer", 2000000000, 1, "11=65535")))
     assert(samples[1].fields.class == "unknown", "Future class IDs decode to unknown")
-end
-
--- Status carries a fresh optional position without making movement dirty the
--- player-status revision or adding another idle position broadcast.
-do
-    local values = { level = 24 }
-    local current, clock = positionStatusFixture(values)
-    assert(#clock.sent == 1 and clock.sent[1].message:match("^1|Q|status|")
-        and clock.sent[1].message:find("1=24|9=P,37,25000,75000", 1, true))
-    clock:advance(2)
-    assert(#clock.sent == 1, "The public initial snapshot also supplies the first position")
-    clock.x = 0.4
-    clock:advance(2)
-    assert(#clock.sent == 2 and clock.sent[2].message == "1|position|2|P|2000000004|37|40000|75000")
-    clock:advance(1)
-    assert(#clock.sent == 2, "Movement alone must not send a five-second full status report")
-    values.level = 25
-    clock:advance(4)
-    clock.x = 0.65
-    clock:advance(1)
-    assert(#clock.sent == 3 and clock.sent[3].message:match("^1|status|5|F|[^|]+|2000000010|2|")
-        and clock.sent[3].message:find("1=25|9=P,37,65000,75000", 1, true),
-        "A due status report samples current coordinates and suppresses duplicate movement at that tick")
-    clock:advance(30)
-    assert(#clock.sent == 4 and clock.sent[4].message:match("^1|status|5|F|[^|]+|2000000040|2|")
-        and clock.sent[4].message:find("9=P,37,65000,75000", 1, true))
-end
-
--- Native map errors cannot silence public status or replies while coordinates
--- are unavailable, and both shared timers must recover without reconnecting.
-do
-    local current, clock, samples = positionStatusFixture({ level = 24 })
-    local native = clock.environment.C_Map.GetPlayerMapPosition
-    clock.environment.C_Map.GetPlayerMapPosition = function() error("Simulated map API failure") end
-
-    clock:advance(30)
-    assert(#clock.sent == 3 and clock.sent[2].message == "1|position|2|U|2000000002",
-        "A map exception reports unavailable coordinates instead of stopping movement checks")
-    assert(clock.sent[3].message:match("^1|status|5|F|[^|]+|2000000030|1|1=24|9=U$"),
-        "A map exception cannot suppress the player's complete public status heartbeat")
-    clock:advance(1)
-    assert(current:ReceiveData("Friend", "1|Q|status|map-failure|" .. full("peer", 2000000031, 1, "1=25")))
-    assert(#samples == 1 and samples[1].fields.level == "25"
-        and clock.sent[4].message:match("^1|R|status|map%-failure|friend%-testrealm|5|F|[^|]+|2000000031|1|1=24|9=U$"),
-        "Discovery still receives the requester and replies with core status during a map exception")
-    clock:advance(29)
-    assert(#clock.sent == 5
-        and clock.sent[5].message:match("^1|status|5|F|[^|]+|2000000060|1|1=24|9=U$")
-        and current.dataState.status.timer and current.positionState.timer,
-        "Repeated map exceptions cannot stop either shared timer")
-
-    clock.environment.C_Map.GetPlayerMapPosition, clock.x = native, 0.6
-    clock:advance(2)
-    assert(clock.sent[6].message == "1|position|2|P|2000000062|37|60000|75000",
-        "Fresh coordinates resume automatically after the native map API recovers")
-    clock:advance(28)
-    assert(#clock.sent == 7
-        and clock.sent[7].message:match("^1|status|5|F|[^|]+|2000000090|1|1=24|9=P,37,60000,75000$"),
-        "Later public heartbeats include recovered coordinates without reconnecting")
 end
 
 -- Unexpected callback errors remain visible without cancelling future status
@@ -636,142 +551,37 @@ do
         "Automatic recovery preserves the normal status heartbeat")
 end
 
--- Status captures server time once for both the envelope and the coordinate
--- sample. Integer wire values decode to normalized Lua coordinates.
+-- Retired fields remain readable for older senders without entering status
+-- state or causing a newer snapshot at the same revision to be rejected.
+do
+    local current, clock, samples = statusFixture({ level = 24, class = "MAGE", burned = 50 })
+    local legacy = full("peer", 2000000000, 1, "1=25|8=1|9=P,37,30000,70000|11=3|12=80")
+    assert(receive(current, "Friend", legacy))
+    assert(equal(samples[1].fields, { level = "25", class = "HUNTER", burned = "80" }))
+    assert(current.dataState.status.received["friend-testrealm"].fields[8] == nil
+        and current.dataState.status.received["friend-testrealm"].fields[9] == nil)
+    assert(receive(current, "Friend", full("peer", 2000000001, 1, "1=25|8=0|9=U|11=3|12=80")))
+    assert(not current:ReceiveData("Friend", "1|position|2|P|2000000002|37|80000|70000")
+        and #samples == 2, "Standalone location reports are no longer handled")
+    local requested = full("peer", 2000000002, 1, "1=25|8=1|9=P,37,40000,70000|11=3|12=80")
+    assert(current:ReceiveData("Friend", "1|Q|status|initial|" .. requested) and #samples == 3)
+    clock:advance(30)
+    assert(#clock.sent == 3 and clock.sent[1].message:match("^1|Q|status|")
+        and clock.sent[2].message:match("^1|R|status|initial|friend%-testrealm|")
+        and clock.sent[3].message:match("^1|status|5|F|"))
+    for _, packet in ipairs(clock.sent) do
+        assert(packet.message:match("|1=24|11=7|12=50$"), "Status never serializes a location or sharing flag")
+    end
+end
+
+-- The public status clock remains monotonic across a rollback.
 do
     local values = { level = 24 }
-    local current, clock = positionStatusFixture(values)
+    local _, clock = statusFixture(values)
     clock:advance(4)
-    clock.x, clock.y, values.level = 0.123456, 0.999996, 25
-    local reads = 0
-    clock.environment.GetServerTime = function()
-        reads = reads + 1
-        return 2000000004 + reads
-    end
+    clock.epoch, values.level = clock.epoch - 10, 25
     clock:advance(1)
-    local packet = clock.sent[#clock.sent].message
-    assert(reads == 1 and packet:match("^1|status|5|F|[^|]+|2000000005|2|")
-        and packet:find("9=P,37,12346,100000", 1, true),
-        "A second clock read must not give the attachment a different timestamp")
-    assert(receive(current, "Friend", full("peer", 2000000005, 1, "1=25|9=P,37,12346,100000")))
-    local peer = assert(current:GetSharedPositions()["friend-testrealm"])
-    assert(peer.x == 0.12346 and peer.y == 1 and peer.stamp == 2000000005
-        and peer.positionStamp == 2000000005)
-end
-
--- The status clock cannot move backwards. Omitting a sample rather than
--- assigning it a future timestamp also leaves movement broadcasting enabled.
-do
-    local values = { level = 24 }
-    local current, clock = positionStatusFixture(values)
-    clock:advance(4)
-    clock.epoch, clock.x, values.level = clock.epoch - 10, 0.6, 25
-    clock:advance(1)
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000000|2|1=25$")
-        and not clock.sent[2].message:find("|9=", 1, true),
-        "A sample from before the clamped envelope time must be omitted")
-    clock:advance(1)
-    assert(#clock.sent == 3 and clock.sent[3].message == "1|position|2|P|1999999996|37|60000|75000",
-        "An omitted attachment must not suppress the changed movement sample")
-end
-
--- All idle peers remain online beyond the position timeout using only status
--- refreshes. A stationary late join discovers positions in its initial exchange.
-do
-    local function register(client)
-        assert(client.addon:RegisterDataStatusProvider("player", function() return { level = 24 } end,
-            function() end))
-    end
-    local bus = newRequestBus(true, register)
-    bus:pump()
-    for _ = 1, 35 do
-        for _, client in ipairs(bus.clients) do client.world:advance(2) end
-        bus:pump()
-        for _, client in ipairs(bus.clients) do
-            for _, other in ipairs(bus.clients) do
-                if client ~= other then
-                    local peer = assert(client.addon:GetSharedPositions()[other.name:lower() .. "-testrealm"])
-                    assert(peer.online and peer.x == 0.25 and peer.y == 0.75)
-                end
-            end
-        end
-    end
-    bus:add("Dave", 70)
-    bus:pump()
-    for _, client in ipairs(bus.clients) do
-        for _, other in ipairs(bus.clients) do
-            if client ~= other then assert(client.addon:GetSharedPositions()[other.name:lower() .. "-testrealm"].online) end
-        end
-        for _, packet in ipairs(client.world.sent) do
-            assert(not packet.message:match("^1|position|"), "Stationary clients use no separate position heartbeat")
-            assert(#packet.message <= 255)
-        end
-    end
-end
-
--- Attachments inherit the envelope timestamp. They can change at the same core
--- revision, but delayed status cannot overwrite a newer standalone movement.
-do
-    local current, clock, samples = positionStatusFixture({ level = 24 })
-    assert(receive(current, "Friend", full("peer", 2000000000, 1,
-        "1=25|9=P,37,30000,70000")))
-    assert(equal(samples[1].fields, { level = "25" }))
-    assert(current:ReceiveData("Friend", "1|position|2|P|2000000010|37|80000|70000"))
-    assert(receive(current, "Friend", full("peer", 2000000005, 1,
-        "1=25|9=P,37,40000,70000")))
-    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.8,
-        "A delayed envelope must not replace a later movement sample")
-    assert(receive(current, "Friend", full("peer", 2000000012, 1,
-        "1=25|9=P,37,60000,70000")))
-    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6 and #samples == 3)
-    assert(not receive(current, "Friend", full("peer", 2000000013, 1,
-        "1=99|9=P,37,90000,70000")))
-    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6,
-        "Rejected status frames must not partially apply their position")
-    assert(receive(current, "Friend", full("peer", 2000000014, 1, "1=25")))
-    assert(current:GetSharedPositions()["friend-testrealm"].x == 0.6,
-        "An omitted attachment is not an unavailable-position report")
-end
-
--- A targeted reply supplies the latest position to its requester but cannot
--- suppress the movement broadcast still needed by everyone else.
-do
-    local current, clock = positionStatusFixture({ level = 24 })
-    clock:advance(1)
-    clock.x = 0.8
-    assert(current:ReceiveData("Friend", "1|Q|status|initial|" .. full("peer", 2000000001, 1, "1=25")))
-    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|R|status|initial|friend%-testrealm|")
-        and clock.sent[2].message:find("9=P,37,80000,75000", 1, true))
-    clock:advance(1)
-    assert(#clock.sent == 3 and clock.sent[3].message == "1|position|2|P|2000000002|37|80000|75000")
-end
-
--- Attachments respect the full native envelope budget. A long targeted reply
--- preserves core status and omits position; the same core still fits publicly.
-do
-    local values = { xpMax = "x", class = "MAGE" }
-    local current, clock = positionStatusFixture(values)
-    local request = full("peer", 2000000000, 1, "1=25")
-    local function requestSnapshot(id)
-        return current:ReceiveData("Friend-TestRealm", "1|Q|status|" .. string.rep(id, 32) .. "|" .. request)
-    end
-    assert(requestSnapshot("a"))
-    local combined = clock.sent[#clock.sent].message
-    assert(combined:find("|9=P,", 1, true) and combined:find("|11=7", 1, true))
-    values.xpMax = string.rep("x", 256 - #combined)
-    assert(requestSnapshot("b"))
-    local reply = clock.sent[#clock.sent].message
-    assert(#reply == 255 and reply:find("|9=P,", 1, true), "A combined reply fitting exactly 255 bytes is accepted")
-    values.xpMax = values.xpMax .. "x"
-    assert(requestSnapshot("c"))
-    reply = clock.sent[#clock.sent].message
-    assert(#reply < 255 and not reply:find("|9=", 1, true) and reply:find("3=" .. values.xpMax, 1, true)
-        and reply:find("|11=7", 1, true),
-        "An attachment must not prevent a valid core response")
-    clock:advance(5)
-    local public = clock.sent[#clock.sent].message
-    assert(public:match("^1|status|") and public:find("|9=P,", 1, true) and #public <= 255,
-        "The public envelope has enough room for the same core and position")
+    assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|[^|]+|2000000000|2|1=25$"))
 end
 
 -- Rejected sends never count as successful broadcasts. Retry the latest whole
@@ -798,10 +608,10 @@ end
 do
     local values = {
         level = 24, xp = 420, xpMax = 1000, xpState = "known",
-        inParty = true, canInvite = false, partyFull = false, sharing = true,
+        inParty = true, canInvite = false, partyFull = false,
     }
     local current, clock, samples = statusFixture(values)
-    local body = "1=24|2=420|3=1000|4=1|8=1|10=1"
+    local body = "1=24|2=420|3=1000|4=1|10=1"
     assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == body)
     assert(receive(current, "Friend", full("peer", 2000000000, 1, body)))
     for name, value in pairs(values) do
@@ -814,7 +624,7 @@ do
     -- Unknown Lua names never acquire IDs automatically or fall back to named
     -- wire fields. An invalid provider cannot publish its partially valid data.
     assert(current:RegisterDataStatusProvider("unregistered", function()
-        return { future = "new", sharing = "partial" }
+        return { future = "new", xp = 1 }
     end, function() end))
     clock:advance(5)
     assert(#clock.sent == 1)
@@ -839,18 +649,18 @@ end
 -- The registry performs field-specific value conversion, preserving ordinary
 -- strings in other fields and keeping absent values distinct from false/zero.
 do
-    local values = { xpState = "unavailable", sharing = false, xpMax = "known" }
+    local values = { xpState = "unavailable", xpMax = "known" }
     local current, clock, samples = statusFixture(values)
-    assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == "3=known|4=0|8=0")
+    assert(clock.sent[1].message:match("|5|F|[^|]+|2000000000|1|(.+)$") == "3=known|4=0")
     local states = { "unavailable", "known", "max" }
     for code = 0, 2 do
         assert(receive(current, "Friend", full("peer", 2000000000 + code, code + 1,
-            "3=known|4=" .. code .. "|8=" .. code % 2)))
+            "3=known|4=" .. code)))
         assert(equal(samples[#samples].fields,
-            { xpMax = "known", xpState = states[code + 1], sharing = code % 2 == 1 }))
-        values.xpState, values.sharing = states[code + 1], code % 2 == 1
+            { xpMax = "known", xpState = states[code + 1] }))
+        values.xpState = states[code + 1]
         clock:advance(5)
-        assert(clock.sent[#clock.sent].message:find("4=" .. code .. "|8=" .. code % 2, 1, true))
+        assert(clock.sent[#clock.sent].message:match("|4=" .. code .. "$"))
     end
     assert(receive(current, "Friend", full("peer", 2000000003, 4, "")))
     assert(next(samples[#samples].fields) == nil)
@@ -886,7 +696,7 @@ do
     for _, invalid in ipairs({
         { xp = "discard", inParty = true },
         { xp = "discard", inParty = false, canInvite = false, partyFull = 0 },
-        { xp = "discard", sharing = "false" },
+        { xp = "discard", sharing = false },
         { xp = "discard", xpState = "future" }, { xp = "discard", partyFlags = 3 },
     }) do
         values = invalid
@@ -895,9 +705,9 @@ do
             "An invalid typed field must not partially publish the provider")
         assert(clock.sent[#clock.sent].message:match("|1|1=24$"), "Healthy providers continue publishing")
     end
-    values = { xp = "recovered", inParty = false, canInvite = true, partyFull = false, sharing = false, xpState = "known" }
+    values = { xp = "recovered", inParty = false, canInvite = true, partyFull = false, xpState = "known" }
     clock:advance(5)
-    assert(clock.sent[#clock.sent].message:match("|2|1=24|2=recovered|4=1|8=0|10=2$"))
+    assert(clock.sent[#clock.sent].message:match("|2|1=24|2=recovered|4=1|10=2$"))
 end
 
 -- One provider owns the whole mask. Two complete groups collide atomically;
@@ -1008,7 +818,7 @@ end
 do
     local current, clock, samples = statusFixture({ level = 24 })
     local second = {}
-    assert(current:RegisterDataStatusProvider("future", function() return { sharing = true, xp = "a|b=c%" } end,
+    assert(current:RegisterDataStatusProvider("future", function() return { class = "MAGE", xp = "a|b=c%" } end,
         function(_, fields, _, _, metadata)
             second[#second + 1] = { level = fields.level, metadata = metadata }
             fields.level = "mutated"; metadata.session = "mutated"
@@ -1017,7 +827,7 @@ do
     assert(not current:RegisterDataStatusProvider("Upper", function() end, function() end))
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].message:match("^1|status|5|F|")
-        and clock.sent[2].message:find("2=a%7Cb%3Dc%25|8=1", 1, true)
+        and clock.sent[2].message:find("2=a%7Cb%3Dc%25|11=7", 1, true)
         and clock.sent[2].message:find("1=24", 1, true))
     assert(clock:activeTimers() == 1 and current.dataState.features.status and current.dataState.requests.status
         and not current.dataState.features.player and not current.dataState.features.future)
@@ -1128,7 +938,7 @@ do
         "5|F|peer|2000000000|0|1=25", "5|F|peer|2000000000|01|1=25",
         "5|F|peer|2000000000|1|1=25|1=26", "5|F|peer|2000000000|1|1=25|",
         "5|F|peer|2000000000|1|level=25", "5|F|peer|2000000000|1|1=25=26",
-        "5|F|peer|2000000000|1|4=known", "5|F|peer|2000000000|1|8=2",
+        "5|F|peer|2000000000|1|4=known", "5|F|peer|2000000000|1|8=0|8=1",
         "5|F|peer|2000000000|1|10=-1", "5|F|peer|2000000000|1|11=65536",
         "5|F|peer|2000000000|1|0=x", "5|F|peer|2000000000|1|65536=x",
         "5|F|peer|2000000000|1|1=%GG", "5|F|peer|2000000000|1|1=%0A",
@@ -1164,9 +974,9 @@ do
         clock:advance(5)
         assert(#clock.sent == 0)
     end
-    values = { sharing = false }
+    values = { burned = 0 }
     clock:advance(5)
-    assert(#clock.sent == 1 and clock.sent[1].message:find("8=0", 1, true))
+    assert(#clock.sent == 1 and clock.sent[1].message:find("12=0", 1, true))
     values = nil
     clock:advance(5)
     assert(#clock.sent == 2 and clock.sent[2].message:match("|5|F|[^|]+|%d+|2|$"))
@@ -1269,7 +1079,7 @@ end
 -- Burned reports ride the shared snapshots, include the local value exactly
 -- once, and never interpret an older client's omitted field as a zero.
 do
-    local bus = newRequestBus(false, function(client)
+    local bus = newRequestBus(function(client)
         client.addon.db.burned = { status = ({ Alice = 30, Bob = 60, Carol = 90 })[client.name] }
         loadModule("Burned.lua", client.addon, client.world.environment)
         client.addon:InitializeBurned()
@@ -1332,7 +1142,7 @@ end
 -- Personal edit cooldowns do not delay discovery, accepted edit delivery, or
 -- idle status heartbeats carrying the same saved Burned value.
 do
-    local current, clock = newAddon(nil, false, false, { guild = true })
+    local current, clock = newAddon(nil, false, { guild = true })
     loadModule("Burned.lua", current, clock.environment)
     current:InitializeBurned()
     clock:login()
@@ -1357,7 +1167,7 @@ end
 do
     local profile = { schemaVersion = 4,
         data = { channels = { party = false, guild = true } } }
-    local current, clock = newAddon(profile, false, false, { guild = true })
+    local current, clock = newAddon(profile, false, { guild = true })
     assert(current:RegisterDataFeature("echo", function() end))
     clock:login()
     local notices = 0
@@ -1408,7 +1218,7 @@ end
 for _, distribution in ipairs({ "PARTY", "RAID", "GUILD" }) do
     local membership = { party = false, raid = false, guild = false }
     membership[distribution:lower()] = true
-    local current, clock = newAddon(nil, false, false, membership)
+    local current, clock = newAddon(nil, false, membership)
     local received = 0
     assert(current:RegisterDataFeature("echo", function() received = received + 1 end))
     assert(not current:HasDataGroup() or not current:IsDataConnected())
@@ -1427,7 +1237,7 @@ end
 
 -- Membership changes preserve request caches while another audience remains.
 do
-    local current, clock = newAddon(nil, false, false, { party = true, guild = true })
+    local current, clock = newAddon(nil, false, { party = true, guild = true })
     local notices = {}
     current:RegisterDataFeature("echo", function() end, function(connected) notices[#notices + 1] = connected end)
     current:RegisterDataRequest("snapshot", function() return "own" end, function() end)
@@ -1457,7 +1267,7 @@ end
 
 -- Sending rechecks membership even before the native roster event arrives.
 do
-    local current, clock = newAddon(nil, false, false, { party = true })
+    local current, clock = newAddon(nil, false, { party = true })
     current:RegisterDataFeature("echo", function() end)
     current:RegisterDataRequest("snapshot", function() return "own" end, function() end)
     clock:login()
@@ -1481,7 +1291,7 @@ end
 
 -- Every route gets the same serialized frame even when another route fails.
 do
-    local current, clock = newAddon(nil, false, false, { party = true, guild = true })
+    local current, clock = newAddon(nil, false, { party = true, guild = true })
     local receives, requests, responses = 0, 0, 0
     current:RegisterDataFeature("echo", function() receives = receives + 1 end)
     current:RegisterDataRequest("snapshot", function() requests = requests + 1; return "own" end,
@@ -1516,7 +1326,7 @@ end
 
 -- Enabled switches govern sends and receives, including raid through party.
 do
-    local current, clock = newAddon({ data = { channels = { party = false, guild = true } } }, false, false,
+    local current, clock = newAddon({ data = { channels = { party = false, guild = true } } }, false,
         { guild = true, raid = true })
     current:RegisterDataFeature("echo", function() end)
     clock:login()
@@ -1567,7 +1377,7 @@ for _, failure in ipairs({ "reject", "throw" }) do
 end
 
 do
-    local current, clock = newAddon(nil, false, false, { configure = function(environment)
+    local current, clock = newAddon(nil, false, { configure = function(environment)
         environment.C_ChatInfo.SendAddonMessage = false
     end })
     clock:login()

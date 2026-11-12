@@ -262,7 +262,7 @@ function addon:GetPlayerDataCleanupEnabled()
 end
 
 local function CanChangePlayerData(self)
-    if not self.initialized or not self.rosterState or not self.positionState then
+    if not self.initialized or not self.rosterState then
         return false, "Still loading. Please try again after login."
     end
     if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
@@ -270,9 +270,8 @@ local function CanChangePlayerData(self)
 end
 
 local function PlayerDataMaps(self)
-    return { self.db.roster.peers, self.db.position.peers, self.rosterState.peers, self.rosterState.progress,
-        self.positionState.peers, self.positionState.latest, self.positionState.classes,
-        self.burnedState.peers, self.dataState.status.received }
+    return { self.db.roster.peers, self.rosterState.peers, self.rosterState.progress, self.burnedState.peers,
+        self.dataState.status.received }
 end
 
 local function RefreshPlayerData(self)
@@ -281,20 +280,16 @@ local function RefreshPlayerData(self)
         self.burnedState.timer = nil
     end
     self:Notify("ROSTER_CHANGED")
-    self:Notify("POSITIONS_CHANGED")
     self:Notify("BURNED_CHANGED")
 end
 
 function addon:PrunePlayerData()
     if not CanChangePlayerData(self) or not self:GetPlayerDataCleanupEnabled() then return 0 end
     local lastSeen, cutoff = {}, GetServerTime() - PLAYER_DATA_MAX_AGE
-    -- Expire a player's history together, using the most recent local contact.
-    -- Legacy positions have only the sender's activity stamp; coordinate age
-    -- (positionStamp) must not expire a player who still sends fresh status.
-    for _, peers in ipairs({ self.db.roster.peers, self.db.position.peers,
-        self.rosterState.peers, self.positionState.peers }) do
+    -- Expire a player's history together using the most recent roster contact.
+    for _, peers in ipairs({ self.db.roster.peers, self.rosterState.peers }) do
         for id, peer in pairs(peers) do
-            local stamp = peer.seenAt or peer.stamp
+            local stamp = peer.seenAt
             if type(stamp) == "number" then lastSeen[id] = math.max(lastSeen[id] or 0, stamp) end
         end
     end

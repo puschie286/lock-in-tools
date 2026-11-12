@@ -17,7 +17,6 @@ DataChannel.lua
 Data.lua
 DataStatus.lua
 Burned.lua
-Position.lua
 Roster.lua
 Friends.lua
 Ranking.lua

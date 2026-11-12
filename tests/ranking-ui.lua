@@ -1284,21 +1284,16 @@ do
     end
 end
 
--- Real positions refresh only the owned tooltip; XP, contact expiry and local maps
--- still update the visible overlay without requesting another roster snapshot.
+-- XP and contact expiry update the visible overlay without requesting another roster snapshot.
 do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world.level = 24
     world.guild = true
     world:initialize()
-    api.C_Map.GetMapInfo = function(map)
-        return { name = map == 37 and "Elwynn Forest" or "Westfall" }
-    end
     loadOverlay(ranking, api)
     assert(ranking:ReceivePlayerStatus("Friend-TestRealm", {
         level = 24, xp = 400, xpMax = 1000, xpState = "known",
     }, api.GetServerTime(), 1))
-    assert(ranking:ReceivePosition("Friend-TestRealm", "2|P|" .. api.GetServerTime() .. "|37|30000|70000"))
     local requests, originalRequest = 0, ranking.RequestData
     ranking.RequestData = function(self, ...)
         requests = requests + 1
@@ -1311,47 +1306,11 @@ do
         and panel.rows[2].progress:GetText() == "0%" and panel.scripts.OnUpdate and not ranking.contentPanel,
         "production roster data reaches the visible overlay without requiring Content")
     first.scripts.OnEnter(first)
-    assert(tooltip.lines[2] == "Elwynn Forest")
-    local rankingReads, overviewReads, paints = 0, 0, 0
-    local getRanking, getOverview, setRank = ranking.GetPlayerRanking, ranking.GetOverviewPlayers, first.rank.SetText
-    ranking.GetPlayerRanking = function(self, ...)
-        rankingReads = rankingReads + 1
-        return getRanking(self, ...)
-    end
-    ranking.GetOverviewPlayers = function(self, ...)
-        overviewReads = overviewReads + 1
-        return getOverview(self, ...)
-    end
-    first.rank.SetText = function(self, ...)
-        paints = paints + 1
-        return setRank(self, ...)
-    end
-    for _ = 1, 20 do
-        world.now = world.now + 1
-        assert(ranking:ReceivePosition("Friend-TestRealm", "2|P|" .. api.GetServerTime() .. "|38|40000|60000"))
-    end
-    ranking:Notify("POSITION_CONTACT_CHANGED")
-    assert(tooltip.lines[2] == "Westfall" and rankingReads == 0 and overviewReads == 0 and paints == 0,
-        "Movement refreshes the owned location without rebuilding standings or repainting XP rows")
-    assert(ranking:SetPositionSharing(false))
-    assert(tooltip.lines[2] == "Position sharing is off" and rankingReads == 0,
-        "The fast tooltip path must immediately respect the local sharing opt-out")
-    assert(ranking:SetPositionSharing(true))
-    assert(tooltip.lines[2] == "Westfall")
-    assert(ranking:SetPositionRetention(false))
-    world.now = world.now + 61
-    ranking:PositionTick()
-    assert(tooltip.lines[2] == "Unknown location" and rankingReads == 0,
-        "Expiring a live-only peer must clear its hovered location without rebuilding XP standings")
-    world.map = 38
-    api.C_Map.GetBestMapForUnit = function() return world.map end
-    panel.scripts.OnUpdate(panel, 1)
-    assert(rankingReads == 1 and overviewReads == 1 and panel.rows[2].player.map == 38,
-        "The visible tick still refreshes the local map and current contact metadata")
+    assert(tooltip.lines[1] == "Lv 24 - 60% (600 XP)" and #tooltip.lines == 1)
     world.xp = 500
     world.fire("PLAYER_XP_UPDATE", "player")
     assert(panel.rows[1].player.isSelf and panel.rows[1].progress:GetText() == "50%",
-        "XP changes still rerank and repaint immediately after position-only updates")
+        "XP changes rerank and repaint immediately")
     world.now = world.now + 90
     panel.scripts.OnUpdate(panel, 1)
     local peer = panel.rows[2]
@@ -1375,8 +1334,7 @@ do
         "explicitly closing removes the visible-only timer")
 end
 
--- Compact hover details show missing XP, location and offline-only contact age;
--- refreshed pooled rows retain their original privacy guards.
+-- Compact hover details show missing XP and offline contact age.
 do
     local ranking, api, _, _, world = loadAddon(settings(SECRET, false), false)
     world:initialize()
@@ -1387,7 +1345,6 @@ do
         anchorOwners[#anchorOwners + 1] = owner
         tooltip:SetOwner(owner, "ANCHOR_CURSOR")
     end
-    ranking.db.position.sharing = true
     local own = row("Self", 6, 24, 250, 1000, true)
     local players = {
         row("Alpha", 1, 30, 420, 1000), row("Bravo", 2, 29, 175, 2000),
@@ -1395,21 +1352,10 @@ do
         row("Echo", 5, 26, 50, 1000), own,
     }
     players[1].name, own.name = "Alpha-RemoteRealm", "Self-HomeRealm"
-    players[1].map, players[1].positionAvailable = 37, true
-    players[1].seenAt, players[1].positionStamp = api.GetServerTime(), api.GetServerTime() - 300
+    players[1].seenAt = api.GetServerTime()
     players[1].xpUpdatedAt = api.GetServerTime() - 30
-    players[2].map, players[2].positionAvailable = 38, false
     players[2].stale, players[2].xpStale, players[2].online = true, true, false
     players[2].seenAt, players[2].xpUpdatedAt = api.GetServerTime() - 120, api.GetServerTime() - 150
-    players[2].positionStamp = api.GetServerTime() - 300
-    players[4].sharing, players[4].map, players[4].online = false, 37, false
-    players[4].seenAt = api.GetServerTime() - 60
-    local lookups = {}
-    api.C_Map.GetMapInfo = function(map)
-        lookups[#lookups + 1] = map
-        assert(map == 37 or map == 38, "hover must only resolve a map exposed by the roster")
-        return { name = map == 37 and "Elwynn Forest" or "Westfall" }
-    end
     local state = { players = players, own = own, connected = true, grouped = true }
     ranking.GetPlayerRanking = function() return state end
     assert(ranking:SetRankingEnabled(true))
@@ -1417,14 +1363,13 @@ do
     local first = panel.rows[1]
     first.scripts.OnEnter(first)
     assert(tooltip:IsShown() and tooltip:IsOwned(first) and tooltip.text == "#1 - Alpha"
-        and #tooltip.lines == 2 and tooltip.lines[1] == "Lv 30 - 58% (580 XP)"
-        and tooltip.lines[2] == "Elwynn Forest" and #lookups == 1,
-        "online hover uses the requested rank/name, missing XP and location without a contact age")
+        and #tooltip.lines == 1 and tooltip.lines[1] == "Lv 30 - 58% (580 XP)",
+        "online hover shows the requested rank, name and missing XP")
     assert(#anchorOwners == 1 and anchorOwners[1] == first and tooltip.anchor == "ANCHOR_CURSOR",
         "ranking player tooltips follow the global tooltip positioning hook")
     players[1].xp = 500
     ranking:RefreshRankingOverlay()
-    assert(tooltip:IsShown() and tooltip:IsOwned(first) and #tooltip.lines == 2
+    assert(tooltip:IsShown() and tooltip:IsOwned(first) and #tooltip.lines == 1
         and tooltip.lines[1] == "Lv 30 - 50% (500 XP)",
         "hover refreshes missing XP for the same player identity")
     assert(#anchorOwners == 2 and anchorOwners[2] == first and tooltip.anchor == "ANCHOR_CURSOR",
@@ -1433,62 +1378,33 @@ do
     ranking:RefreshRankingOverlay()
     assert(tooltip.lines[1] == "Lv 30 - 0.1% (1 XP)",
         "rounding never describes a positive amount of missing XP as zero percent")
-    local beforeOnlineMap = #lookups
-    players[1].map = 38
-    ranking:Notify("POSITIONS_CHANGED")
-    assert(tooltip:IsShown() and #tooltip.lines == 2 and tooltip.lines[2] == "Westfall"
-        and #lookups == beforeOnlineMap + 1,
-        "online position changes update the location while still omitting a contact age")
     first.scripts.OnLeave(first)
     assert(not tooltip:IsShown(), "leaving a player dismisses their details")
     local stale = panel.rows[2]
-    local beforeOffline = #lookups
     stale.scripts.OnEnter(stale)
     assert(tooltip.text == "#2 - Bravo" and #tooltip.lines == 2
         and tooltip.lines[1] == "Lv 29 - 91.3% (1825 XP)"
-        and tooltip.lines[2] == "Westfall - 2m ago" and #lookups == beforeOffline + 1,
-        "offline hover uses saved missing XP and combines the location with last contact")
-    players[2].map = 37
-    ranking:Notify("POSITIONS_CHANGED")
-    assert(tooltip.lines[2] == "Elwynn Forest - 2m ago" and #tooltip.lines == 2,
-        "a position change refreshes the offline location without extra labels or timestamps")
-    local beforeLocalOff = #lookups
-    ranking.db.position.sharing = false
-    ranking:RefreshRankingOverlay()
-    assert(tooltip.lines[2] == "Position sharing is off - 2m ago" and #lookups == beforeLocalOff,
-        "turning local position sharing off hides cached peer locations without another map lookup")
-    ranking.db.position.sharing = true
-    local beforePrivate = #lookups
-    panel.rows[4].scripts.OnEnter(panel.rows[4])
-    assert(tooltip.lines[2] == "Not sharing - 1m ago" and #tooltip.lines == 2 and #lookups == beforePrivate,
-        "a player who does not share position has no map lookup or previously hovered location leak")
+        and tooltip.lines[2] == "Last seen 2m ago",
+        "offline hover uses saved missing XP and last contact age")
     local maximum = panel.rows[3]
     maximum.scripts.OnEnter(maximum)
-    assert(tooltip.text == "#3 - Charlie" and #tooltip.lines == 1
-        and tooltip.lines[1] == "Unknown location" and #lookups == beforePrivate,
-        "an online maximum-level tooltip contains its rank/name and location without level, XP or contact")
-    players[3].online, players[3].map, players[3].seenAt = false, 38, api.GetServerTime() - 3600
+    assert(tooltip.text == "#3 - Charlie" and #tooltip.lines == 0,
+        "an online maximum-level tooltip contains the rank and name")
+    players[3].online, players[3].seenAt = false, api.GetServerTime() - 3600
     ranking:RefreshRankingOverlay()
     assert(tooltip.text == "#3 - Charlie" and #tooltip.lines == 1
-        and tooltip.lines[1] == "Westfall - 1h ago",
-        "an offline maximum-level tooltip adds only the combined location/contact line")
-    players[3].map = nil
-    ranking:RefreshRankingOverlay()
-    assert(#tooltip.lines == 1 and tooltip.lines[1] == "Unknown location - 1h ago",
-        "missing permitted position data has a compact location fallback")
+        and tooltip.lines[1] == "Last seen 1h ago",
+        "an offline maximum-level tooltip adds the contact age")
     own.rank, own.xp, own.xpMax, own.xpState = nil, nil, nil, "unavailable"
     ranking:RefreshRankingOverlay()
-    local beforeOwn = #lookups
     panel.ownRow.scripts.OnEnter(panel.ownRow)
-    assert(tooltip.text == "#? - Self" and #tooltip.lines == 2
-        and tooltip.lines[1] == "Lv 24 - Awaiting XP" and tooltip.lines[2] == "Unknown location"
-        and #lookups == beforeOwn,
-        "unranked local progress is explained with a location but no contact age")
+    assert(tooltip.text == "#? - Self" and #tooltip.lines == 1 and tooltip.lines[1] == "Lv 24 - Awaiting XP",
+        "unranked local progress shows the level and XP state")
     assert(anchorOwners[#anchorOwners] == panel.ownRow and tooltip:IsOwned(panel.ownRow)
         and tooltip.anchor == "ANCHOR_CURSOR", "the separate local row uses global tooltip positioning")
     own.level = nil
     ranking:RefreshRankingOverlay()
-    assert(tooltip.lines[1] == "Lv ? - Awaiting XP" and #tooltip.lines == 2,
+    assert(tooltip.lines[1] == "Lv ? - Awaiting XP" and #tooltip.lines == 1,
         "a missing level is shown without inventing an XP value")
     panel.ownRow.scripts.OnLeave(panel.ownRow)
     local beforeCloseHover = #anchorOwners
@@ -1522,19 +1438,12 @@ do
         InviteUnit = function(name) invites[#invites + 1] = name end,
         RequestInviteFromUnit = function(name) requests[#requests + 1] = name end,
     }
-    local openedMaps = {}
-    api.C_Map.OpenWorldMap = function(map)
-        openedMaps[#openedMaps + 1] = map
-        api.WorldMapFrame = { IsShown = function() return true end, GetMapID = function() return map end,
-            GetCanvasScale = function() return 1 end, InstantPanAndZoom = function() end }
-    end
     world.guild = true
     world:initialize()
-    assert(ranking:ReceivePosition("Alpha-TestRealm", "2|P|" .. api.GetServerTime() .. "|38|25000|75000"))
     for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo" }) do
         assert(ranking:ReceivePlayerStatus(name .. "-TestRealm", {
             level = 30 - index, xp = 400, xpMax = 1000, xpState = "known",
-            inParty = name == "Bravo", canInvite = true, partyFull = false, sharing = true,
+            inParty = name == "Bravo", canInvite = true, partyFull = false,
         }, api.GetServerTime(), 1))
     end
     loadOverlay(ranking, api)
@@ -1562,30 +1471,22 @@ do
     first.scripts.OnEnter(first)
     local menu = openMenu(first)
     assert(not tooltip:IsShown() and menu.party:IsShown() and menu.party.action == "invite"
-        and menu.party:GetText() == "Invite" and not ranking.mainPanel and not ranking.contentPanel,
+        and menu.party:GetText() == "Invite" and not menu.showMap and not ranking.mainPanel and not ranking.contentPanel,
         "right clicking dismisses hover details and offers the roster's actions independently of Content")
-    for _, button in ipairs({ menu.party, menu.showMap }) do
-        button.scripts.OnEnter(button)
-        assert(not tooltip:IsShown(), "ranking menu actions show no hover tooltips")
-        button.scripts.OnLeave(button)
-    end
+    menu.party.scripts.OnEnter(menu.party)
+    assert(not tooltip:IsShown(), "ranking menu actions show no hover tooltips")
+    menu.party.scripts.OnLeave(menu.party)
     local messageCount = #messages
     menu.party:Click()
     assert(#invites == 1 and invites[1] == "Alpha" and not menu:IsShown(),
         "the ranking invite uses the production permission check and local native name")
     assert(#messages == messageCount, "ranking player actions add no addon chat log entry")
     menu = openMenu(first)
-    assert(menu.showMap:IsEnabled(), "right clicking a ranked player offers their shared map location")
-    menu.showMap:Click()
-    assert(#openedMaps == 1 and openedMaps[1] == 38 and not menu:IsShown()
-        and not ranking.mainPanel and not ranking.contentPanel and #invites == 1 and #requests == 0,
-        "ranking opens the selected player's map without creating Content or invoking party actions")
-    menu = openMenu(first)
-    assert(ranking:SetPositionSharing(false))
-    menu.showMap.scripts.OnClick(menu.showMap, "LeftButton")
-    assert(#openedMaps == 1, "a stale ranking map action respects disabled position sharing")
+    mayInvite = false
+    menu.party:Click()
+    assert(#invites == 1, "a stale invite respects the current party permissions")
     assert(#messages == messageCount, "failed ranking player actions also leave addon chat unchanged")
-    assert(ranking:SetPositionSharing(true))
+    mayInvite = true
     menu = openMenu(first)
     world.level = 35
     world.fire("PLAYER_XP_UPDATE", "player")
@@ -1610,12 +1511,15 @@ do
     menu = openMenu(alpha)
     world.now = world.now + 90
     panel.scripts.OnUpdate(panel, 1)
-    assert(menu:IsShown() and not menu.party:IsShown() and not menu.party.action,
-        "offline players keep their ranking while the unavailable party action is hidden")
+    assert(not menu:IsShown() and not menu.playerID,
+        "offline players keep their ranking while the unavailable action menu closes")
     alpha.scripts.OnEnter(alpha)
     api.UIParent:Hide()
     assert(not menu:IsShown() and not tooltip:IsShown(), "hiding the native interface dismisses ranking interactions")
     api.UIParent:Show()
+    assert(ranking:ReceivePlayerStatus("Alpha-TestRealm", {
+        level = 29, xp = 400, xpMax = 1000, xpState = "known", inParty = false, partyFull = false,
+    }, api.GetServerTime(), 2))
     menu = openMenu(panel.rows[2])
     panel.rows[2].scripts.OnEnter(panel.rows[2])
     shiftDown = true
@@ -1726,9 +1630,8 @@ do
     readonlyPanel.rowAnimator:AdvanceFrame(0.7)
     readonlyPanel.rows[1]:Click("RightButton")
     local readonlyMenu = readonlyPanel.actionMenu
-    assert(readonlyMenu and readonlyMenu:IsShown(), "future-schema profiles permit viewing the action list")
-    assert(not readonlyMenu.party:IsShown() and not readonlyMenu.party.action,
-        "read-only ranking hides the unavailable party action")
+    assert(readonlyMenu and not readonlyMenu:IsShown() and not readonlyMenu.playerID,
+        "read-only ranking keeps the menu closed when no party action is available")
     readonly:OpenOptions("ranking")
     assert(not readonly.optionsPanel.rankingEnabled:IsEnabled()
         and readonly.optionsPanel.rankingHideInCombat:GetChecked() and not readonly.optionsPanel.rankingHideInCombat:IsEnabled()

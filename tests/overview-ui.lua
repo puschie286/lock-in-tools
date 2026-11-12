@@ -25,16 +25,6 @@ do
         InviteUnit = function(name) invites[#invites + 1] = name end,
         RequestInviteFromUnit = function(name) requests[#requests + 1] = name end,
     }
-    api.C_Map.GetMapInfo = function(map)
-        assert(map == 37 or map == 38)
-        return { name = map == 37 and "Elwynn Forest" or "Westfall" }
-    end
-    local openedMaps = {}
-    api.C_Map.OpenWorldMap = function(map)
-        openedMaps[#openedMaps + 1] = map
-        api.WorldMapFrame = { IsShown = function() return true end, GetMapID = function() return map end,
-            GetCanvasScale = function() return 1 end, InstantPanAndZoom = function() end }
-    end
     overviewWorld.guild = true
     overviewWorld:initialize()
     local now = api.GetServerTime()
@@ -44,13 +34,6 @@ do
             inParty = name == "Bravo", partyFull = false,
         }, now, 1))
     end
-    local positions = {
-        ["alpha-testrealm"] = { name = "Alpha-TestRealm", map = 37, x = 0.25, y = 0.75,
-            stamp = now, positionStamp = now - 120, positionAvailable = true, online = true },
-        ["charlie-testrealm"] = { name = "Charlie-TestRealm", map = 38,
-            stamp = now, positionStamp = now - 180, positionAvailable = false, online = true },
-    }
-    overview.GetSharedPositions = function() return positions end
     local snapshotCalls, originalRequest = 0, overview.RequestData
     overview.RequestData = function(self, feature, ...)
         if feature == "status" then snapshotCalls = snapshotCalls + 1 end
@@ -118,7 +101,8 @@ do
             "an outside " .. mouseButton .. " cancels Overview actions without a party action")
     end
     local menu = openMenu(2)
-    assert(menu.party:IsShown() and menu.party.action == "invite" and menu.party:GetText() == "Invite",
+    assert(menu.party:IsShown() and menu.party.action == "invite" and menu.party:GetText() == "Invite"
+        and not menu.showMap and menu.menu:GetHeight() == 44,
         "a solo peer offers one party action labelled Invite")
     menu.party:Click()
     menu = openMenu(3)
@@ -127,28 +111,6 @@ do
     menu.party:Click()
     assert(#invites == 1 and invites[1] == "Alpha" and #requests == 1 and requests[1] == "Bravo",
         "overview clicks invoke the real guarded actions with local native names")
-    menu = openMenu(2)
-    assert(menu.showMap:IsEnabled(), "a player with a shared location offers Show on map")
-    menu.showMap.scripts.OnEnter(menu.showMap)
-    positions["alpha-testrealm"].map = 38
-    menu.showMap:Click()
-    assert(#openedMaps == 1 and openedMaps[1] == 38 and not menu:IsShown() and not api.GameTooltip:IsShown()
-        and #invites == 1 and #requests == 1,
-        "Show on map uses the current location and dismisses the menu without a party action")
-    positions["alpha-testrealm"].map = 37
-    menu = openMenu(3)
-    assert(not menu.showMap:IsEnabled(), "players without a shared location have a disabled map action")
-    menu.showMap.scripts.OnEnter(menu.showMap)
-    assert(not api.GameTooltip:IsShown(), "disabled map actions show no tooltip on hover")
-    clickOutside(menu, "RightButton")
-    assert(not api.GameTooltip:IsShown(), "dismissing the map action leaves the tooltip hidden")
-    menu = openMenu(2)
-    local previousPosition = positions["alpha-testrealm"]
-    positions["alpha-testrealm"] = nil
-    menu.showMap:Click()
-    assert(#openedMaps == 1 and content.feedback:GetText() ~= "",
-        "a location removed after opening the context menu cannot be used by a stale enabled map action")
-    positions["alpha-testrealm"] = previousPosition
     -- Open while allowed, then change native eligibility before clicking.
     mayInvite = true
     menu = openMenu(2)
@@ -156,11 +118,10 @@ do
     menu.party:Click()
     assert(#invites == 1 and content.feedback:GetText() ~= "",
         "an enabled stale menu item cannot bypass the action-time permission check")
-    menu = openMenu(2)
-    assert(not menu.party:IsShown() and not menu.party.action and menu.showMap:IsShown(),
-        "reopening a menu hides unavailable party actions while keeping the map entry")
+    page.rows[2]:Click("RightButton")
+    assert(not menu:IsShown() and not menu.playerID, "an unavailable party action leaves the menu closed")
     mayInvite = true
-    overview:RefreshOverview()
+    menu = openMenu(2)
     assert(menu:IsShown() and menu.playerID == "alpha-testrealm" and menu.party:IsShown()
         and menu.party.action == "invite",
         "a refresh preserves the selected player and updates an open menu's eligibility")
@@ -178,8 +139,8 @@ do
         "gaining invitation permission updates the same menu entry to Invite")
     menu = openMenu(3)
     assert(menu.party:IsShown() and not menu.party:IsEnabled() and not menu.party.action
-        and menu.party:GetText() == "Already in another group" and menu.showMap:IsShown(),
-        "another group's player has an informational party row and a separate map entry")
+        and menu.party:GetText() == "Already in another group",
+        "another group's player has a disabled informational party row")
     menu.party:Click()
     menu.party.scripts.OnClick(menu.party, "LeftButton")
     assert(#invites == 2 and #requests == 1, "the informational row cannot perform a party action even through a stale callback")
@@ -239,10 +200,8 @@ do
     assert(page.sortDescending and page.rows[1].playerID == "juliet-testrealm", "levels sort numerically descending")
     page:SetOffset(3)
     assert(page.rows[8].playerID == "bravo-testrealm", "unknown levels remain last when sorting descending")
-    page.headers.region:Click()
-    assert(page.rows[1].playerID == "alpha-testrealm" and page.rows[2].playerID == "self-testrealm"
-        and page.rows[3].playerID == "charlie-testrealm",
-        "region sorting includes the default shared local location before missing regions")
+    assert(not page.headers.region and not page.rows[1].position,
+        "Rankings has no shared region column")
     overview.rosterState.peers["alpha-testrealm"].seenAt = now - 20
     overview.rosterState.peers["bravo-testrealm"].seenAt = now - 10
     page.headers.seen:Click()
@@ -254,10 +213,9 @@ do
     overviewWorld:advance(90)
     assert(page.scripts.OnUpdate, "only the active overview page installs an age refresh")
     page.scripts.OnUpdate(page, 1)
-    assert(menu:IsShown() and menu.playerID == "alpha-testrealm" and not menu.party:IsShown()
-        and snapshotCalls == 0, "contact expiry hides the party action without changing menu identity or requesting status")
-    assert(page.rows[1].position:GetText() == "Elwynn Forest",
-        "offline region labels show the saved location without a prefix")
+    assert(not menu:IsShown() and not menu.playerID and snapshotCalls == 0,
+        "contact expiry dismisses the unavailable action without requesting status")
+    assert(page.rows[1].seen:GetText() == "1m ago", "offline rows retain the last-seen age")
     api.UIParent:Hide()
     assert(content:IsShown() and page:IsShown() and not page:IsVisible()
         and not page.active and not page.scripts.OnUpdate and not menu:IsShown(),
@@ -283,8 +241,9 @@ do
     assert(snapshotCalls == 0 and content.selectedTab == "overview" and content:IsVisible()
         and not options:IsVisible())
     page:SetOffset(999)
+    overview.rosterState.peers[page.rows[1].playerID].lastReceived = api.GetTime()
     openMenu(1)
-    positions, overview.rosterState.peers = {}, {}
+    overview.rosterState.peers = {}
     overview:RefreshOverview()
     assert(page.offset == 0 and page.rows[1].playerID == "self-testrealm"
         and not page.rows[2]:IsShown() and not page.rows[2].playerID and not page.scrollbar:IsShown()
@@ -360,7 +319,7 @@ do
         "status sorts online first by default and leaves unknown status last")
 
     shared = { { id = "ada ironwood-testrealm" }, { id = "brin-testrealm" } }
-    addon:Notify("POSITIONS_CHANGED")
+    addon:Notify("ROSTER_CHANGED")
     assert(page.offset == 0 and not page.scrollbar:IsShown() and #friends == 10
         and page.rows[8].playerID == "cora-testrealm" and page.rows[8].ranking:GetChecked(),
         "shared IDs and surname aliases disappear from Friends while selected native-only rows remain editable")
@@ -443,13 +402,11 @@ do
         and x == 1800 and y == 1200 and menu.menu.clamped,
         "player menus open at the cursor using inherited window and UI scale with screen clamping")
     local tooltip = api.GameTooltip
-    assert(menu.party:IsShown() and menu.party.action == "invite" and not menu.showMap:IsEnabled(),
-        "independent menus show only the available party action alongside the map entry")
-    for _, button in ipairs({ menu.party, menu.showMap }) do
-        button.scripts.OnEnter(button)
-        assert(not tooltip:IsShown(), "enabled and disabled player actions have no hover tooltips")
-        button.scripts.OnLeave(button)
-    end
+    assert(menu.party:IsShown() and menu.party.action == "invite" and not menu.showMap,
+        "independent menus offer the available party action")
+    menu.party.scripts.OnEnter(menu.party)
+    assert(not tooltip:IsShown(), "player actions have no hover tooltip")
+    menu.party.scripts.OnLeave(menu.party)
     world.cursorX, world.cursorY = 960, 640
     menu:Refresh()
     local _, _, _, refreshedX, refreshedY = menu.menu:GetPoint()
@@ -465,12 +422,10 @@ do
     assert(menu:IsShown() and menu.playerID == "alpha-testrealm" and menu.anchor == anchor
         and actions.activePlayerActionMenu == menu and reopenedX == 2400 and reopenedY == 1600,
         "right-clicking inside a menu reopens the same player's actions at the current cursor")
-    for _, button in ipairs({ menu.party, menu.showMap }) do
-        button:Click("RightButton")
-        world.fire("GLOBAL_MOUSE_UP", "RightButton")
-        assert(menu:IsShown() and menu.playerID == "alpha-testrealm",
-            "right clicks on enabled and disabled entries preserve the menu without running actions")
-    end
+    menu.party:Click("RightButton")
+    world.fire("GLOBAL_MOUSE_UP", "RightButton")
+    assert(menu:IsShown() and menu.playerID == "alpha-testrealm",
+        "right clicks on the party entry preserve the menu without running the action")
     menu.menu.mouseOver = false
     otherMenu:Open("alpha-testrealm", otherAnchor)
     local _, otherRelativeTo, _, otherX, otherY = otherMenu.menu:GetPoint()

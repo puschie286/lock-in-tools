@@ -7,7 +7,7 @@ local function newAddon(saved, readOnly, name, configure)
     local world = {
         now = 0, epoch = 2000000000, name = name or "Self", level = 24, xp = 420, xpMax = 1000, maxLevel = 60,
         guild = true, connected = false, frames = {},
-        invites = {}, joins = {}, positions = {},
+        invites = {}, joins = {},
         grouped = false, raid = false, leader = false, assistant = false,
         members = 0, sameParty = {}, refreshes = 0,
     }
@@ -31,6 +31,7 @@ local function newAddon(saved, readOnly, name, configure)
         GetRealmName = function() return "Test Realm" end,
         GetNormalizedRealmName = function() return "TestRealm" end,
         UnitLevel = function(unit) assert(unit == "player"); return world.level end,
+        UnitClass = function(unit) assert(unit == "player"); return "Druid", "DRUID" end,
         UnitXP = function(unit) assert(unit == "player"); return world.xp end,
         UnitXPMax = function(unit) assert(unit == "player"); return world.xpMax end,
         GetMaxPlayerLevel = function() return world.maxLevel end,
@@ -67,7 +68,7 @@ local function newAddon(saved, readOnly, name, configure)
     environment._G = environment
     world.environment = environment
     local addon = {
-        db = saved or { schemaVersion = 4, position = { sharing = false } },
+        db = saved or { schemaVersion = 4 },
         initialized = true, ready = false, savedDataReadOnly = readOnly,
     }
     function addon:HasDataGroup() return world.guild or world.grouped or world.raid end
@@ -82,9 +83,6 @@ local function newAddon(saved, readOnly, name, configure)
     world.notificationErrors = loadNotifications(addon, environment)
     addon:RegisterNotification("ROSTER_CHANGED", function() addon:RefreshOverview() end)
     function addon:RefreshOptions() end
-    function addon:GetSharedPositions()
-        return self.db.position.sharing and world.positions or {}
-    end
     function addon:RegisterDataFeature(feature, receive, connected)
         error("Roster must not register separate feature messages")
     end
@@ -125,9 +123,9 @@ local function newAddon(saved, readOnly, name, configure)
     function world:advance(seconds)
         self.now = self.now + seconds
     end
-    function world:peer(name, level, grouped, canInvite, full, sharing, stamp, sequence)
+    function world:peer(name, level, grouped, canInvite, full, stamp, sequence)
         return self:status(name, { level = level or 25, xpState = "unavailable", inParty = grouped == true,
-            canInvite = canInvite == true, partyFull = full == true, sharing = sharing == true }, stamp, sequence)
+            canInvite = canInvite == true, partyFull = full == true }, stamp, sequence)
     end
     function world:status(name, fields, stamp, sequence, metadata)
         local decoded = {}
@@ -144,24 +142,23 @@ end
 
 -- All local metadata is collected together; native changes never bypass the shared scheduler.
 do
-    local addon, world = newAddon()
+    local _, world = newAddon()
     world:advance(10)
     assert(world.collectStatus() == nil, "Status collection waits for login")
     world:login()
     world:connect()
     local self = world:find("self-testrealm")
-    assert(self and self.isSelf and self.level == 24 and self.online)
-    assert(self.map == nil and addon.db.position.sharing == false)
+    assert(self and self.isSelf and self.level == 24 and self.online and self.class == "DRUID")
     local fields = world.collectStatus()
     assert(fields.level == 24 and fields.xp == 420 and fields.xpMax == 1000 and fields.xpState == "known")
-    assert(fields.inParty == false and fields.canInvite == true and fields.partyFull == false and fields.sharing == false)
-    assert(fields.map == nil and fields.x == nil and fields.y == nil, "Roster collection never duplicates coordinates")
+    assert(fields.inParty == false and fields.canInvite == true and fields.partyFull == false and fields.class == "DRUID")
+    assert(fields.sharing == nil and fields.map == nil and fields.x == nil and fields.y == nil,
+        "Player status excludes position fields")
     world.grouped, world.leader, world.members = true, true, 5
-    addon.db.position.sharing = true
     world:event("GROUP_ROSTER_UPDATE")
     world:event("PARTY_LEADER_CHANGED")
     fields = world.collectStatus()
-    assert(fields.inParty == true and fields.canInvite == true and fields.partyFull == true and fields.sharing == true)
+    assert(fields.inParty == true and fields.canInvite == true and fields.partyFull == true)
     world.leader, world.members = false, 2
     world:event("PARTY_LEADER_CHANGED")
     fields = world.collectStatus()
@@ -171,7 +168,7 @@ do
     world:event("PLAYER_LEVEL_UP", 25)
     assert(world:find("self-testrealm").level == 25, "Local level changes appear immediately")
     world:advance(100)
-    world:peer("Remote-TestRealm", 30, false, true, false, false)
+    world:peer("Remote-TestRealm", 30, false, true, false)
     assert(world:find("remote-testrealm").online)
     world:disconnect()
     assert(not world:find("remote-testrealm").online,
@@ -184,11 +181,10 @@ end
 do
     local addon, world = newAddon()
     world:login(); world:connect()
-    assert(world:peer("Friend-Test Realm", 27, false, true, false, false))
+    assert(world:peer("Friend-Test Realm", 27, false, true, false))
     local friend = world:find("friend-testrealm")
     assert(friend and friend.name:gsub("%s", "") == "Friend-TestRealm" and friend.level == 27 and friend.online)
-    assert(friend.map == nil and friend.sharing == false)
-    assert(not world:peer("SELF-TestRealm", 99, false, true, false, true), "Self echoes cannot replace the local row")
+    assert(not world:peer("SELF-TestRealm", 99, false, true, false), "Self echoes cannot replace the local row")
     assert(world:find("self-testrealm").level == 24)
     local before = copy(addon.db)
     for _, malformed in ipairs({ -1, "x", 1001 }) do
@@ -196,58 +192,48 @@ do
             "Malformed player metadata must be rejected")
     end
     for _, name in ipairs({ "", "Friend|TestRealm", string.rep("x", 129) }) do
-        assert(not world:peer(name, 20, false, true, false, false), "Malformed senders must be rejected")
+        assert(not world:peer(name, 20, false, true, false), "Malformed senders must be rejected")
     end
     assert(equal(before, addon.db), "Rejected packets must preserve saved roster state")
     world:advance(30)
-    assert(not world:peer("Friend-TestRealm", 99, true, true, false, true, world.epoch, 1))
+    assert(not world:peer("Friend-TestRealm", 99, true, true, false, world.epoch, 1))
     assert(world:find("friend-testrealm").level == 27, "Duplicate metadata cannot overwrite the peer")
     assert(world:find("friend-testrealm").seenAt == world.epoch, "Duplicate metadata cannot refresh last seen")
-    assert(world:peer("Friend-TestRealm", 28, true, true, false, true, world.epoch, 2))
+    assert(world:peer("Friend-TestRealm", 28, true, true, false, world.epoch, 2))
     assert(world:find("friend-testrealm").level == 28, "Sequence orders updates within one server second")
-    assert(not world:peer("Friend-TestRealm", 99, true, true, false, true, world.epoch - 1, 100))
+    assert(not world:peer("Friend-TestRealm", 99, true, true, false, world.epoch - 1, 100))
     world:advance(91)
     friend = world:find("friend-testrealm")
     assert(friend and not friend.online and friend.level == 28, "Expired peers remain visible as last seen")
-    assert(world:peer("New-TestRealm", 20, false, true, false, false))
+    assert(world:peer("New-TestRealm", 20, false, true, false))
     local staleSeen = false
     for _, row in ipairs(addon:GetOverviewPlayers()) do
         if not row.online then staleSeen = true else assert(not staleSeen, "Active players sort before retained peers") end
     end
-    assert(world:peer("Friend-TestRealm", 29, false, true, false, false))
+    assert(world:peer("Friend-TestRealm", 29, false, true, false))
     assert(world:find("friend-testrealm").online, "Fresh presence restores activity")
 end
 
--- Stored metadata survives reload without implying activity and never duplicates positions.
+-- Stored player metadata survives reload without implying activity.
 do
     local addon, world = newAddon()
     world:login(); world:connect()
-    assert(world:peer("Friend-TestRealm", 31, true, true, false, true))
-    addon.db.position.sharing = true
-    world.positions["friend-testrealm"] = {
-        name = "Friend-TestRealm", map = 37, x = 0.4, y = 0.6,
-        stamp = world.epoch + 5, positionStamp = world.epoch, positionAvailable = false, online = true,
-    }
-    local row = world:find("friend-testrealm")
-    assert(row.map == 37 and row.x == 0.4 and row.y == 0.6)
-    assert(row.positionStamp == world.epoch and row.positionAvailable == false,
-        "Location age must use the coordinate timestamp, not later activity")
+    assert(world:status("Friend-TestRealm", { level = 31, xpState = "unavailable", class = "MAGE",
+        inParty = true, canInvite = true, partyFull = false, sharing = true, map = 37, x = 0.4, y = 0.6 }))
+    local row = assert(world:find("friend-testrealm"))
     local stored = addon.db.roster.peers["friend-testrealm"]
     assert(stored and stored.name == "Friend-TestRealm" and stored.level == 31 and stored.seenAt)
     assert(stored.xpState == "unavailable" and stored.xpUpdatedAt == world.epoch
-        and stored.inParty == true and stored.canInvite == true and stored.partyFull == false and stored.sharing == true,
+        and stored.inParty == true and stored.canInvite == true and stored.partyFull == false and stored.class == "MAGE",
         "Roster history retains the complete last known player snapshot")
-    assert(stored.map == nil and stored.x == nil and stored.y == nil,
-        "Roster history leaves retained coordinates to the position feature")
-    world.positions["friend-testrealm"].positionAvailable = true
-    assert(world:peer("Friend-TestRealm", 31, true, true, false, false, world.epoch, 2))
-    assert(world:find("friend-testrealm").map == 37 and not world:find("friend-testrealm").positionAvailable,
-        "A peer disabling sharing turns retained coordinates into a last position")
-    addon.db.position.sharing = false
-    assert(world:find("friend-testrealm").map == nil, "Turning sharing off hides positions through the existing accessor")
+    for _, player in ipairs({ row, stored }) do
+        assert(player.class == "MAGE" and player.sharing == nil and player.map == nil and player.x == nil and player.y == nil,
+            "Roster rows and history retain class and ignore retired position fields")
+    end
     local restored, clock = newAddon(copy(addon.db))
     clock:login()
-    assert(clock:find("friend-testrealm") and not clock:find("friend-testrealm").online)
+    row = assert(clock:find("friend-testrealm"))
+    assert(not row.online and row.class == "MAGE")
     clock.grouped = true
     clock:event("GROUP_ROSTER_UPDATE")
     clock.grouped = false
@@ -264,7 +250,7 @@ end
 do
     local source, clock = newAddon()
     clock:login(); clock:connect()
-    assert(clock:peer("Friend", 31, true, true, false, false))
+    assert(clock:peer("Friend", 31, true, true, false))
     assert(source.db.roster.peers["friend-testrealm"].name == "Friend-testrealm")
     local profile = copy(source.db)
     profile.roster.peers["friend-testrealm"].name = "Friend"
@@ -303,7 +289,7 @@ end
 do
     local addon, world = newAddon()
     world:login(); world:connect()
-    assert(world:peer("Solo-TestRealm", 20, false, true, false, false))
+    assert(world:peer("Solo-TestRealm", 20, false, true, false))
     local state = addon:GetOverviewActionState("solo-testrealm")
     assert(state.invite == true and not state.request)
     assert(addon:PerformOverviewAction("solo-testrealm", "invite"))
@@ -320,18 +306,18 @@ do
     world.members, world.sameParty["solo-testrealm"] = 2, true
     assert(not addon:GetOverviewActionState("solo-testrealm").invite, "Existing party members need no invitation")
     world.sameParty, world.grouped, world.members, world.leader = {}, false, 0, false
-    assert(world:peer("Leader-TestRealm", 30, true, true, false, false))
+    assert(world:peer("Leader-TestRealm", 30, true, true, false))
     assert(addon:GetOverviewActionState("leader-testrealm").request == true)
     assert(addon:PerformOverviewAction("leader-testrealm", "request"))
     assert(#world.joins == 1 and world.joins[1] == "Leader" and #world.invites == 1,
         "Request to join uses the native request API without accepting or inviting automatically")
-    assert(world:peer("Member-TestRealm", 30, true, false, false, false))
+    assert(world:peer("Member-TestRealm", 30, true, false, false))
     assert(addon:GetOverviewActionState("member-testrealm").request == true,
         "A native join request can be routed through an ordinary party member")
     world.grouped, world.members = true, 2
     assert(not addon:PerformOverviewAction("leader-testrealm", "request"), "Joining eligibility is rechecked after forming a party")
     world.grouped, world.members = false, 0
-    assert(world:peer("Full-TestRealm", 40, true, true, true, false))
+    assert(world:peer("Full-TestRealm", 40, true, true, true))
     assert(not addon:GetOverviewActionState("full-testrealm").request)
     world.environment.C_PartyInfo.RequestInviteFromUnit = function() error("native request failed") end
     local accepted, problem = addon:PerformOverviewAction("leader-testrealm", "request")
@@ -346,7 +332,7 @@ end
 do
     local addon, world = newAddon()
     world:login(); world:connect()
-    assert(world:peer("Solo-TestRealm", 20, false, true, false, false))
+    assert(world:peer("Solo-TestRealm", 20, false, true, false))
     local function assertAction(action)
         local state = addon:GetOverviewActionState("solo-testrealm")
         for _, token in ipairs({ "invite", "suggest", "request" }) do
@@ -389,7 +375,7 @@ do
     assert(not addon:PerformOverviewAction("solo-testrealm", "suggest"), "Existing members cannot be suggested again")
     world.sameParty = {}
     assert(not addon:PerformOverviewAction("self-testrealm", "suggest"), "The local player cannot be suggested")
-    assert(world:peer("Grouped-TestRealm", 20, true, true, false, false))
+    assert(world:peer("Grouped-TestRealm", 20, true, true, false))
     local groupedPeer = addon:GetOverviewActionState("grouped-testrealm")
     assert(groupedPeer.partyInfo == "Already in another group" and not groupedPeer.invite and not groupedPeer.request
         and not groupedPeer.suggest
@@ -437,7 +423,7 @@ do
         { sender = "Restored", id = "restored-camwoweu5realm8pvp", target = "Restored",
             realm = "camwoweu5realm8pvp", savedName = "Restored-Cam Wow EU5 Realm8 PvP" },
     }) do
-        local profile = case.savedName and { schemaVersion = 4, position = { sharing = false }, roster = { peers = {
+        local profile = case.savedName and { schemaVersion = 4, roster = { peers = {
             [case.id] = { name = case.savedName, level = 20, seenAt = 2000000000 },
         } } } or nil
         local addon, world = newAddon(profile, false, nil, function(environment)
@@ -450,7 +436,7 @@ do
         world:login(); world:connect()
         for sequence, action in ipairs({ "invite", "suggest", "request" }) do
             world.grouped, world.members = action == "suggest", action == "suggest" and 2 or 0
-            assert(world:peer(case.sender, 20, action == "request", true, false, false, nil, sequence))
+            assert(world:peer(case.sender, 20, action == "request", true, false, nil, sequence))
             local row = assert(world:find(case.id))
             local storedName, history = row.name, copy(addon.db)
             local calls = action == "request" and world.joins or world.invites
@@ -468,20 +454,20 @@ end
 do
     local addon, world = newAddon()
     world:login(); world:connect()
-    assert(world:peer("Friend-TestRealm", 31, true, true, false, false))
+    assert(world:peer("Friend-TestRealm", 31, true, true, false))
     world.environment.C_PartyInfo = nil
     world.environment.InviteUnit = nil
     assert(not addon:GetOverviewActionState("friend-testrealm").request)
     assert(not addon:PerformOverviewAction("friend-testrealm", "request"))
     addon:OnRosterLogout()
     world:advance(100)
-    assert(world.collectStatus() == nil and not world:peer("Friend-TestRealm", 31, true, true, false, false))
+    assert(world.collectStatus() == nil and not world:peer("Friend-TestRealm", 31, true, true, false))
     local saved = copy(addon.db)
     saved.schemaVersion = 999
     local before = copy(saved)
     local guarded, clock = newAddon(saved, true)
     clock:login(); clock:connect()
-    clock:peer("Other-TestRealm", 99, true, true, false, true)
+    clock:peer("Other-TestRealm", 99, true, true, false)
     clock:event("GROUP_ROSTER_UPDATE")
     clock:advance(100)
     assert(equal(before, saved), "Newer-schema data must remain byte-for-byte unchanged")
@@ -518,12 +504,11 @@ do
     local addon, world = newAddon()
     world:login(); world:connect()
     local fields = { level = 31, xp = 125, xpMax = 500, xpState = "known", inParty = true,
-        canInvite = false, partyFull = false, sharing = true }
+        canInvite = false, partyFull = false }
     assert(world:status("Friend-TestRealm", fields, nil, 99, { session = "old", kind = "full", coherent = true }))
     local saved = copy(addon.db)
     local snapshot = saved.roster.peers["friend-testrealm"]
-    assert(snapshot.inParty == true and snapshot.canInvite == false
-        and snapshot.partyFull == false and snapshot.sharing == true)
+    assert(snapshot.inParty == true and snapshot.canInvite == false and snapshot.partyFull == false)
     for _, key in ipairs({ "stamp", "sequence", "session", "lastReceived", "disconnected", "statusSynchronized" }) do
         assert(snapshot[key] == nil)
     end
@@ -538,8 +523,7 @@ do
 end
 -- Legacy and malformed optional snapshots keep valid identity/presence without exposing invalid fields.
 do
-    local profile = { position = { sharing = false },
-        roster = { peers = {
+    local profile = { roster = { peers = {
             ["legacy-testrealm"] = { name = "Legacy", level = 20, seenAt = 2000000000 },
             ["max-testrealm"] = { name = "Max-TestRealm", level = 60, seenAt = 2000000000,
                 xpState = "max", xpUpdatedAt = 1999999990, inParty = false, sharing = false },
@@ -560,7 +544,7 @@ do
         and legacy.xpState == "unavailable" and not legacy.online)
     local maximum, unavailable = world:find("max-testrealm"), world:find("unavailable-testrealm")
     assert(maximum.xpState == "max" and maximum.xpStale
-        and maximum.inParty == false and maximum.sharing == false)
+        and maximum.inParty == false and maximum.sharing == nil)
     assert(unavailable.xpState == "unavailable" and unavailable.canInvite == false and unavailable.xpStale)
     for _, id in ipairs({ "badxp-testrealm", "badage-testrealm", "badstate-testrealm" }) do
         local row = assert(world:find(id), "Bad optional progress must not discard an otherwise valid retained player")
@@ -569,7 +553,7 @@ do
             "Malformed retained progress cannot reach the visible player row")
     end
     local bad = world:find("badxp-testrealm")
-    assert(bad.inParty == false and bad.sharing == true and bad.canInvite == nil and bad.partyFull == nil,
+    assert(bad.inParty == false and bad.sharing == nil and bad.canInvite == nil and bad.partyFull == nil,
         "Invalid optional booleans are discarded without losing other valid saved values")
 end
 
@@ -579,14 +563,13 @@ do
     world:login(); world:connect()
     world:advance(12)
     world.level, world.xp, world.xpMax, world.grouped, world.leader, world.members = 25, 81, 1200, true, true, 3
-    addon.db.position.sharing = true
     world:event("PLAYER_XP_UPDATE", "player")
     world:event("GROUP_ROSTER_UPDATE")
     addon:OnRosterLogout()
     local snapshot = assert(addon.db.roster.peers["self-testrealm"], "Local events and logout save the current character")
     assert(snapshot.level == 25 and snapshot.xp == 81 and snapshot.xpMax == 1200 and snapshot.xpState == "known")
     assert(snapshot.xpUpdatedAt == world.epoch + 12 and snapshot.seenAt == world.epoch + 12
-        and snapshot.inParty == true and snapshot.canInvite == true and snapshot.partyFull == false and snapshot.sharing == true)
+        and snapshot.inParty == true and snapshot.canInvite == true and snapshot.partyFull == false)
     local otherAddon, other = newAddon(copy(addon.db), false, "Other")
     other:login(); other:connect()
     local previous = assert(other:find("self-testrealm"))
@@ -611,14 +594,14 @@ do
     local addon, world = newAddon()
     world:login(); world:connect()
     local fields = { level = 31, xp = 10, xpMax = 500, xpState = "known", inParty = true,
-        canInvite = true, partyFull = false, sharing = false }
+        canInvite = true, partyFull = false }
     local function report(sequence, session)
         assert(world:status("Friend-TestRealm", fields, nil, sequence,
             { kind = "full", session = session or "first", coherent = true }))
     end
     report(1)
     world:advance(30)
-    fields.sharing = true
+    fields.canInvite = false
     report(2)
     assert(addon.rosterState.progress["friend-testrealm"].xpUpdatedAt == world.epoch
         and not world:find("friend-testrealm").xpStale)
@@ -652,7 +635,7 @@ do
     local addon, world = newAddon()
     world:login(); world:connect()
     local fields = { level = 31, xp = 42, xpMax = 1000, xpState = "known",
-        inParty = true, canInvite = true, partyFull = false, sharing = false }
+        inParty = true, canInvite = true, partyFull = false }
     assert(world:status("Friend-TestRealm", fields, nil, 1, { kind = "full", coherent = true }))
     local saved = copy(addon.db.roster.peers["friend-testrealm"])
     world:advance(5)
@@ -734,6 +717,9 @@ do
             if member then return member[1], member[2] end
         end
     end)
+    assert(not addon.nativeGroupMembership and native.modeReads == 0,
+        "Initializing the shared roster does not read native group membership")
+    addon:InitializeNativeGroupMembership()
     local changed = 0
     addon:RegisterNotification("NATIVE_GROUP_CHANGED", function() changed = changed + 1 end)
     assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil)
@@ -794,75 +780,45 @@ do
         "Leaving the native group immediately discards every cached token")
 end
 
--- Native full names and unmodified addon sender names can use different realm aliases.
+-- Death markers track native identities even when addon sender names collide with them.
 do
-    local secret = {}
-    local native = { units = { party1 = { "Friend", "Internal Realm" }, party2 = { "Friend", "Other Realm" } },
-        aliases = { party1 = "Friend", party2 = "Friend-Other Realm" }, aliasReads = 0 }
+    local units = { party1 = { "Friend", "Internal Realm" }, party2 = { "Friend", "Other Realm" },
+        party3 = { "Third", "TestRealm" } }
+    local aliasReads = 0
     local addon, world = newAddon(nil, false, nil, function(environment)
-        environment.issecretvalue = function(value) return value == secret end
-        environment.GetNumSubgroupMembers = function() return 2 end
+        environment.GetNumSubgroupMembers = function() return 3 end
         local fullName, unmodifiedName = environment.UnitFullName, environment.NameUtil.GetUnmodifiedUnitFullName
         environment.UnitFullName = function(unit)
             if unit == "player" then return fullName(unit) end
-            local member = native.units[unit]
+            local member = units[unit]
             if member then return member[1], member[2] end
         end
         environment.NameUtil.GetUnmodifiedUnitFullName = function(unit)
             if unit == "player" then return unmodifiedName(unit) end
-            native.aliasReads = native.aliasReads + 1
-            return native.aliases[unit]
+            aliasReads = aliasReads + 1
+            if unit == "party2" then return "Friend-Internal Realm" end
+            if unit == "party3" then return "SenderOnly-TestRealm" end
         end
     end)
-    local environment = world.environment
-    local fullName, unmodifiedName = environment.UnitFullName, environment.NameUtil.GetUnmodifiedUnitFullName
+    addon:InitializeNativeGroupMembership()
     assert(addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1"
-        and addon:GetNativeGroupUnit("Friend-TestRealm") == "party1"
-        and addon:GetNativeGroupUnit("Friend") == "party1"
-        and addon:GetNativeGroupUnit("Friend-OtherRealm") == "party2",
-        "Both native and wire identities resolve without matching a foreign realm by short name")
-    local reads = native.aliasReads
-    for _ = 1, 10 do assert(addon:GetNativeGroupUnit("Friend-TestRealm") == "party1") end
-    assert(native.aliasReads == reads, "Unmodified name aliases are read only during roster refreshes")
+        and addon:GetNativeGroupUnit("Friend-OtherRealm") == "party2"
+        and addon:GetNativeGroupMemberID("party1") == "friend-internalrealm"
+        and addon:GetNativeGroupMemberID("party2") == "friend-otherrealm"
+        and addon:GetNativeGroupUnit("SenderOnly-TestRealm") == nil and aliasReads == 0,
+        "Native member IDs remain distinct even when a sender name overlaps another member")
 
-    native.aliases.party1, native.aliases.party2 = "Shared-TestRealm", "Shared-TestRealm"
+    units.party2, units.party3 = { "Friend", "InternalRealm" }, { "FRIEND", "Internal Realm" }
     world:event("GROUP_ROSTER_UPDATE")
-    assert(addon:GetNativeGroupUnit("Shared-TestRealm") == nil
-        and addon:GetNativeGroupUnit("Friend-TestRealm") == nil
-        and addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1"
-        and addon:GetNativeGroupUnit("Friend-OtherRealm") == "party2",
-        "Ambiguous aliases identify neither unit, while distinct complete identities remain usable")
-    native.aliases.party1 = "Renamed-TestRealm"
-    world:event("UNIT_NAME_UPDATE", "party1")
-    assert(addon:GetNativeGroupUnit("Renamed-TestRealm") == "party1"
-        and addon:GetNativeGroupUnit("Shared-TestRealm") == "party2",
-        "Refreshing removes obsolete aliases and resolves former collisions from the current roster")
+    assert(addon:GetNativeGroupUnit("Friend-InternalRealm") == nil
+        and addon:GetNativeGroupMemberID("party1") == nil and addon:GetNativeGroupMemberID("party2") == nil
+        and addon:GetNativeGroupMemberID("party3") == nil,
+        "Duplicate canonical IDs cannot identify any native member")
 
-    for _, result in ipairs({ "missing", "error" }) do
-        if result == "missing" then environment.UnitFullName = nil
-        else environment.UnitFullName = function() error("full name unavailable") end end
-        addon:RefreshNativeGroupMembership()
-        assert(addon:GetNativeGroupUnit("Renamed-TestRealm") == "party1"
-            and addon:GetNativeGroupUnit("Friend-InternalRealm") == nil,
-            "Unmodified names remain usable when UnitFullName is " .. result)
-    end
-    environment.UnitFullName = fullName
-    for _, result in ipairs({ "missing", "error", "secret", "malformed" }) do
-        if result == "missing" then environment.NameUtil = nil
-        elseif result == "error" then environment.NameUtil = { GetUnmodifiedUnitFullName = function() error("alias unavailable") end }
-        else environment.NameUtil = { GetUnmodifiedUnitFullName = function() return result == "secret" and secret or {} end } end
-        addon:RefreshNativeGroupMembership()
-        assert(addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1"
-            and addon:GetNativeGroupUnit("Renamed-TestRealm") == nil,
-            "An unavailable or invalid unmodified alias cannot erase a valid native full name")
-    end
-    environment.NameUtil = { GetUnmodifiedUnitFullName = unmodifiedName }
-    native.aliases.party1 = "Friend"
-    environment.GetNormalizedRealmName = nil
-    addon:RefreshNativeGroupMembership()
-    assert(addon:GetNativeGroupUnit("Friend-TestRealm") == nil
-        and addon:GetNativeGroupUnit("Shared-TestRealm") == "party2",
-        "An unresolved local realm rejects short aliases while retaining complete aliases")
+    units.party2, units.party3 = nil, nil
+    world:event("GROUP_ROSTER_UPDATE")
+    assert(addon:GetNativeGroupUnit("Friend-InternalRealm") == "party1",
+        "The canonical ID resolves again once its duplicate members leave")
 end
 
 -- Missing, secret, throwing and incomplete native APIs fail open instead of inventing membership.

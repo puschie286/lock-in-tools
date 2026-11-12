@@ -89,7 +89,7 @@ do
     addon:OpenWelcome()
     addon.contentPanel.options:Click()
     local options = addon.optionsPanel
-    assert(options.selectedTab == "sharing" and not options.positionSharing:IsEnabled()
+    assert(options.selectedTab == "sharing" and not options.playerDataCleanup:IsEnabled()
         and not options.dataChannels.party:IsEnabled() and not options.dataChannels.guild:IsEnabled())
     assert(api.LockInToolsDB == profile and profile.schemaVersion == 5
         and profile.group.secret == support.SECRET and profile.important == "keep"

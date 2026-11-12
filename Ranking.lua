@@ -73,25 +73,12 @@ function addon:GetRankingSettings()
 end
 
 local function Age(stamp)
-    if type(stamp) ~= "number" then return "age unknown" end
+    if type(stamp) ~= "number" then return "unknown" end
     local seconds = math.max(0, math.floor(GetServerTime() - stamp))
     if seconds < 60 then return seconds .. "s ago" end
     if seconds < 3600 then return math.floor(seconds / 60) .. "m ago" end
     if seconds < 86400 then return math.floor(seconds / 3600) .. "h ago" end
     return math.floor(seconds / 86400) .. "d ago"
-end
-
-local function LocationName(self, player)
-    if player.friendOnly then return player.zone or "Unknown location" end
-    -- Cached coordinates stay private when either side has stopped sharing.
-    if not self.db.position or not self.db.position.sharing then return "Position sharing is off" end
-    if player.sharing == false then return "Not sharing" end
-    if not player.map then return "Unknown location" end
-    if C_Map and type(C_Map.GetMapInfo) == "function" then
-        local ok, info = pcall(C_Map.GetMapInfo, player.map)
-        if ok and type(info) == "table" and type(info.name) == "string" then return info.name end
-    end
-    return "Map " .. tostring(player.map)
 end
 
 function addon:GetCompactPlayerTooltipLines(player)
@@ -108,34 +95,19 @@ function addon:GetCompactPlayerTooltipLines(player)
         end
         lines[#lines + 1] = "Lv " .. (player.level or "?") .. " - " .. progress
     end
-    local location = LocationName(self, player)
-    if not player.online and not player.isSelf then location = location .. " - " .. Age(player.seenAt) end
-    lines[#lines + 1] = location
+    if player.friendOnly and player.zone then lines[#lines + 1] = player.zone end
+    if not player.online and not player.isSelf then lines[#lines + 1] = "Last seen " .. Age(player.seenAt) end
     return lines
 end
 
-function addon:ShowCompactPlayerTooltip(owner, entries, preserveAnchor)
-    if not GameTooltip or not owner or type(entries) ~= "table" or #entries == 0 then return false end
-    if preserveAnchor then
-        -- A periodic refresh must not reclaim another widget's shared tooltip.
-        if not GameTooltip:IsOwned(owner) or not GameTooltip:IsShown() then return false end
-    else
-        GameTooltip_SetDefaultAnchor(GameTooltip, owner)
-    end
+function addon:ShowCompactPlayerTooltip(owner, player)
+    if not GameTooltip then return end
+    GameTooltip_SetDefaultAnchor(GameTooltip, owner)
     if GameTooltip.ClearLines then GameTooltip:ClearLines() end
-    for index, entry in ipairs(entries) do
-        local lines = self:GetCompactPlayerTooltipLines(entry.player)
-        if index == 1 then
-            if entry.red then GameTooltip:SetText(lines[1], entry.red, entry.green, entry.blue)
-            else GameTooltip:SetText(lines[1]) end
-        else
-            if entry.red then GameTooltip:AddLine(lines[1], entry.red, entry.green, entry.blue)
-            else GameTooltip:AddLine(lines[1]) end
-        end
-        for line = 2, #lines do GameTooltip:AddLine(lines[line]) end
-    end
+    local lines = self:GetCompactPlayerTooltipLines(player)
+    GameTooltip:SetText(lines[1])
+    for line = 2, #lines do GameTooltip:AddLine(lines[line]) end
     GameTooltip:Show()
-    return true
 end
 
 local function Editable(self, value)
@@ -267,7 +239,7 @@ local function HasNewerFriendLevel(row, friend)
         and Number(friend.seenAt, 9999999999) and Number(row.seenAt, 9999999999) and friend.seenAt > row.seenAt
 end
 
-function addon:GetPlayerRanking(overviewPlayers)
+function addon:GetPlayerRanking()
     local result = { players = {}, connected = false, grouped = false, hasFriends = false }
     if not self.initialized or not self.ready then return result end
     result.grouped = self:HasDataGroup()
@@ -291,7 +263,7 @@ function addon:GetPlayerRanking(overviewPlayers)
     end
     if not result.grouped and #friends == 0 then return result end
     -- A solo Overview snapshot is empty. Only use the local row for a friend ranking.
-    local overview = result.grouped and (overviewPlayers or self:GetOverviewPlayers()) or self:GetOverviewPlayers(true)
+    local overview = self:GetOverviewPlayers(not result.grouped)
     local cached, ranked, rankedCharacters = self.rankingOrderCache, {}, {}
     local changed = cached == nil
     local function Add(row, key)
@@ -360,38 +332,4 @@ function addon:GetPlayerRanking(overviewPlayers)
         end
     end
     return result
-end
-
-function addon:GetPlayerTooltipPlayers()
-    local now = GetTime()
-    local cached = self.rankingTooltipCache
-    if cached and now >= cached.at and now - cached.at < 1 then return cached.players end
-    -- One coherent Overview read supplies unranked discovery and every rank.
-    -- Pin/overlay callers apply their current position separately; movement must
-    -- not rebuild all progress metadata on every receive or hover frame.
-    local overview = self:GetOverviewPlayers()
-    local ranking = self:GetPlayerRanking(overview)
-    local players = {}
-    for _, player in ipairs(overview) do players[player.id] = player end
-    for _, player in ipairs(ranking.players) do
-        if player.friendOnly then
-            -- The map pin owns its shared contact and position. Only attach the
-            -- native ranking when it describes the same level.
-            local discovered = players[player.id] or players[player.aliasID]
-            if discovered and (not discovered.level or discovered.level == player.level) then
-                local row = Copy(discovered)
-                row.level, row.rank = player.level, player.rank
-                players[row.id] = row
-            end
-        else
-            players[player.id] = player
-        end
-    end
-    if ranking.own then players[ranking.own.id] = ranking.own end
-    self.rankingTooltipCache = { at = now, players = players }
-    return players
-end
-
-for _, notification in ipairs({ "ROSTER_CHANGED", "DATA_CHANGED", "RANKING_CHANGED", "FRIENDS_CHANGED" }) do
-    addon:RegisterNotification(notification, function() addon.rankingTooltipCache = nil end)
 end

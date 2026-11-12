@@ -107,38 +107,58 @@ do
         "Read-only channel preferences never normalize the source profile or start traffic")
 end
 
--- Saved roster and position identities merge before login without treating historical peers as live.
+-- Upgrade keeps roster history and native death settings while retiring shared locations.
 do
     local fingerprint, stamp = "legacy-group", 1999999800
     local profile = settings(nil, false)
     profile.roster = { groupFingerprint = fingerprint, peers = {
         ["rosteronly-testrealm"] = { name = "RosterOnly", level = 21, seenAt = stamp },
-        ["shared-testrealm"] = { name = "Shared", level = 32, seenAt = stamp },
+        ["shared-surname"] = { name = "Shared-Surname", level = 32, seenAt = stamp, sharing = true,
+            xp = 50, xpMax = 100, xpState = "known", xpUpdatedAt = stamp, legacyContactAt = stamp + 15 },
     } }
-    profile.position = { sharing = true, keepLastKnown = true, groupFingerprint = fingerprint, peers = {
-        ["shared-testrealm"] = { name = "Shared", map = 37, x = 0.2, y = 0.3,
-            stamp = stamp, positionStamp = stamp - 10, class = "HUNTER" },
+    profile.ranking = { shownPlayers = { ["shared-surname"] = true } }
+    local savedDeathMarkers = { owner = "self-testrealm", entries = {} }
+    profile.position = { sharing = true, keepLastKnown = true, showPlayerIcons = false, groupFingerprint = fingerprint,
+        showDeathMarkers = false, deathMarkers = savedDeathMarkers, unrelated = "keep", peers = {
+        ["shared-surname"] = { name = "Shared-Surname", map = 37, x = 0.2, y = 0.3,
+            stamp = stamp, seenAt = stamp + 10, positionStamp = stamp - 10, class = "HUNTER" },
         ["positiononly-remoterealm"] = { name = "PositionOnly-Remote Realm", map = 37, x = 0.4, y = 0.5,
             stamp = stamp, positionStamp = stamp - 20, class = "MAGE" },
     } }
     local restored, environment, _, event, world = loadAddon(profile, false)
     world.guild = true
+    environment.GetServerTime = function() return stamp + 5 end
+    environment.C_FriendList = {
+        IsLegacyFriendSystemEnabled = function() return true end,
+        GetNumFriends = function() return 1 end,
+        GetFriendInfoByIndex = function() return { name = "Shared Surname", level = 33, connected = true } end,
+    }
     environment.GetNormalizedRealmName = function() return nil end
     event("ADDON_LOADED", "LockInTools")
-    assert(restored.rosterState.peers["rosteronly-testrealm"]
-        and restored.positionState.peers["shared-testrealm"])
+    local savedPeer = assert(profile.roster.peers["shared-surname"])
+    assert(savedPeer.seenAt == stamp and savedPeer.xp == 50 and savedPeer.xpUpdatedAt == stamp
+        and savedPeer.legacyContactAt == nil and savedPeer.sharing == nil)
+    assert(profile.position.sharing == false and profile.position.keepLastKnown == nil
+        and profile.position.showPlayerIcons == nil and profile.position.groupFingerprint == nil and profile.position.peers == nil
+        and profile.position.showDeathMarkers == false and profile.position.deathMarkers == savedDeathMarkers
+        and profile.position.unrelated == "keep")
     environment.GetNormalizedRealmName = function() return "TestRealm" end
     event("PLAYER_LOGIN")
     local rows = {}
     for _, row in ipairs(restored:GetOverviewPlayers()) do rows[row.id] = row end
     assert(rows["self-testrealm"].isSelf and rows["rosteronly-testrealm"].level == 21)
-    assert(rows["shared-testrealm"].level == 32 and rows["shared-testrealm"].x == 0.2
-        and rows["shared-testrealm"].positionStamp == stamp - 10 and not rows["shared-testrealm"].online)
-    assert(rows["positiononly-remoterealm"].x == 0.4 and not rows["positiononly-remoterealm"].online
-        and rows["positiononly-remoterealm"].xpState == "unavailable")
+    local row = assert(rows["shared-surname"])
+    assert(row.level == 32 and row.xp == 50 and row.seenAt == stamp
+        and row.x == nil and row.legacyContactAt == nil and not row.online)
+    assert(rows["positiononly-remoterealm"] == nil, "A legacy location alone does not create a roster record")
+    local ranked = {}
+    for _, player in ipairs(restored:GetPlayerRanking().players) do ranked[player.id] = player end
+    local friend = assert(ranked["shared-surname"])
+    assert(friend.friendOnly and friend.level == 33 and friend.seenAt == stamp + 5,
+        "Legacy location contact cannot outrank a more recent native friend level")
 end
 -- Native guild and party/raid routes connect the complete addon without setup.
--- Overlapping deliveries keep one roster entry, position and Burned report per player.
+-- Overlapping deliveries keep one roster entry and Burned report per player.
 do
     local aliceProfile, bobProfile = settings(nil, false), settings(OTHER_SECRET, false)
     aliceProfile.burned, bobProfile.burned = { status = 20 }, { status = 80 }
@@ -148,6 +168,11 @@ do
     bobEnvironment.UnitFullName = function() return "Bob", "Test Realm" end
     aliceEnvironment.UnitClass = function() return "Mage", "MAGE" end
     bobEnvironment.UnitClass = function() return "Hunter", "HUNTER" end
+    local mapReads = 0
+    bobEnvironment.C_Map.GetPlayerMapPosition = function()
+        mapReads = mapReads + 1
+        return { GetXY = function() return 0.6, 0.2 end }
+    end
     aliceWorld.grouped, aliceWorld.guild, aliceWorld.xp = true, true, 125
     bobWorld.grouped, bobWorld.guild, bobWorld.xp = true, true, 750
     aliceEvent("ADDON_LOADED", "LockInTools")
@@ -177,7 +202,10 @@ do
     assert(#aliceWorld.statusSends == 2 and #bobWorld.statusSends == 2
         and aliceWorld.statusSends[1].distribution == "PARTY"
         and aliceWorld.statusSends[2].distribution == "GUILD"
-        and aliceWorld.statusSends[1].message == aliceWorld.statusSends[2].message,
+        and aliceWorld.statusSends[1].message == aliceWorld.statusSends[2].message
+        and aliceWorld.statusSends[1].message:match("|10=[0-7]|11=7|12=20$")
+        and not aliceWorld.statusSends[1].message:find("|8=", 1, true)
+        and not aliceWorld.statusSends[1].message:find("|9=", 1, true),
         "Every native route carries the same initial request ID and snapshot")
     deliver(aliceWorld.statusSends, 1, 2, bobEvent, "Alice")
     deliver(bobWorld.statusSends, 1, 2, aliceEvent, "Bob")
@@ -191,13 +219,12 @@ do
         and bobRow.xp == 750 and aliceRow.xp == 125
         and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 50
         and bob:GetGroupBurnedStatus().count == 2 and bob:GetGroupBurnedStatus().average == 50
-        and alice:GetSharedPositions()["bob-testrealm"].class == "HUNTER",
-        "Native routes exchange XP, class, positions and Burned without double-counting")
+        and bobRow.class == "HUNTER" and aliceRow.class == "MAGE",
+        "Native routes exchange XP, class and Burned without double-counting")
 
-    local rosterChanges, burnedChanges, positionChanges = 0, 0, 0
+    local rosterChanges, burnedChanges = 0, 0
     alice:RegisterNotification("ROSTER_CHANGED", function() rosterChanges = rosterChanges + 1 end)
     alice:RegisterNotification("BURNED_CHANGED", function() burnedChanges = burnedChanges + 1 end)
-    alice:RegisterNotification("POSITIONS_CHANGED", function() positionChanges = positionChanges + 1 end)
     bobWorld.xp = 925
     assert(bob:SetBurnedStatus(90))
     bobWorld:advance(5)
@@ -207,21 +234,10 @@ do
     bobRow, aliceCount = player(alice, "bob-testrealm")
     assert(bobRow.xp == 925 and aliceCount == 2
         and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 55
-        and rosterChanges == 1 and burnedChanges == 1 and positionChanges == 1,
-        "Duplicate broadcasts update the complete status and its embedded position once")
-    bobEnvironment.C_Map.GetPlayerMapPosition = function()
-        return { GetXY = function() return 0.6, 0.2 end }
-    end
+        and rosterChanges == 1 and burnedChanges == 1,
+        "Duplicate broadcasts update the complete status once")
     bobWorld:advance(1)
-    assert(#bobWorld.dataSends == 2 and bobWorld.dataSends[1].message == bobWorld.dataSends[2].message)
-    deliver(bobWorld.dataSends, 1, 1, aliceEvent, "Bob")
-    local position = assert(alice:GetSharedPositions()["bob-testrealm"])
-    local receivedAt = position.lastReceived
-    aliceWorld:advance(1)
-    deliver(bobWorld.dataSends, 2, 2, aliceEvent, "BOB-Test Realm")
-    assert(alice:GetSharedPositions()["bob-testrealm"].x == 0.6 and positionChanges == 2
-        and alice:GetGroupBurnedStatus().count == 2,
-        "Duplicate movement reports retain one position and do not affect status counts")
+    assert(mapReads == 0 and #bobWorld.dataSends == 0, "Status exchange never reads or sends coordinates")
 
     assert(alice:RegisterDataRequest("probe", function() return "own" end, function() end))
     local accepted, requestID = alice:RequestData("probe", "pending")
@@ -261,23 +277,23 @@ do
     assert(#aliceWorld.notificationErrors == 0 and #bobWorld.notificationErrors == 0)
 end
 
--- Position preferences never bypass login, native membership or newer-schema protection.
+-- Channel preferences never bypass login, native membership or newer-schema protection.
 do
     local loading, _, _, loadingEvent, loadingWorld = loadAddon(settings(nil, false), false)
     loadingWorld.guild = true
     loadingEvent("ADDON_LOADED", "LockInTools")
-    assert(loading:SetPositionSharing(true))
+    assert(loading:SetDataChannelEnabled("guild", false) and loading:SetDataChannelEnabled("guild", true))
     loadingWorld:advance(30)
-    assert(#loadingWorld.dataJoinCalls == 0 and #loadingWorld.dataSends == 0,
+    assert(#loadingWorld.dataJoinCalls == 0 and #loadingWorld.statusSends == 0 and #loadingWorld.dataSends == 0,
         "saving enabled sharing before login does not send network requests")
     loadingEvent("PLAYER_LOGIN")
     assert(#loadingWorld.dataJoinCalls == 0 and loading:IsDataConnected(),
         "login starts native sharing after preferences were saved during loading")
     local ungrouped, _, _, _, ungroupedWorld = loadAddon(settings("", false), false)
     ungroupedWorld:initialize()
-    assert(ungrouped:SetPositionSharing(true))
+    assert(ungrouped:SetDataChannelEnabled("guild", false) and ungrouped:SetDataChannelEnabled("guild", true))
     ungroupedWorld:advance(30)
-    assert(#ungroupedWorld.dataJoinCalls == 0 and #ungroupedWorld.dataSends == 0,
+    assert(#ungroupedWorld.dataJoinCalls == 0 and #ungroupedWorld.statusSends == 0 and #ungroupedWorld.dataSends == 0,
         "saving enabled sharing without a group does not join or broadcast")
     local futureSettings = settings(nil, false)
     futureSettings.schemaVersion = 5
@@ -285,13 +301,14 @@ do
         showTrails = "future-trails", trailLength = "future-length" }
     local future, _, _, _, futureWorld = loadAddon(futureSettings, false)
     futureWorld:initialize()
-    assert(not future:SetPositionSharing(true))
+    assert(not future:SetDataChannelEnabled("guild", true))
     assert(futureSettings.position.showTrails == "future-trails"
         and futureSettings.position.trailLength == "future-length",
         "Read-only startup preserves retired preferences in the original newer-schema data")
     futureWorld:advance(30)
-    assert(not futureSettings.position.sharing and #futureWorld.dataJoinCalls == 0
-        and #futureWorld.dataSends == 0, "read-only preferences cannot enable sharing or reconnect data")
+    assert(not futureSettings.position.sharing and futureSettings.position.keepLastKnown
+        and #futureWorld.dataJoinCalls == 0 and #futureWorld.statusSends == 0 and #futureWorld.dataSends == 0,
+        "Read-only preferences cannot reconnect data")
 end
 
 
@@ -462,57 +479,46 @@ for _, saved in ipairs({ {}, { cleanupOldPlayers = false }, { cleanupOldPlayers 
         "The account-wide opt-out must remain off after a reload")
 end
 
--- Cleanup removes an identity from every history cache only after its newest
--- roster or position activity reaches ten days, including the exact boundary.
+-- Cleanup uses the ten-day roster age regardless of legacy location contact.
 do
-    local fingerprint, cutoff = "legacy-group", 2000000000 - 10 * 86400
+    local cutoff = 2000000000 - 10 * 86400
     local profile = settings(nil, false)
     profile.data = { channels = { party = false, guild = false, global = false } }
-    profile.roster = { groupFingerprint = fingerprint, peers = {} }
-    profile.position = { sharing = false, keepLastKnown = true, groupFingerprint = fingerprint, peers = {} }
+    profile.roster = { peers = {} }
+    profile.position = { sharing = false, keepLastKnown = true, peers = {
+        ["cachedposition-testrealm"] = { name = "CachedPosition", stamp = cutoff + 1, seenAt = cutoff + 1,
+            map = 37, x = 0.2, y = 0.3 },
+    } }
     local function roster(name, stamp)
         profile.roster.peers[name:lower() .. "-testrealm"] = {
             name = name, level = 20, seenAt = stamp, xp = 50, xpMax = 100,
             xpState = "known", xpUpdatedAt = stamp,
         }
     end
-    local function position(name, stamp, seenAt)
-        profile.position.peers[name:lower() .. "-testrealm"] = {
-            name = name, stamp = stamp, seenAt = seenAt, positionStamp = stamp - 5,
-            map = 37, x = 0.2, y = 0.3, class = "MAGE",
-        }
-    end
-    roster("Boundary", cutoff); position("Boundary", cutoff)
+    roster("Boundary", cutoff)
     roster("Older", cutoff - 1)
-    position("PositionOnly", cutoff - 1)
-    roster("NewPosition", cutoff - 10); position("NewPosition", cutoff + 1)
-    roster("NewRoster", cutoff + 1); position("NewRoster", cutoff - 10)
-    position("LocalReceipt", cutoff - 20, cutoff + 1)
+    roster("CachedPosition", cutoff - 1)
+    roster("MigratedHint", cutoff - 1)
+    profile.roster.peers["migratedhint-testrealm"].legacyContactAt = cutoff + 1
+    roster("Recent", cutoff + 1)
     roster("Future", 2000000001)
     local current, _, _, event, clock = loadAddon(profile, false)
     event("ADDON_LOADED", "LockInTools")
-    for _, id in ipairs({ "boundary-testrealm", "older-testrealm", "positiononly-testrealm" }) do
-        assert(not profile.roster.peers[id] and not profile.position.peers[id]
-            and not current.rosterState.peers[id] and not current.rosterState.progress[id]
-            and not current.positionState.peers[id] and not current.positionState.latest[id]
-            and not current.positionState.classes[id], "Expired identities must leave every restored cache")
+    for _, id in ipairs({ "boundary-testrealm", "older-testrealm", "cachedposition-testrealm", "migratedhint-testrealm" }) do
+        assert(not profile.roster.peers[id] and not current.rosterState.peers[id] and not current.rosterState.progress[id],
+            "Expired roster history is removed even with newer legacy location contact")
     end
-    for _, id in ipairs({ "newposition-testrealm", "newroster-testrealm" }) do
-        assert(profile.roster.peers[id] and profile.position.peers[id]
-            and current.rosterState.progress[id] and current.positionState.classes[id],
-            "Activity from either source keeps that player's saved history")
-    end
-    assert(profile.roster.peers["future-testrealm"], "Clock rollback must not expire future activity")
-    assert(profile.position.peers["localreceipt-testrealm"]
-        and current.positionState.peers["localreceipt-testrealm"].seenAt == cutoff + 1,
-        "A saved local receipt time takes precedence over the sender's older position clock")
+    assert(profile.position.sharing == false and profile.position.peers == nil,
+        "Legacy locations are discarded while rollback sharing stays off")
+    assert(profile.roster.peers["recent-testrealm"].seenAt == cutoff + 1
+        and profile.roster.peers["future-testrealm"], "Newer roster activity and future activity survive cleanup")
     assert(current:SetPlayerDataCleanupEnabled(false))
     event("PLAYER_LOGIN")
     clock:advance(3600)
-    assert(profile.roster.peers["newroster-testrealm"] and profile.position.peers["newposition-testrealm"],
+    assert(profile.roster.peers["recent-testrealm"],
         "Disabled cleanup must leave newly expired records in place")
     assert(current:SetPlayerDataCleanupEnabled(true))
-    assert(not profile.roster.peers["newroster-testrealm"] and not profile.position.peers["newposition-testrealm"],
+    assert(not profile.roster.peers["recent-testrealm"],
         "Enabling cleanup immediately removes records that expired while it was off")
     profile.roster.peers["hourly-testrealm"] = { name = "Hourly-TestRealm", level = 20,
         seenAt = 2000003600 - 10 * 86400 + 1 }
@@ -521,7 +527,7 @@ do
     assert(profile.roster.peers["hourly-testrealm"], "Scheduled cleanup waits for its hourly interval")
     clock:advance(1)
     assert(not profile.roster.peers["hourly-testrealm"] and not current.rosterState.peers["hourly-testrealm"],
-        "Hourly cleanup removes expired history even with all data routes and positions disabled")
+        "Hourly cleanup removes expired history even with all data routes disabled")
     assert(current:SetPlayerDataCleanupEnabled(false))
     profile.roster.peers["disabled-testrealm"] = { name = "Disabled-TestRealm", seenAt = cutoff }
     current.rosterState.peers["disabled-testrealm"] = profile.roster.peers["disabled-testrealm"]
@@ -535,43 +541,40 @@ do
     local profile = settings(nil, false)
     profile.data = { cleanupOldPlayers = false, channels = { party = false, guild = true, global = false } }
     profile.burned = { status = 40, changeAvailableAt = 2000000300, future = "preserved" }
+    profile.position = { showDeathMarkers = false }
     local current, environment, _, event, clock = loadAddon(profile, false)
     clock.guild = true
     clock:initialize()
     assert(current:ReceivePlayerStatus("Friend-TestRealm", { level = "24", xp = "25", xpMax = "100",
-        xpState = "known", sharing = true }, 2000000000, 1))
-    assert(current:ReceivePosition("Friend-TestRealm", "2|P|2000000000|37|20000|30000"))
-    assert(current:ReceivePosition("OldClock-TestRealm", "2|P|1900000000|37|20000|30000"))
-    assert(current.positionState.peers["oldclock-testrealm"].seenAt == 2000000000
-        and profile.position.peers["oldclock-testrealm"].seenAt == 2000000000,
-        "A live position records local activity independently of a peer's older clock")
+        xpState = "known", class = "MAGE" }, 2000000000, 1))
+    assert(current:ReceivePlayerStatus("OldClock-TestRealm", { level = "20", xpState = "unavailable" }, 1900000000, 1))
+    assert(current.rosterState.peers["oldclock-testrealm"].seenAt == 2000000000
+        and profile.roster.peers["oldclock-testrealm"].seenAt == 2000000000,
+        "A live status records local activity independently of a peer's older clock")
     assert(current:SetPlayerDataCleanupEnabled(true))
     current:PrunePlayerData()
-    assert(profile.position.peers["oldclock-testrealm"], "Fresh local contact must not be pruned for an old wire stamp")
+    assert(profile.roster.peers["oldclock-testrealm"], "Fresh local contact must not be pruned for an old wire stamp")
     assert(current:SetPlayerDataCleanupEnabled(false))
     assert(current:ReceiveBurnedStatus("Friend-TestRealm", { burned = "80" }, 2000000000, 1))
-    current.positionState.classes["friend-testrealm"] = "MAGE"
     current.dataState.status.received["friend-testrealm"] = { stamp = 2000000000 }
     local accepted, requestID = current:RequestData("status", "pending")
     assert(accepted and current.dataState.pendingRequests[requestID])
     current.dataState.repliedRequests["friend-testrealm|status|old-request"] = 10
     local expiry, cooldown = current.burnedState.timer, current:GetBurnedStatusCooldown()
-    local notices = { roster = 0, position = 0, burned = 0 }
+    local notices = { roster = 0, burned = 0 }
     current:RegisterNotification("ROSTER_CHANGED", function() notices.roster = notices.roster + 1 end)
-    current:RegisterNotification("POSITIONS_CHANGED", function() notices.position = notices.position + 1 end)
     current:RegisterNotification("BURNED_CHANGED", function() notices.burned = notices.burned + 1 end)
     assert(current:ClearPlayerData())
-    assert(next(profile.roster.peers) == nil and next(profile.position.peers) == nil
+    assert(next(profile.roster.peers) == nil and profile.position.peers == nil
         and next(current.rosterState.peers) == nil and next(current.rosterState.progress) == nil
-        and next(current.positionState.peers) == nil and next(current.positionState.latest) == nil
-        and next(current.positionState.classes) == nil and next(current.burnedState.peers) == nil
+        and next(current.burnedState.peers) == nil
         and next(current.dataState.status.received) == nil
         and next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil,
         "Clearing history must remove saved records, visible peers and protocol caches together")
     assert(expiry.cancelled and not current.burnedState.timer
-        and notices.roster > 0 and notices.position > 0 and notices.burned > 0)
+        and notices.roster > 0 and notices.burned > 0)
     assert(environment.LockInToolsDB == profile and profile.group == nil and profile.chat == nil and not current:GetPlayerDataCleanupEnabled()
-        and profile.position.sharing and profile.position.keepLastKnown
+        and profile.position.showDeathMarkers == false
         and profile.data.channels.guild and not profile.data.channels.global
         and current:IsDataConnected() and current:GetBurnedStatus() == 40
         and current:GetBurnedStatusCooldown() == cooldown and profile.burned.changeAvailableAt == 2000000300
@@ -583,7 +586,7 @@ do
     otherClock:initialize()
     local packet = assert(otherClock.statusSends[1])
     event("CHAT_MSG_ADDON", packet.prefix, packet.message, "GUILD", "Friend-TestRealm")
-    assert(profile.roster.peers["friend-testrealm"] and profile.position.peers["friend-testrealm"]
+    assert(profile.roster.peers["friend-testrealm"]
         and current.dataState.status.received["friend-testrealm"],
         "Fresh shared status repopulates history after an explicit clear")
 end
@@ -596,9 +599,10 @@ do
     profile.schemaVersion = 5
     profile.data = { cleanupOldPlayers = true, future = "preserved" }
     profile.roster = { groupFingerprint = "future-group", peers = {
-        ["old-testrealm"] = { name = "Old-TestRealm", seenAt = 1 },
+        ["old-testrealm"] = { name = "Old-TestRealm", seenAt = 1, legacyContactAt = 2 },
     } }
-    profile.position = { peers = { ["old-testrealm"] = { name = "Old-TestRealm", stamp = 1 } } }
+    profile.position = { sharing = true, keepLastKnown = true, showDeathMarkers = false,
+        peers = { ["old-testrealm"] = { name = "Old-TestRealm", stamp = 1 } } }
     local original = helpers.copy(profile)
     local current, _, _, _, clock = loadAddon(profile, false)
     clock:initialize()

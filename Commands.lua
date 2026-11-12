@@ -23,7 +23,6 @@ function addon:ShowStatus()
         self:Print("Saved settings " .. settingsState .. "; initial Content view "
             .. (self.db.showWelcome and "on." or "off."))
         self:Print("Data sharing: " .. self:GetDataStatusText())
-        self:Print("Shared positions: " .. self:GetPositionStatusText())
     end
 end
 

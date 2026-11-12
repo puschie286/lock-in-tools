@@ -55,21 +55,27 @@ function addon:Initialize()
             if type(database.data.channels[channel]) ~= "boolean" then database.data.channels[channel] = true end
         end
         database.data.channels.global = nil
-        for _, feature in ipairs({ "roster", "position" }) do
-            if type(database[feature]) == "table" then database[feature].groupFingerprint = nil end
-        end
+        if type(database.roster) == "table" then database.roster.groupFingerprint = nil end
 
         database.schemaVersion = SCHEMA_VERSION
         LockInToolsDB = database
         self.db = database
     end
 
+    if type(self.db.position) ~= "table" then self.db.position = {} end
+    local position = self.db.position
+    if type(position.showDeathMarkers) ~= "boolean" then position.showDeathMarkers = true end
+    -- Older releases default missing sharing preferences to on.
+    position.sharing = false
+    position.groupFingerprint, position.keepLastKnown = nil, nil
+    position.showPlayerIcons, position.peers = nil, nil
+
     self.initialized = true
     self.startupEvents:UnregisterEvent("ADDON_LOADED")
     self:InitializeData()
     self:InitializeBurned()
-    self:InitializePositions()
     self:InitializeRoster()
+    self:InitializeDeathMarkers()
     self:InitializeRanking()
     self:InitializeRestedXP()
     self:InitializeRestedXPSkin()
@@ -109,7 +115,6 @@ function addon:OnLogin()
             end)
     end
     self:OnDataLogin()
-    self:OnPositionLogin()
     self:OnRosterLogin()
     self:OnFriendsLogin()
     if self.OnRankingLogin then self:OnRankingLogin() end

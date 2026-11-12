@@ -190,7 +190,7 @@ do
         "Native membership changes preserve retained standings")
 end
 
--- Coordinates/contact changes keep the exact progress order; returned rows stay
+-- Contact changes keep the exact progress order; returned rows stay
 -- detached and fresh even when the input order or unranked discovery changes.
 do
     local addon, world = newAddon()
@@ -201,18 +201,18 @@ do
     end }, { __index = table })
     local first, own = player("friend", 30, 50, 100), player("self", 29, 25, 100, true)
     world.players = { first, own }
-    local initial = addon:GetPlayerRanking(world.players)
-    assert(world.reads == 0 and sorts == 1, "A supplied Overview snapshot must not be collected twice")
+    local initial = addon:GetPlayerRanking()
+    assert(world.reads == 1 and sorts == 1, "The first ranking reads the Overview once and sorts progress")
     initial.players[1].rank, initial.players[1].level = 99, 1
-    first.map, first.online, first.xpStale, first.seenAt = 38, false, true, 2000000010
-    local discovery = { id = "position-only", name = "PositionOnly", map = 37, online = true }
+    first.online, first.xpStale, first.seenAt = false, true, 2000000010
+    local discovery = { id = "new-peer", name = "NewPeer", online = true }
     world.players = { own, discovery, first }
     local refreshed = addon:GetPlayerRanking()
-    assert(sorts == 1 and ids(refreshed.players) == "friend,self" and refreshed.players[1].rank == 1
-        and refreshed.players[1].level == 30 and refreshed.players[1].map == 38
+    assert(world.reads == 2 and sorts == 1 and ids(refreshed.players) == "friend,self" and refreshed.players[1].rank == 1
+        and refreshed.players[1].level == 30
         and refreshed.players[1].seenAt == 2000000010 and refreshed.players[1].stale
         and not refreshed.players[1].online,
-        "Movement, contact and unranked discovery refresh metadata without sorting progress again")
+        "Contact and unranked discovery refresh metadata without sorting progress again")
     first.xp = 75
     addon:GetPlayerRanking()
     assert(sorts == 2, "An XP change must recompute exact progress ordering")
@@ -222,45 +222,6 @@ do
     world.players = { player("replacement", 29, 25, 100) }
     assert(addon:GetPlayerRanking().players[1].id == "replacement" and sorts == 4,
         "Replacing a ranked identity must invalidate ordering even when its progress and count match")
-end
-
--- Hover frames share one coherent metadata snapshot; event invalidation and a
--- bounded lifetime preserve progress changes and quiet-peer contact expiry.
-do
-    local addon, world = newAddon()
-    world.now = 0
-    world.environment.GetTime = function() return world.now end
-    world.players = { player("self", 29, 25, 100, true), player("friend", 30, 50, 100),
-        { id = "position-only", name = "PositionOnly", map = 37, online = true } }
-    local first = addon:GetPlayerTooltipPlayers()
-    assert(world.reads == 1 and first.friend.rank == 1 and first.self.rank == 2
-        and first["position-only"].rank == nil,
-        "Tooltip metadata includes every rank and discovery without XP from one Overview read")
-    for _ = 1, 9 do
-        world.now = world.now + 0.1
-        assert(addon:GetPlayerTooltipPlayers() == first)
-    end
-    addon:Notify("POSITIONS_CHANGED")
-    addon:Notify("POSITION_CONTACT_CHANGED")
-    assert(addon:GetPlayerTooltipPlayers() == first and world.reads == 1,
-        "Movement and repeated hover frames must not rebuild shared progress metadata")
-    world.players = { player("self", 29, 25, 100, true), player("friend", 30, 75, 100) }
-    addon:Notify("ROSTER_CHANGED")
-    local changed = addon:GetPlayerTooltipPlayers()
-    assert(world.reads == 2 and changed.friend.xp == 75 and changed["position-only"] == nil,
-        "Player metadata events immediately refresh cached progress and peer membership")
-    world.players[2].online = false
-    world.now = world.now + 1
-    local expired = addon:GetPlayerTooltipPlayers()
-    assert(world.reads == 3 and not expired.friend.online and expired.friend.stale,
-        "Time-based contact expiry must refresh without another packet")
-    world.connected = false
-    addon:Notify("DATA_CHANGED")
-    assert(addon:GetPlayerTooltipPlayers().friend.stale and world.reads == 4)
-    world.players = {}
-    addon:Notify("DATA_CHANGED")
-    assert(next(addon:GetPlayerTooltipPlayers()) == nil and world.reads == 5,
-        "Native data changes immediately refresh tooltip membership")
 end
 
 -- Real Roster reports survive a SavedVariables reload and rank before peers reconnect.
@@ -316,12 +277,12 @@ end
 do
     local addon, world = newAddon()
     world.environment.GetTime = function() return 0 end
-    local pin = { id = "alex wren-testrealm", name = "Alex Wren", map = 37, online = false }
+    local discovered = { id = "alex wren-testrealm", name = "Alex Wren", online = false }
     local reporter = player("reporter-testrealm", 30, 80, 100)
     reporter.seenAt = 2000000000
-    world.players = { player("self", 29, 25, 100, true), reporter, pin }
+    world.players = { player("self", 29, 25, 100, true), reporter, discovered }
     local friends = {
-        { id = "alex-wren", aliasID = pin.id, name = "Alex-Wren", displayName = "Alex Wren",
+        { id = "alex-wren", aliasID = discovered.id, name = "Alex-Wren", displayName = "Alex Wren",
             level = 30, online = true, zone = "Elwynn Forest" },
         { id = "bea-ivy", name = "Bea-Ivy", level = 30, online = false },
         { id = "reporter-surname", aliasID = "reporter-testrealm", name = "Reporter-Surname",
@@ -353,10 +314,6 @@ do
         "Native friends at the same level share a rank after known XP without gaining fabricated XP")
     local lines = addon:GetCompactPlayerTooltipLines(alex)
     assert(lines[1] == "#2 - Alex Wren" and lines[2] == "Lv 30 - XP unavailable" and lines[3] == "Elwynn Forest")
-    local pinMetadata = addon:GetPlayerTooltipPlayers()[pin.id]
-    assert(pinMetadata.rank == 2 and pinMetadata.level == 30 and pinMetadata.map == 37
-        and pinMetadata.online == false and not pinMetadata.friendOnly and not pin.rank,
-        "Ranking a friend enriches a matching shared pin while preserving the pin's location and contact")
     reporter.online = false
     local nativeLevel = addon:GetPlayerRanking().players[1]
     assert(nativeLevel.id == "reporter-surname" and nativeLevel.level == 31 and nativeLevel.friendOnly
@@ -419,12 +376,8 @@ do
     assert(not ranking.grouped and not ranking.connected and ranking.hasFriends
         and ids(ranking.players) == "alex-wren,self-testrealm"
         and ranking.own.xp == 25 and ranking.own.rank == 2 and #addon:GetOverviewPlayers() == 0)
-    local first = addon:GetPlayerTooltipPlayers()
     friends[1].level = 28
-    addon:Notify("FRIENDS_CHANGED")
-    local updated = addon:GetPlayerTooltipPlayers()
-    assert(first ~= updated and updated["self-testrealm"].rank == 1,
-        "Friend changes invalidate live tooltip standings immediately")
+    assert(addon:GetPlayerRanking().own.rank == 1, "A friend level change updates solo standings")
     friends[1].level = nil
     ranking = addon:GetPlayerRanking()
     assert(not ranking.hasFriends and not ranking.own and #ranking.players == 0,

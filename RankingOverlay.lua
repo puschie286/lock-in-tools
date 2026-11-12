@@ -40,28 +40,8 @@ local function PlayerTooltip(row)
     if row.motionInteractive == false then HideTooltip(row); return end
     local player = row.player
     if not player then return end
-    if not player.isSelf and not player.friendOnly then
-        local position = addon:GetSharedPositions()[player.id]
-        if position or addon.db.position.keepLastKnown == false then
-            local current = {}
-            for key, value in pairs(player) do current[key] = value end
-            current.map, current.x, current.y = position and position.map, position and position.x, position and position.y
-            current.positionStamp = position and position.positionStamp
-            current.positionAvailable = position and position.positionAvailable
-            player = current
-        end
-    end
     -- Use native anchoring on hover and live refresh so global tooltip hooks apply.
-    addon:ShowCompactPlayerTooltip(row, { { player = player } })
-end
-
-local function RefreshPositionTooltips()
-    local panel = addon.rankingOverlay
-    if not panel or not panel:IsVisible() or not GameTooltip or not GameTooltip:IsShown() then return end
-    for _, row in ipairs(panel.rows) do
-        if GameTooltip:IsOwned(row) then PlayerTooltip(row); return end
-    end
-    if GameTooltip:IsOwned(panel.ownRow) then PlayerTooltip(panel.ownRow) end
+    addon:ShowCompactPlayerTooltip(row, player)
 end
 
 local function ClearRowInteractions(row)
@@ -945,12 +925,6 @@ addon:RegisterNotification("FRIENDS_CHANGED", function()
     local settings = addon:GetRankingSettings()
     if settings and next(settings.shownPlayers) then addon:RefreshRankingOverlay() end
 end)
-
--- Coordinates change tooltips, not XP standings or row layout. The visible
--- one-second tick still refreshes contact expiry and the local player's map.
-for _, notification in ipairs({ "POSITIONS_CHANGED", "POSITION_CONTACT_CHANGED" }) do
-    addon:RegisterNotification(notification, RefreshPositionTooltips)
-end
 
 addon:RegisterNotification("BURNED_CHANGED", function()
     local panel = addon.rankingOverlay

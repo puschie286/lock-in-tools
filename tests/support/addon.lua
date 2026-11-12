@@ -170,7 +170,7 @@ local function loadAddon(savedVariables, loggedIn)
     prepareMinimap(environment, world)
     world.notificationErrors = loadNotifications(addon, environment)
     for _, file in ipairs({ "Libs/LibDataBroker-1.1/LibDataBroker-1.1.lua", "Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua",
-        "Core.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Burned.lua", "Position.lua", "Roster.lua", "Friends.lua", "Ranking.lua",
+        "Core.lua", "DataChannel.lua", "Data.lua", "DataStatus.lua", "Burned.lua", "Roster.lua", "Friends.lua", "Ranking.lua",
         "RestedXPCodec.lua", "RestedXPAdapter.lua", "RestedXP.lua", "PositionMap.lua", "Theme.lua", "RestedXPSkin.lua", "Minimap.lua", "Commands.lua" }) do
         loadModule(file, addon, environment)
     end

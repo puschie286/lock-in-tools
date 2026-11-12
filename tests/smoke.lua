@@ -20,9 +20,9 @@ local overlayEntry = manifest:find("\nRankingOverlay.lua\n", 1, true)
 local optionsEntry = manifest:find("\nOptions.lua\n", 1, true)
 assert(channelEntry and dataEntry and channelEntry < dataEntry,
     "the native addon manifest must load channel management before the data transport")
-assert(dataEntry and statusEntry and positionEntry and rosterEntry
-    and dataEntry < statusEntry and statusEntry < positionEntry and statusEntry < rosterEntry,
-    "the native addon manifest must load status synchronization after transport and before its consumers")
+assert(dataEntry and statusEntry and rosterEntry and dataEntry < statusEntry and statusEntry < rosterEntry
+    and not positionEntry,
+    "the native addon manifest loads status synchronization without the retired position module")
 assert(burnedEntry and statusEntry < burnedEntry and burnedEntry < overlayEntry,
     "the native manifest must load burned status after synchronization and before the ranking overlay")
 assert(friendsEntry and rankingEntry and themeEntry and overlayEntry and optionsEntry
@@ -63,6 +63,7 @@ assert(not addon.initialized)
 fire("ADDON_LOADED", "LockInTools")
 assert(addon.initialized and not addon.ready)
 assert(addon.db.schemaVersion == 4 and addon.db.showWelcome == true)
+assert(addon.db.position.sharing == false, "An older build must keep coordinate sharing off after a rollback")
 assert(addon.db.chat == nil and addon.db.group == nil and addon.db.data.channels.global == nil)
 fire("PLAYER_LOGIN")
 assert(addon.ready and #messages == 1 and world.contentOpened == 1)
@@ -89,7 +90,7 @@ assert(contains(messages, "/lit welcome", messageStart)
     and not contains(messages, "/lit join", messageStart)
     and not contains(messages, "/lit data", messageStart))
 command("status")
-assert(contains(messages, "16001", messageStart) and contains(messages, "Shared positions:", messageStart))
+assert(contains(messages, "16001", messageStart) and not contains(messages, "Shared positions:", messageStart))
 for _, removed in ipairs({ "chat", "join", "leave", "data join", "data leave" }) do
     command(removed)
     assert(messages[#messages]:find("Unknown command", 1, true), "retired chat/channel commands are unavailable")

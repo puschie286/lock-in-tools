@@ -1,8 +1,16 @@
 local _, addon = ...
 local TIMEOUT = 90
+local CLASSES = {
+    WARRIOR = true, PALADIN = true, HUNTER = true, ROGUE = true, PRIEST = true,
+    SHAMAN = true, MAGE = true, WARLOCK = true, DRUID = true,
+}
 
 local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
+end
+
+local function ClassToken(value)
+    if not IsSecret(value) and type(value) == "string" and CLASSES[value] then return value end
 end
 
 local function Number(value, maximum)
@@ -99,7 +107,7 @@ end
 
 local function CacheNativeGroupUnit(units, ambiguous, id, unit)
     if not id or ambiguous[id] then return end
-    if units[id] and units[id] ~= unit then
+    if units[id] then
         units[id], ambiguous[id] = nil, true
     else
         units[id] = unit
@@ -130,8 +138,7 @@ function addon:RefreshNativeGroupMembership()
     state.realm = NativeGroupRealm()
     local ok, inRaid
     if type(IsInRaid) == "function" then ok, inRaid = pcall(IsInRaid) end
-    -- Unknown roster mode/counts must keep LIT's fallback visible. Never use
-    -- the remotely shared inParty flag as evidence of our native membership.
+    -- Only native roster data can identify units in our current group.
     if ok and not IsSecret(inRaid) and type(inRaid) == "boolean" then
         local count = inRaid and NativeNumber(GetNumGroupMembers, 40)
             or (not inRaid and NativeNumber(GetNumSubgroupMembers, 4))
@@ -139,13 +146,6 @@ function addon:RefreshNativeGroupMembership()
             for index = 1, count do
                 local unit = (inRaid and "raid" or "party") .. index
                 CacheNativeGroupUnit(units, ambiguous, NativeGroupUnitID(unit, state.realm), unit)
-                -- Addon senders use unmodified names, which can differ from
-                -- UnitFullName's internal realm. Cache both complete identities;
-                -- an alias shared by two units cannot safely identify either.
-                if NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" then
-                    local readable, name = pcall(NameUtil.GetUnmodifiedUnitFullName, unit)
-                    if readable then CacheNativeGroupUnit(units, ambiguous, NativeGroupIdentity(name, state.realm), unit) end
-                end
             end
         end
     end
@@ -156,7 +156,7 @@ end
 function addon:InitializeNativeGroupMembership()
     if self.nativeGroupMembership then return end
     self.nativeGroupMembership = { units = {} }
-    self.nativeGroupEvents = self:RegisterGameEvents({ "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD",
+    self:RegisterGameEvents({ "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD",
         "UNIT_NAME_UPDATE" }, function(self, event, unit)
         if event == "UNIT_NAME_UPDATE" then
             if IsSecret(unit) or type(unit) ~= "string"
@@ -167,11 +167,11 @@ function addon:InitializeNativeGroupMembership()
     self:RefreshNativeGroupMembership()
 end
 
-local STATUS_FLAGS = { "inParty", "canInvite", "partyFull", "sharing" }
+local STATUS_FLAGS = { "inParty", "canInvite", "partyFull" }
 
 local function SavePeer(self, id, peer)
     if self.savedDataReadOnly then return end
-    local saved = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt }
+    local saved = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt, class = peer.class }
     for _, name in ipairs(STATUS_FLAGS) do saved[name] = peer[name] end
     local progress = self.rosterState.progress[id]
     if progress and progress.level == peer.level then
@@ -205,7 +205,7 @@ local function SaveLocalStatus(self, status)
         or previous.xp ~= status.xp or previous.xpMax ~= status.xpMax then updatedAt = now end
     state.progress[id] = { level = level, xp = status.xp, xpMax = status.xpMax,
         xpState = status.xpState, xpUpdatedAt = updatedAt, disconnected = false }
-    local peer = { name = name, level = level, seenAt = now, statusSynchronized = true }
+    local peer = { name = name, level = level, seenAt = now, class = status.class, statusSynchronized = true }
     for _, flag in ipairs(STATUS_FLAGS) do peer[flag] = status[flag] end
     state.peers[id] = peer
     SavePeer(self, id, peer)
@@ -220,8 +220,11 @@ local function LocalStatus(self)
     local level = state.pendingLevel and math.max(nativeLevel, state.pendingLevel) or nativeLevel
     local result = { level = level, xpState = "unavailable", inParty = Grouped(),
         canInvite = NativeBoolean(C_PartyInfo and C_PartyInfo.CanInvite),
-        partyFull = NativeBoolean(C_PartyInfo and C_PartyInfo.IsPartyFull),
-        sharing = self.db.position and self.db.position.sharing == true or false }
+        partyFull = NativeBoolean(C_PartyInfo and C_PartyInfo.IsPartyFull) }
+    if type(UnitClass) == "function" then
+        local ok, _, class = pcall(UnitClass, "player")
+        if ok then result.class = ClassToken(class) end
+    end
     local maximumLevel = NativeNumber(GetMaxPlayerLevel, 1000)
     if level > 0 and maximumLevel and maximumLevel > 0 and level >= maximumLevel then
         result.xpState = "max"
@@ -291,7 +294,8 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
         state.peers[id] = peer
     end
     peer.level, peer.seenAt, peer.lastReceived = level, now, GetTime()
-    peer.inParty, peer.canInvite, peer.partyFull, peer.sharing = flags.inParty, flags.canInvite, flags.partyFull, flags.sharing
+    peer.inParty, peer.canInvite, peer.partyFull = flags.inParty, flags.canInvite, flags.partyFull
+    peer.class = ClassToken(fields.class) or peer.class
     peer.statusSynchronized = true
     SavePeer(self, id, peer)
     Refresh(self)
@@ -299,7 +303,6 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
 end
 
 function addon:InitializeRoster()
-    self:InitializeNativeGroupMembership()
     if self.rosterState then return end
     local settings = not self.savedDataReadOnly and type(self.db.roster) == "table" and self.db.roster or {}
     if not self.savedDataReadOnly then self.db.roster = settings end
@@ -309,7 +312,8 @@ function addon:InitializeRoster()
         local name = type(saved) == "table" and SavedName(saved.name, id)
         if name and Number(saved.seenAt, 9999999999)
             and (saved.level == nil or Number(saved.level, 1000)) then
-            local peer = { name = name, level = saved.level, seenAt = saved.seenAt, statusSynchronized = false }
+            local peer = { name = name, level = saved.level, seenAt = saved.seenAt, class = ClassToken(saved.class),
+                statusSynchronized = false }
             for _, flag in ipairs(STATUS_FLAGS) do
                 if type(saved[flag]) == "boolean" then peer[flag] = saved[flag] end
             end
@@ -377,11 +381,11 @@ function addon:GetOverviewPlayers(includeSoloSelf)
     if not self.initialized or not self.rosterState then return {} end
     local hasDataGroup = self:HasDataGroup()
     if not hasDataGroup and not includeSoloSelf then return {} end
-    local rows, byID = {}, {}
+    local rows = {}
     local function Add(id, peer, isSelf)
         local row = { id = id, name = peer.name, level = peer.level, seenAt = peer.seenAt, isSelf = isSelf,
             online = isSelf or (self:IsDataConnected() and peer.lastReceived ~= nil and GetTime() - peer.lastReceived < TIMEOUT),
-            inParty = peer.inParty, canInvite = peer.canInvite, partyFull = peer.partyFull, sharing = peer.sharing,
+            inParty = peer.inParty, canInvite = peer.canInvite, partyFull = peer.partyFull, class = peer.class,
             statusSynchronized = peer.statusSynchronized }
         local progress = isSelf and self.rosterState.localStatus or self.rosterState.progress[id]
         row.xpState, row.xpStale = "unavailable", false
@@ -391,43 +395,20 @@ function addon:GetOverviewPlayers(includeSoloSelf)
                 row.xp, row.xpMax, row.xpState = progress.xp, progress.xpMax, progress.xpState
             end
         end
-        rows[#rows + 1], byID[id] = row, row
-        return row
+        rows[#rows + 1] = row
     end
     local name = self.ready and SelfName()
     local ownID = name and Identity(name)
     if ownID then
         local status = LocalStatus(self)
-        local level, sharing = status.level, status.sharing
-        local row = Add(ownID, { name = name, level = level > 0 and level or nil, seenAt = GetServerTime(),
-            inParty = status.inParty, canInvite = status.canInvite, partyFull = status.partyFull, sharing = sharing }, true)
-        if sharing and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
-            local map = C_Map.GetBestMapForUnit("player")
-            if Number(map, 1000000) and map > 0 then
-                local position = C_Map.GetPlayerMapPosition(map, "player")
-                if not IsSecret(position) and position then
-                    local x, y = position:GetXY()
-                    if not IsSecret(x) and not IsSecret(y) and type(x) == "number" and type(y) == "number"
-                        and x >= 0 and x <= 1 and y >= 0 and y <= 1 then
-                        row.map, row.x, row.y, row.positionStamp, row.positionAvailable = map, x, y, GetServerTime(), true
-                    end
-                end
-            end
-        end
+        local level = status.level
+        Add(ownID, { name = name, level = level > 0 and level or nil, seenAt = GetServerTime(),
+            inParty = status.inParty, canInvite = status.canInvite, partyFull = status.partyFull,
+            class = status.class }, true)
     end
     if not hasDataGroup then return rows end
     for id, peer in pairs(self.rosterState.peers) do
         if id ~= ownID and not self:IsDataSelf(peer.name) then Add(id, peer, false) end
-    end
-    for id, position in pairs(self.GetSharedPositions and self:GetSharedPositions() or {}) do
-        if id ~= ownID and not self:IsDataSelf(position.name) then
-            local row = byID[id] or Add(id, { name = position.name, seenAt = position.stamp }, false)
-            row.map, row.x, row.y = position.map, position.x, position.y
-            row.positionStamp = position.positionStamp
-            row.positionAvailable = position.positionAvailable == true and position.online == true and row.sharing ~= false
-            -- Position discovery provides no party eligibility metadata.
-            if not self.rosterState.peers[id] then row.online = self:IsDataConnected() and position.online == true end
-        end
     end
     table.sort(rows, function(left, right)
         if left.isSelf ~= right.isSelf then return left.isSelf == true end

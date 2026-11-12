@@ -397,27 +397,6 @@ local function CreateOptionsPanel()
     panel.tabs, panel.pages = {}, {}
     local sharing = UI:Section(panel, 20, 116, 680, 414, "General")
     panel.pages.sharing = sharing
-    local positionHeading = UI:Label(sharing, "Shared positions", 14, "heading")
-    positionHeading:SetPoint("TOPLEFT", 356, -52)
-
-    panel.positionSharing = UI:Checkbox(sharing)
-    panel.positionSharing:SetPoint("TOPLEFT", 352, -78)
-    panel.positionSharing:SetSize(28, 28)
-    BindPreference(panel, panel.positionSharing, function() return addon.db.position.sharing end,
-        addon.SetPositionSharing)
-    PreferenceLabel(sharing, panel.positionSharing, "Enable position sharing",
-        "Send and receive locations through enabled party, raid and guild data channels. "
-            .. "Turning this off hides player icons and stops position exchange.", 260)
-
-    panel.positionRetention = UI:Checkbox(sharing)
-    panel.positionRetention:SetPoint("TOPLEFT", 352, -114)
-    panel.positionRetention:SetSize(28, 28)
-    BindPreference(panel, panel.positionRetention, function() return addon.db.position.keepLastKnown end,
-        addon.SetPositionRetention)
-    PreferenceLabel(sharing, panel.positionRetention, "Keep last-known positions",
-        "Keep the last location across reloads and characters. Gray offline markers mean no position update for at least 60 seconds.\n\n"
-            .. "Turning this off removes stale locations and stops saving them.", 260)
-
     CreateDataControls(panel, sharing)
 
     local rankingHeading = UI:Label(sharing, "Player ranking", 14, "heading")
@@ -429,7 +408,7 @@ local function CreateOptionsPanel()
     BindPreference(panel, panel.rankingEnabled, function() return addon:GetRankingSettings().enabled end,
         addon.SetRankingEnabled)
     PreferenceLabel(sharing, panel.rankingEnabled, "Show ranking overlay",
-        "Show the top five characters, plus your own rank when outside the top five. Position sharing can stay off.\n\n"
+        "Show the top five characters, plus your own rank when outside the top five.\n\n"
             .. "This preference saves across reloads and characters.", 260)
 
     panel.rankingHideInCombat = UI:Checkbox(sharing)
@@ -461,19 +440,19 @@ local function CreateOptionsPanel()
     OptionTooltip(slider, "Background transparency", transparencyHelp)
 
     local playerDataHeading = UI:Label(sharing, "Player data", 14, "heading")
-    playerDataHeading:SetPoint("TOPLEFT", 356, -174)
+    playerDataHeading:SetPoint("TOPLEFT", 356, -52)
 
     panel.playerDataCleanup = UI:Checkbox(sharing)
-    panel.playerDataCleanup:SetPoint("TOPLEFT", 352, -200)
+    panel.playerDataCleanup:SetPoint("TOPLEFT", 352, -78)
     panel.playerDataCleanup:SetSize(28, 28)
     BindPreference(panel, panel.playerDataCleanup, function() return addon:GetPlayerDataCleanupEnabled() end,
         addon.SetPlayerDataCleanupEnabled)
     PreferenceLabel(sharing, panel.playerDataCleanup, "Remove player data after 10 days",
-        "Remove history and last-known positions for players not seen for 10 days. Enabled by default.\n\n"
+        "Remove history for players not seen for 10 days. Enabled by default.\n\n"
             .. "Enabling this cleans up now; cleanup also runs periodically. This preference saves across reloads and characters.", 260)
 
     panel.clearPlayerData = UI:Button(sharing, "Clear all player data", "danger")
-    panel.clearPlayerData:SetPoint("TOPLEFT", 356, -244)
+    panel.clearPlayerData:SetPoint("TOPLEFT", 356, -122)
     panel.clearPlayerData:SetSize(188, 32)
     local function ResetPlayerDataConfirmation()
         panel.confirmClearPlayerData = false
@@ -487,7 +466,7 @@ local function CreateOptionsPanel()
         if not panel.confirmClearPlayerData then
             panel.confirmClearPlayerData = true
             panel.clearPlayerData:SetText("Confirm clear")
-            SetFeedback(panel, "Click Confirm clear to remove all saved player history and last-known positions.", true)
+            SetFeedback(panel, "Click Confirm clear to remove all saved player history.", true)
             return
         end
         local success, message = addon:ClearPlayerData()
@@ -496,7 +475,7 @@ local function CreateOptionsPanel()
             or (message or "Unable to clear player data."), not success)
     end)
     OptionTooltip(panel.clearPlayerData, "Clear all player data",
-        "Remove all cached player history and last-known positions. Confirmation is required.\n\n"
+        "Remove all cached player history. Confirmation is required.\n\n"
             .. "Active players can appear again through fresh updates, and your current character remains visible. "
             .. "Your preferences and personal Burned status stay saved.")
     sharing:SetScript("OnHide", ResetPlayerDataConfirmation)
@@ -543,8 +522,6 @@ local function CreateOptionsPanel()
     panel.content:SetScript("OnClick", function() addon:OpenContent() end)
 
     panel:SetScript("OnShow", function()
-        panel.positionSharing:SetChecked(addon.db.position.sharing)
-        panel.positionRetention:SetChecked(addon.db.position.keepLastKnown)
         SetFeedback(panel)
         addon:RefreshOptions()
     end)
@@ -558,8 +535,6 @@ function addon:RefreshOptions()
     end
 
     local editable = not self.savedDataReadOnly
-    panel.positionSharing:SetEnabled(editable)
-    panel.positionRetention:SetEnabled(editable)
     panel.playerDataCleanup:SetChecked(self:GetPlayerDataCleanupEnabled())
     panel.playerDataCleanup:SetEnabled(editable)
     panel.clearPlayerData:SetEnabled(editable)
@@ -671,6 +646,6 @@ function addon:OpenWelcome()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "DATA_CHANGED", "POSITIONS_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED" }) do
+for _, notification in ipairs({ "DATA_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
 end
