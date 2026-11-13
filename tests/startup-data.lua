@@ -306,7 +306,7 @@ do
                 realmName = friend.realm, clientProgram = "WoW", wowProjectID = 18, isInCurrentRegion = true,
                 isOnline = true, isAppearOffline = false, characterLevel = 12 } end,
             SendGameData = function(target, prefix, message)
-                assert(target == friend.gameID)
+                assert(target == friend.gameID and prefix == "LITF")
                 client.sent[#client.sent + 1] = { prefix, message }
                 return 0
             end,
@@ -320,6 +320,10 @@ do
             local friend = client == alice and bob or alice
             client.world:advance(1)
             for _, packet in ipairs(client.sent) do
+                if packet[2]:match("^S") then
+                    local status = assert(client.addon:DecodeFriendsStatus(packet[2]))
+                    assert(status.fields[2] == tostring(client.xp) and status.fields[12] == tostring(client.burned))
+                else assert(packet[2] == "1|H" or packet[2] == "1|A") end
                 friend.fire("BN_CHAT_MSG_ADDON", packet[1], packet[2], "WHISPER", client.gameID)
             end
             client.sent = {}

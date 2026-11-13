@@ -8,6 +8,7 @@ local manifest = manifestFile:read("*a"):gsub("\r\n", "\n")
 manifestFile:close()
 local channelEntry = manifest:find("\nDataChannel.lua\n", 1, true)
 local dataEntry = manifest:find("\nData.lua\n", 1, true)
+local friendCodecEntry = manifest:find("\nFriendStatusCodec.lua\n", 1, true)
 local statusEntry = manifest:find("\nDataStatus.lua\n", 1, true)
 local burnedEntry = manifest:find("\nBurned.lua\n", 1, true)
 local positionEntry = manifest:find("\nPosition.lua\n", 1, true)
@@ -20,8 +21,8 @@ local overlayEntry = manifest:find("\nRankingOverlay.lua\n", 1, true)
 local optionsEntry = manifest:find("\nOptions.lua\n", 1, true)
 assert(channelEntry and dataEntry and channelEntry < dataEntry,
     "the native addon manifest must load channel management before the data transport")
-assert(dataEntry and statusEntry and rosterEntry and dataEntry < statusEntry and statusEntry < rosterEntry
-    and not positionEntry,
+assert(friendCodecEntry and statusEntry and rosterEntry and dataEntry < friendCodecEntry and friendCodecEntry < statusEntry
+    and statusEntry < rosterEntry and not positionEntry,
     "the native addon manifest loads status synchronization without the retired position module")
 assert(burnedEntry and statusEntry < burnedEntry and burnedEntry < overlayEntry,
     "the native manifest must load burned status after synchronization and before the ranking overlay")

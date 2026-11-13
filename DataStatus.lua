@@ -154,8 +154,6 @@ local function DecodeStatus(payload)
             message.fields[id] = value
         end
     end
-    -- Older clients still include these fields. They have no effect on status.
-    message.fields[8], message.fields[9] = nil, nil
     return message
 end
 
@@ -246,25 +244,32 @@ local function CurrentStatus(self)
     return status.current, status.revision
 end
 
-local function EncodeStatus(self, fields, revision)
+local function StatusSnapshot(self, fields, revision)
     local status = self.dataState.status
     local stamp = GetServerTime()
     if IsSecret(stamp) or type(stamp) ~= "number" or stamp ~= stamp or stamp < 0
         or stamp > MAX_STATUS_STAMP or stamp % 1 ~= 0 then return nil end
     stamp = math.max(stamp, status.lastStamp or 0)
     status.lastStamp = stamp
+    return { session = status.session, stamp = stamp, revision = revision, fields = fields }
+end
+
+local function EncodeStatus(message)
     local encoded = {}
     for _, id in ipairs(STATUS_FIELD_ORDER) do
-        local value = fields[id]
+        local value = message.fields[id]
         if value ~= nil then encoded[#encoded + 1] = id .. "=" .. EscapeStatus(value) end
     end
-    return "5|F|" .. status.session .. "|" .. string.format("%.0f", stamp) .. "|" .. revision .. "|" .. table.concat(encoded, "|")
+    return "5|F|" .. message.session .. "|" .. string.format("%.0f", message.stamp) .. "|"
+        .. message.revision .. "|" .. table.concat(encoded, "|")
 end
 
 local function ProcessStatus(self, sender, message, requested)
     local status = self.dataState.status
     local normalized, isSelf = self:GetDataSenderIdentity(sender)
     if not normalized or isSelf then return false end
+    -- Older clients still include these fields. They have no effect on status.
+    message.fields[8], message.fields[9] = nil, nil
     -- Forever's full character name is stable even when Friends and native
     -- routes use different realm suffixes or the Friends roster changes.
     if self.GetRankingPlayerKey then normalized = self:GetRankingPlayerKey(normalized) end
@@ -293,6 +298,16 @@ local function ProcessStatus(self, sender, message, requested)
             { session = message.session })
     end
     return true
+end
+
+function addon:ReceiveFriendsStatusSnapshot(sender, frame)
+    if not self.dataState.status then return false end
+    local message = self:DecodeFriendsStatus(frame)
+    if not message then return false end
+    for id, value in pairs(message.fields) do
+        if not ValidStatusValue(id, value) then return false end
+    end
+    return ProcessStatus(self, sender, message)
 end
 
 local function ScheduleStatus(self)
@@ -353,8 +368,10 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
             ProcessStatus(self, sender, message, true)
             local fields, revision = CurrentStatus(self)
             if fields == nil then return nil end
-            local response = EncodeStatus(self, fields, revision)
-            if response and #response <= budget then return response end
+            local snapshot = StatusSnapshot(self, fields, revision)
+            if not snapshot then return nil end
+            local response = EncodeStatus(snapshot)
+            if #response <= budget then return response end
             -- Replies do not replace the public snapshot or postpone its refresh.
         end, function(sender, payload)
             local message = DecodeStatus(payload)
@@ -411,17 +428,19 @@ function addon:DataStatusTick()
         local nativeDue = nativeReady and SnapshotDue(native, revision, now, STATUS_REFRESH_INTERVAL)
         local friendsDue = friendsReady and SnapshotDue(friends, revision, now, FRIENDS_STATUS_REFRESH_INTERVAL)
         if not nativeDue and not friendsDue then ScheduleStatus(self); return false end
-        local payload = EncodeStatus(self, fields, revision)
-        if payload then
+        local snapshot = StatusSnapshot(self, fields, revision)
+        if snapshot then
             if nativeDue then
                 native.attemptedAt = now
+                local payload = EncodeStatus(snapshot)
                 if native.needed then nativeSent = self:RequestData("status", payload)
                 else nativeSent = self:SendData("status", payload) end
                 if nativeSent then SnapshotSent(native, revision, now) end
             end
             if friendsDue then
                 friends.attemptedAt = now
-                friendsSent = self:SendFriendsStatusSnapshot(payload)
+                local frame = self:EncodeFriendsStatus(snapshot)
+                friendsSent = frame ~= nil and self:SendFriendsStatusSnapshot(frame)
                 if friendsSent then SnapshotSent(friends, revision, now) end
             end
         end

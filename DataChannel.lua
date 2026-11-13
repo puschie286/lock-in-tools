@@ -1,6 +1,7 @@
 local _, addon = ...
 
 local CHANNEL_OPTIONS = { party = true, guild = true, friends = true }
+local FRIENDS_PREFIX = "LITF"
 local PREFIX_RETRY_DELAY = 30
 local FRIEND_SEND_GAP, FRIEND_PROBE_INTERVAL, FRIEND_TIMEOUT = 0.5, 30, 90
 local NATIVE_CONTACT_TIMEOUT = 45
@@ -20,9 +21,16 @@ local function CanUseData(self)
         and not self.dataState.stopped
 end
 
-local function Enabled(self)
+local function NativeEnabled(self)
     return self:GetDataChannelEnabled("party") or self:GetDataChannelEnabled("guild")
-        or self:GetDataChannelEnabled("friends")
+end
+
+local function Enabled(self)
+    return NativeEnabled(self) or self:GetDataChannelEnabled("friends")
+end
+
+function addon:GetFriendsDataPrefix()
+    return FRIENDS_PREFIX
 end
 
 function addon:GetDataChannelEnabled(channel)
@@ -117,7 +125,7 @@ ScheduleFriendSend = function(self)
                 and (packet.kind ~= "snapshot" or (route and Confirmed(peer, route, now))) then
                 local api, distribution, target = FriendSendAPI(peer.friend, route)
                 if api then
-                    local prefix, ok, result = self:GetDataPrefix()
+                    local prefix, ok, result = self:GetFriendsDataPrefix()
                     if distribution == "BATTLENET" then ok, result = pcall(api, target, prefix, packet.message)
                     else ok, result = pcall(api, prefix, packet.message, "WHISPER", target) end
                     local failure = self:GetDataSendFailure(ok, result)
@@ -216,9 +224,8 @@ local function RefreshDataFriends(self)
     return active, added
 end
 
-function addon:SendFriendsStatusSnapshot(payload)
+function addon:SendFriendsStatusSnapshot(message)
     if not self:IsDataConnected() or not self.dataState.routes.FRIENDS then return false end
-    local message = "1|status|" .. payload
     if not self:IsDataFrame(message) then return false end
     local state, queued, now = self.dataState, false, GetTime()
     for _, candidate in pairs(state.friends) do
@@ -266,15 +273,19 @@ function addon:RefreshDataRoutes()
     local previous, connected = state.routes, state.connected
     state.routes = routes
     local friendAdded
-    if CanUseData(self) and state.nativeStarted and state.nativeAvailable and state.prefixRegistered then
-        if self:GetDataChannelEnabled("party") then
-            if NativeMembership(IsInRaid) then routes.RAID = true
-            elseif NativeMembership(IsInGroup) then routes.PARTY = true end
+    if CanUseData(self) and state.nativeStarted and state.nativeAvailable then
+        if state.prefixRegistered then
+            if self:GetDataChannelEnabled("party") then
+                if NativeMembership(IsInRaid) then routes.RAID = true
+                elseif NativeMembership(IsInGroup) then routes.PARTY = true end
+            end
+            if self:GetDataChannelEnabled("guild") and self:HasGuild() then routes.GUILD = true end
         end
-        if self:GetDataChannelEnabled("guild") and self:HasGuild() then routes.GUILD = true end
-        local active
-        active, friendAdded = RefreshDataFriends(self)
-        if active then routes.FRIENDS = true end
+        if state.friendsPrefixRegistered then
+            local active
+            active, friendAdded = RefreshDataFriends(self)
+            if active then routes.FRIENDS = true end
+        end
     else ResetFriendMessages(state) end
     for distribution in pairs(state.sendFailures) do
         if not routes[distribution] then state.sendFailures[distribution] = nil end
@@ -294,6 +305,12 @@ function addon:CancelDataTimer()
     if state.timer then state.timer:Cancel(); state.timer = nil end
 end
 
+local function RegisterDataPrefix(prefix)
+    local ok, result = pcall(C_ChatInfo.RegisterAddonMessagePrefix, prefix)
+    local results = Enum.RegisterAddonMessagePrefixResult
+    return ok and not IsSecret(result) and (result == results.Success or result == results.DuplicatePrefix)
+end
+
 function addon:StartDataMessages()
     local state = self.dataState
     if state and CanUseData(self) and state.nativeStarted then
@@ -302,13 +319,19 @@ function addon:StartDataMessages()
         if Enabled(self) then
             if not state.nativeAvailable then
                 state.detail = "The native group-data API is unavailable."
-            elseif not state.prefixRegistered then
-                local ok, result = pcall(C_ChatInfo.RegisterAddonMessagePrefix, self:GetDataPrefix())
-                local results = Enum.RegisterAddonMessagePrefixResult
-                if ok and not IsSecret(result) and (result == results.Success or result == results.DuplicatePrefix) then
-                    state.prefixRegistered = true
-                else
-                    state.detail = "Could not register group-data messages. Retrying automatically."
+            else
+                local failed = {}
+                if NativeEnabled(self) and not state.prefixRegistered then
+                    state.prefixRegistered = RegisterDataPrefix(self:GetDataPrefix())
+                    if not state.prefixRegistered then failed[#failed + 1] = "group-data" end
+                end
+                if self:GetDataChannelEnabled("friends") and not state.friendsPrefixRegistered then
+                    state.friendsPrefixRegistered = RegisterDataPrefix(self:GetFriendsDataPrefix())
+                    if not state.friendsPrefixRegistered then failed[#failed + 1] = "Friends" end
+                end
+                if #failed > 0 then
+                    state.detail = "Could not register " .. table.concat(failed, " and ")
+                        .. " messages. Retrying automatically."
                     state.timer = C_Timer.NewTimer(PREFIX_RETRY_DELAY, function()
                         state.timer = nil
                         self:StartDataMessages()
@@ -354,11 +377,13 @@ function addon:OnDataEvent(event, ...)
     if event == "CHAT_MSG_ADDON" or event == "BN_CHAT_MSG_ADDON" then
         local prefix, message, distribution, sender = ...
         if IsSecret(prefix) or IsSecret(message) or IsSecret(distribution) or IsSecret(sender)
-            or prefix ~= self:GetDataPrefix() or type(message) ~= "string" then return end
+            or type(message) ~= "string" then return end
         if event == "BN_CHAT_MSG_ADDON" or distribution == "WHISPER" then
+            if not state.friendsPrefixRegistered or prefix ~= self:GetFriendsDataPrefix() then return end
             return self:OnFriendDataMessage(message, sender, event == "BN_CHAT_MSG_ADDON" and "BATTLENET" or "WHISPER")
         end
-        if type(sender) ~= "string" or not self:IsDataConnected() or not state.routes[distribution] then return end
+        if prefix ~= self:GetDataPrefix() or type(sender) ~= "string" or distribution == "FRIENDS"
+            or not self:IsDataConnected() or not state.routes[distribution] then return end
         local friend, id
         if self.FindDataFriend then friend, id = self:FindDataFriend(sender) end
         local peer = id and state.friends[id]
@@ -414,8 +439,9 @@ function addon:OnFriendDataMessage(message, sender, distribution)
             self:RefreshDataRoutes()
             self:Notify("DATA_CHANGED")
         end
-    elseif message:match("^1|status|5|F|") and Confirmed(peer, distribution, now) and self:IsDataConnected() then
-        local accepted = self:OnDataMessage(peer.friend.name, message)
+    elseif Confirmed(peer, distribution, now) and self:IsDataConnected() then
+        local ok, accepted = pcall(self.ReceiveFriendsStatusSnapshot, self, peer.friend.name, message)
+        if not ok then return false end
         if accepted then peer.friendContact[distribution] = now end
         return accepted
     end
@@ -430,12 +456,13 @@ function addon:GetDataStatusText()
     if state.routes.RAID then routes[#routes + 1] = "raid" end
     if state.routes.GUILD then routes[#routes + 1] = "guild" end
     if state.routes.FRIENDS then routes[#routes + 1] = "friends" end
+    local status
     if #routes == 0 then
-        local failures = self:GetDataSendStatusText()
-        local waiting = state.detail or "Waiting for an enabled party, raid, guild or friends route."
-        return failures ~= "" and (waiting .. " " .. failures) or waiting
+        status = state.detail or "Waiting for an enabled party, raid, guild or friends route."
+    else
+        status = "Data routes: " .. table.concat(routes, ", ") .. "."
+        if state.detail then status = status .. " " .. state.detail end
     end
-    local status = "Data routes: " .. table.concat(routes, ", ") .. "."
     local failures = self:GetDataSendStatusText()
     return failures ~= "" and (status .. " " .. failures) or status
 end

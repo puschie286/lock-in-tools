@@ -15,6 +15,7 @@ Notifications.lua
 Core.lua
 DataChannel.lua
 Data.lua
+FriendStatusCodec.lua
 DataStatus.lua
 Burned.lua
 Roster.lua

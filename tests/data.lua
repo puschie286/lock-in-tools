@@ -61,7 +61,7 @@ local function newAddon(saved, readOnly, native)
         RegisterAddonMessagePrefix = function(prefix)
             world.prefixCalls[#world.prefixCalls + 1] = prefix
             if world.prefixThrows then error("Prefix registration unavailable") end
-            return world.prefixResult or 0
+            return world.prefixResults and world.prefixResults[prefix] or world.prefixResult or 0
         end,
         SendAddonMessage = function(prefix, message, distribution, target)
             if distribution == "WHISPER" then
@@ -83,7 +83,7 @@ local function newAddon(saved, readOnly, native)
     function addon:Print(message) world.messages[#world.messages + 1] = message end
     world.notificationErrors = loadNotifications(addon, environment)
     function addon:RefreshOptions() end
-    for _, file in ipairs({ "DataChannel.lua", "Data.lua", "DataStatus.lua" }) do
+    for _, file in ipairs({ "DataChannel.lua", "Data.lua", "FriendStatusCodec.lua", "DataStatus.lua" }) do
         loadModule(file, addon, environment)
     end
     function addon:GetDataFriends() return world.friends end
@@ -113,8 +113,9 @@ local function newAddon(saved, readOnly, native)
             metadata.distribution or "PARTY", sender)
     end
     function world:incomingFriend(message, sender, prefix)
+        prefix = prefix or addon:GetFriendsDataPrefix()
         if type(sender) == "number" then
-            self:fire("BN_CHAT_MSG_ADDON", prefix or addon:GetDataPrefix(), message, "WHISPER", sender)
+            self:fire("BN_CHAT_MSG_ADDON", prefix, message, "WHISPER", sender)
         else
             self:incoming(message, sender, { distribution = "WHISPER", prefix = prefix })
         end
@@ -543,6 +544,59 @@ local function receive(current, sender, payload)
     return current:ReceiveData(sender, "1|status|" .. payload)
 end
 
+local function friendsStatus(addon, stamp, revision, fields, session)
+    return assert(addon:EncodeFriendsStatus({ session = session or "77359400-0-1", stamp = stamp,
+        revision = revision, fields = fields }))
+end
+
+local function friendsLevel(addon, packet, level)
+    local decoded = packet.prefix == addon:GetFriendsDataPrefix() and addon:DecodeFriendsStatus(packet.message)
+    return decoded and decoded.fields[1] == tostring(level)
+end
+
+do
+    local current = newAddon()
+    local snapshot = { session = "77359400-0-1", stamp = 2000000000, revision = 1,
+        fields = { [1] = "24", [2] = "420", [3] = "1000", [4] = "1", [10] = "2", [11] = "7", [12] = "40" } }
+    local frame = assert(current:EncodeFriendsStatus(snapshot))
+    assert(#current:GetFriendsDataPrefix() == 4 and #frame == 25 and frame:sub(1, 1) == "S"
+        and equal(current:DecodeFriendsStatus(frame), snapshot),
+        "A full Friends fixture uses 25 payload bytes plus the four-byte prefix and round-trips exactly")
+    local levelOnly = friendsStatus(current, snapshot.stamp, snapshot.revision, { [1] = "24" })
+    assert(#levelOnly == 15 and equal(assert(current:DecodeFriendsStatus(levelOnly)).fields, { [1] = "24" }),
+        "A level-only Friends snapshot uses 15 payload bytes and omits unavailable fields")
+
+    snapshot.session, snapshot.stamp, snapshot.revision = "literal-session", 9999999999, 999999999
+    snapshot.fields = { [1] = "0", [2] = "00420", [3] = "", [13] = "-1.25e-7", [37] = "a|b=%",
+        [65535] = "unknown" }
+    frame = assert(current:EncodeFriendsStatus(snapshot))
+    assert(frame == "SDPliteral-session__43gqJ_vy15dHBAK00420AANAQ-1.25e-7lBAKa|b=%___BAOunknown"
+        and equal(current:DecodeFriendsStatus(frame), snapshot),
+        "Empty, noncanonical numeric and unknown ASCII values retain their original wire encoding")
+
+    snapshot.session, snapshot.stamp = "2540be3ff-7ffffffe-1", 0
+    frame = assert(current:EncodeFriendsStatus(snapshot))
+    assert(equal(current:DecodeFriendsStatus(frame), snapshot), "Wide session epochs and negative stamp offsets are exact")
+
+    snapshot.fields = { [65535] = "" }
+    local beforeLength = #assert(current:EncodeFriendsStatus(snapshot))
+    snapshot.fields[65535] = string.rep("x", 255 - beforeLength - 1)
+    frame = assert(current:EncodeFriendsStatus(snapshot))
+    assert(#frame == 255 and equal(current:DecodeFriendsStatus(frame), snapshot))
+    assert(not current:DecodeFriendsStatus(frame .. "x") and not current:DecodeFriendsStatus(frame:sub(1, -2)))
+    snapshot.fields[65535] = snapshot.fields[65535] .. "x"
+    assert(not current:EncodeFriendsStatus(snapshot), "The codec rejects snapshots beyond the native payload limit")
+
+    for _, fields in ipairs({ { [0] = "1" }, { [65536] = "1" }, { ["1"] = "1" }, { [1] = 1 },
+        { [1] = "nul\000" }, { [1] = "newline\n" }, { [1] = string.char(127) }, { [65535] = string.char(128, 255) } }) do
+        snapshot.fields = fields
+        assert(not current:EncodeFriendsStatus(snapshot), "Invalid fields and bytes outside printable ASCII are rejected")
+    end
+    assert(not current:DecodeFriendsStatus("SCgglrz7BABABA___BAFgP8"), "The former Base64 literal tag is rejected")
+    assert(not current:DecodeFriendsStatus("1|status|5|F|literal-session|100|1|1=24")
+        and not current:DecodeFriendsStatus(levelOnly .. "A"), "The codec rejects legacy or overlong encodings")
+end
+
 -- Friends discover other addon users before exchanging status snapshots. Guild
 -- and group routes also carry request and reply frames.
 do
@@ -553,7 +607,8 @@ do
         environment.GetNormalizedRealmName = function() return realm end
         environment.UnitFullName = function(unit) assert(unit == "player"); return name, realm end
     end
-    local values = { level = 24 }
+    local values = { level = 24, xp = 420, xpMax = 1000, xpState = "known", class = "MAGE",
+        burned = 40, inParty = false, canInvite = true, partyFull = false }
     local current, clock, samples = statusFixture(values, true, {
         guild = true, friends = { [bob.id] = bob, [carol.id] = carol },
         configure = function(environment) setRealm(environment, "Alice Oak", localRealm) end,
@@ -575,14 +630,17 @@ do
     assert(helloTargets.BATTLENET == 42 and helloTargets.WHISPER == "Carol Reed",
         "Discovery addresses each friend using the native target for their transport")
     for _, packet in ipairs(clock.sent) do
-        if packet.target ~= nil then assert(packet.message == "1|H", "Discovery carries no status data") end
+        if packet.target ~= nil then
+            assert(packet.prefix == "LITF" and packet.message == "1|H", "Discovery carries no status data")
+        end
     end
 
-    local bobStatus = full("bob-session", 2000000005, 1, "1=25")
+    local bobStatus = friendsStatus(current, 2000000005, 1, { [1] = "25" })
     clock:incomingFriend("1|A", 123)
     clock:incomingFriend("1|A", 42, "OTHER")
-    clock:incomingFriend("1|status|" .. bobStatus, 123)
-    clock:incomingFriend("1|status|" .. bobStatus, 42)
+    clock:incomingFriend("1|A", 42, current:GetDataPrefix())
+    clock:incomingFriend(bobStatus, 123)
+    clock:incomingFriend(bobStatus, 42)
     assert(#samples == 0, "An unknown or unconfirmed sender cannot supply status")
 
     clock:incomingFriend("1|A", 42)
@@ -592,13 +650,15 @@ do
     assert(#acknowledgments == 1 and acknowledgments[1].distribution == "WHISPER"
         and acknowledgments[1].target == "Carol Reed", "An eligible hello is acknowledged on the same route")
     local snapshotTargets, aliceSnapshot = {}, nil
-    for _, packet in ipairs(packets("^1|status|")) do
+    for _, packet in ipairs(packets("^S")) do
         snapshotTargets[packet.distribution] = packet.target
-        if packet.target == 42 then aliceSnapshot = packet.message end
+        if packet.target == 42 then aliceSnapshot = packet end
     end
     assert(snapshotTargets.BATTLENET == 42 and snapshotTargets.WHISPER == "Carol Reed",
-        "Confirmed friends get the existing status payload over both transports")
-    assert(packets("^1|Q|status|")[1].distribution == "GUILD", "Guild discovery still sends a status request")
+        "Confirmed friends get compact status over both transports")
+    local nativeRequest = packets("^1|Q|status|")[1]
+    assert(nativeRequest.distribution == "GUILD" and nativeRequest.prefix == "LockInToolsData",
+        "Guild discovery still sends a request with the original prefix")
 
     local alice = { id = "alice-oak", name = "Alice-Oak", displayName = "Alice Oak", gameAccountID = 21 }
     local _, peerClock, peerSamples = statusFixture({ level = 25 }, true, {
@@ -607,39 +667,56 @@ do
     })
     peerClock:advance(5)
     peerClock:incomingFriend("1|A", 21)
-    peerClock:incomingFriend(aliceSnapshot, 21)
+    peerClock:incomingFriend(aliceSnapshot.message, 21, aliceSnapshot.prefix)
     peerClock:advance(6)
     local bobSnapshot
     for _, packet in ipairs(peerClock.sent) do
-        if packet.message:match("^1|status|") then bobSnapshot = packet end
+        if packet.message:match("^S") then bobSnapshot = packet end
     end
     assert(bobSnapshot and bobSnapshot.target == 21 and bobSnapshot.distribution == "BATTLENET")
     clock:incomingFriend(bobSnapshot.message, 42)
     assert(#samples == 1 and samples[1].sender == bob.name and samples[1].fields.level == "25"
-        and #peerSamples == 1 and peerSamples[1].sender == alice.name and peerSamples[1].fields.level == "24",
-        "The status snapshots resolve both friends to their roster names across different realms")
+        and #peerSamples == 1 and peerSamples[1].sender == alice.name and peerSamples[1].fields.level == "24"
+        and peerSamples[1].fields.xp == "420" and peerSamples[1].fields.xpMax == "1000"
+        and peerSamples[1].fields.xpState == "known" and peerSamples[1].fields.class == "MAGE"
+        and peerSamples[1].fields.burned == "40" and peerSamples[1].fields.inParty == false
+        and peerSamples[1].fields.canInvite == true and peerSamples[1].fields.partyFull == false,
+        "Compact status preserves every reported value and resolves Friends across realms")
 
-    local bobSession = bobSnapshot.message:match("^1|status|5|F|([^|]+)|")
-    local accepted, requestID = current:RequestData("status", aliceSnapshot:match("^1|status|(.*)$"))
+    local bobSession = assert(current:DecodeFriendsStatus(bobSnapshot.message)).session
+    local accepted, requestID = current:RequestData("status", nativeRequest.message:match("^1|Q|status|[^|]+|(.*)$"))
     assert(accepted and clock.sent[#clock.sent].distribution == "GUILD")
     local target = next(current.dataState.pendingRequests[requestID].targets)
     local sends = #clock.sent
     local revisedBobStatus = full(bobSession, 2000000013, 2, "1=26")
+    clock:incomingFriend("1|status|" .. revisedBobStatus, 42)
+    clock:incomingFriend("1|status|" .. revisedBobStatus, 42, current:GetDataPrefix())
     clock:incomingFriend("1|Q|status|bob-request|" .. revisedBobStatus, 42)
     clock:incomingFriend("1|R|status|" .. requestID .. "|" .. target .. "|" .. revisedBobStatus, 42)
+    local compactRevised = friendsStatus(current, 2000000013, 2, { [1] = "26" }, bobSession)
+    clock:incomingFriend(compactRevised, 42, current:GetDataPrefix())
+    clock:incoming(compactRevised, bob.name, { distribution = "GUILD", prefix = current:GetFriendsDataPrefix() })
+    clock:incoming("1|status|" .. revisedBobStatus, bob.name,
+        { distribution = "GUILD", prefix = current:GetFriendsDataPrefix() })
     clock:advance(2)
     assert(#samples == 1 and #clock.sent == sends,
-        "Friends neither process status request and response frames nor send a reply")
+        "Friends and native routes reject each other's prefixes, frames, and request and reply traffic")
 
     clock:incoming("1|status|" .. revisedBobStatus, bob.name, { distribution = "GUILD" })
     assert(#samples == 2 and samples[2].sender == bob.name and samples[2].fields.level == "26")
+    clock:incomingFriend(friendsStatus(current, 2000000014, 2, { [1] = "26" }, bobSession), 42)
+    assert(#samples == 3 and samples[3].fields.level == "26" and samples[3].stamp == 2000000014,
+        "The same revision can refresh across wire formats with identical fields and a newer stamp")
     assert(current:RegisterDataFeature("echo", function() end) and current:SendData("echo", "overlap"))
     values.level = 27
     clock:advance(8)
     local feature = packets("^1|echo|overlap$")
     assert(#feature == 1 and feature[1].distribution == "GUILD", "Generic features stay on the native group routes")
-    local overlap = packets("^1|status|.*|1=27$")
-    assert(#overlap == 2 and overlap[1].distribution == "GUILD" and overlap[2].target == "Carol Reed",
+    local native, direct = packets("^1|status|.*|1=27|"), {}
+    for _, packet in ipairs(packets("^S")) do
+        if friendsLevel(current, packet, 27) then direct[#direct + 1] = packet end
+    end
+    assert(#native == 1 and native[1].distribution == "GUILD" and #direct == 1 and direct[1].target == "Carol Reed",
         "A friend whose status arrived through the guild receives no redundant snapshot")
     local previousSend = -math.huge
     for _, packet in ipairs(clock.sent) do
@@ -651,15 +728,15 @@ do
 
     clock.friends[bob.id] = nil
     current:Notify("FRIEND_DATA_CHANGED")
-    clock:incomingFriend("1|status|" .. full(bobSession, 2000000019, 3, "1=27"), 42)
-    assert(#samples == 2, "Roster removal revokes a confirmed friend's access")
+    clock:incomingFriend(friendsStatus(current, 2000000019, 3, { [1] = "27" }, bobSession), 42)
+    assert(#samples == 3, "Roster removal revokes a confirmed friend's access")
 
     assert(current:SetDataChannelEnabled("friends", false) and current.db.data.channels.friends == false)
     sends = #clock.sent
     clock:incomingFriend("1|H", "Carol Reed")
-    clock:incomingFriend("1|status|" .. full("carol-session", 2000000015, 1, "1=26"), "Carol Reed")
+    clock:incomingFriend(friendsStatus(current, 2000000015, 1, { [1] = "26" }), "Carol Reed")
     clock:advance(5)
-    assert(#samples == 2 and #clock.sent == sends and current:IsDataConnected(),
+    assert(#samples == 3 and #clock.sent == sends and current:IsDataConnected(),
         "Friends opt-out stops friend traffic while the native guild route stays connected")
     local reopened, freshClock = newAddon(current.db, false, { party = false, friends = clock.friends })
     freshClock:login()
@@ -680,11 +757,12 @@ do
     local bob = { id = "bob-fern", name = "Bob-Fern", displayName = "Bob Fern", gameAccountID = 42 }
     local carol = { id = "carol-reed", name = "Carol-Reed", displayName = "Carol Reed", whisper = "Carol Reed" }
     local values = { level = 24 }
-    local _, clock = statusFixture(values, true, { guild = true, friends = { [bob.id] = bob, [carol.id] = carol } })
+    local current, clock = statusFixture(values, true, { guild = true, friends = { [bob.id] = bob, [carol.id] = carol } })
     local function snapshots(direct)
         local result = {}
         for _, packet in ipairs(clock.sent) do
-            if packet.message:match("^1|status|") and (packet.target ~= nil) == direct then
+            if (direct and packet.prefix == "LITF" and packet.message:match("^S"))
+                or (not direct and packet.prefix == "LockInToolsData" and packet.message:match("^1|status|")) then
                 result[#result + 1] = packet
             end
         end
@@ -695,7 +773,7 @@ do
     clock:incomingFriend("1|A", 42)
     clock:advance(5)
     local first = snapshots(true)[1]
-    assert(first and first.target == 42 and first.message:match("|1=24$"), "The first confirmed friend receives status")
+    assert(first and first.target == 42 and friendsLevel(current, first, 24), "The first confirmed friend receives status")
     clock:incomingFriend("1|H", carol.whisper)
     local changed = clock.now
     values.level = 25
@@ -708,7 +786,7 @@ do
     values.level = 26
     clock:advance(6)
     local batch = snapshots(true)
-    assert(#batch == 3 and batch[2].message == batch[3].message and batch[2].message:match("|1=26$")
+    assert(#batch == 3 and batch[2].message == batch[3].message and friendsLevel(current, batch[2], 26)
         and batch[2].at - first.at >= 10 and batch[3].at - batch[2].at == 0.5,
         "One paced Friends batch sends the latest complete status to both targets")
     assert((batch[2].target == 42 and batch[3].target == carol.whisper)
@@ -723,10 +801,10 @@ do
     assert(#snapshots(true) == 3, "Friends do not refresh at the native thirty-second boundary")
     clock:advance(32)
     local refresh = snapshots(true)
-    local function stamp(packet) return tonumber(packet.message:match("^1|status|5|F|[^|]+|(%d+)|")) end
+    local function stamp(packet) return assert(current:DecodeFriendsStatus(packet.message)).stamp end
     assert(#refresh == 5 and stamp(refresh[4]) - stamp(batch[2]) == 60
         and refresh[5].at - refresh[4].at == 0.5
-        and refresh[4].message == refresh[5].message and refresh[4].message:match("|1=26$"),
+        and refresh[4].message == refresh[5].message and friendsLevel(current, refresh[4], 26),
         "An unchanged Friends snapshot refreshes after sixty seconds")
 end
 
@@ -742,7 +820,7 @@ do
     assert(#clock.sent == 4 and clock.sent[3].distribution == "GUILD"
         and clock.sent[3].message:match("^1|Q|status|") and clock.sent[3].at == 5
         and clock.sent[4].distribution == "BATTLENET" and clock.sent[4].target == 42
-        and clock.sent[4].message:match("^1|status|.*|1=24$")
+        and friendsLevel(current, clock.sent[4], 24)
         and next(current.dataState.pendingRequests) == nil,
         "Friends can publish at the same tick as a failed guild discovery request")
     clock.routeResults.GUILD = 0
@@ -771,7 +849,7 @@ do
     clock:advance(6)
     assert(current:IsDataConnected() and #clock.sent == 3 and clock.sent[2].message == "1|A"
         and clock.sent[2].distribution == "WHISPER" and clock.sent[2].target == peer.whisper
-        and clock.sent[3].message:match("^1|status|.*|1=24$") and clock.sent[3].distribution == "WHISPER"
+        and friendsLevel(current, clock.sent[3], 24) and clock.sent[3].distribution == "WHISPER"
         and clock.sent[3].target == peer.whisper, "Status uses the route confirmed by the friend's hello")
     assert(next(current.dataState.pendingRequests) == nil, "Friends-only publication creates no pending requests")
 
@@ -781,13 +859,13 @@ do
     assert(received == 0 and not current:SendData("echo", "generic feature"),
         "The Friends route only exchanges status snapshots")
 
-    local prefix = "1|status|" .. full("bob-session", 2000000007, 1, "1=25|65535=")
-    local maximum = prefix .. string.rep("x", 255 - #prefix)
-    clock:incomingFriend(maximum .. "x", peer.whisper)
-    clock:incomingFriend("1|status|" .. full("bob-session", 2000000007, 1, "1=25|65535=contains\000nul"), peer.whisper)
-    assert(#samples == 0, "Oversized and NUL-containing snapshots do not reach status providers")
-    clock:incomingFriend(maximum, peer.whisper)
-    assert(#samples == 1 and samples[1].fields.level == "25", "A 255-byte snapshot remains valid")
+    local snapshot = friendsStatus(current, 2000000007, 1, { [1] = "25", [65535] = "unknown" })
+    clock:incomingFriend(snapshot .. string.rep("x", 256), peer.whisper)
+    clock:incomingFriend(snapshot:sub(1, -2) .. "\000", peer.whisper)
+    clock:incomingFriend(snapshot:sub(1, -2), peer.whisper)
+    assert(#samples == 0, "Oversized, NUL-containing and truncated snapshots do not reach status providers")
+    clock:incomingFriend(snapshot, peer.whisper)
+    assert(#samples == 1 and samples[1].fields.level == "25", "An unknown field does not prevent reading known values")
 end
 
 -- A party roster change drops contact for that audience, including a replacement
@@ -795,17 +873,17 @@ end
 do
     local peer = { id = "bob-fern", name = "Bob-Fern", displayName = "Bob Fern", gameAccountID = 42 }
     local values = { level = 24 }
-    local _, clock, samples = statusFixture(values, true, { party = true, friends = { [peer.id] = peer } })
+    local current, clock, samples = statusFixture(values, true, { party = true, friends = { [peer.id] = peer } })
     clock:advance(1)
     clock:incomingFriend("1|A", 42)
-    local snapshot = "1|status|" .. full("bob-session", 2000000001, 1, "1=25")
-    clock:incomingFriend(snapshot, 42)
+    local snapshot = "1|status|" .. full("77359400-0-1", 2000000001, 1, "1=25")
+    clock:incomingFriend(friendsStatus(current, 2000000001, 1, { [1] = "25" }), 42)
     clock:incoming(snapshot, peer.name, { distribution = "PARTY" })
     clock:advance(5)
     assert(#samples == 1, "The second copy is a valid duplicate, not another status update")
     local function friendHasLevel(level)
         for _, packet in ipairs(clock.sent) do
-            if packet.target == 42 and packet.message:match("^1|status|.*|1=" .. level .. "$") then return true end
+            if packet.target == 42 and friendsLevel(current, packet, level) then return true end
         end
         return false
     end
@@ -846,14 +924,14 @@ for _, whisperConfirmed in ipairs({ true, false }) do
     local battleNetDown = true
     clock.environment.C_BattleNet.SendGameData = function(target, prefix, message)
         local result = sendBattleNet(target, prefix, message)
-        return battleNetDown and message:match("^1|status|") and 11 or result
+        return battleNetDown and message:match("^S") and 11 or result
     end
     clock:advance(3)
     local acks, battleNetSnapshots, whisperSnapshots, whisperHello = {}, 0, 0, false
     for _, packet in ipairs(clock.sent) do
         if packet.message == "1|A" then acks[packet.distribution] = packet.at end
         if packet.message == "1|H" and packet.target == peer.whisper then whisperHello = true end
-        if packet.message:match("^1|status|.*|1=24$") then
+        if friendsLevel(current, packet, 24) then
             if packet.target == 42 then battleNetSnapshots = battleNetSnapshots + 1 end
             if packet.target == peer.whisper then
                 whisperSnapshots = whisperSnapshots + 1
@@ -873,11 +951,11 @@ for _, whisperConfirmed in ipairs({ true, false }) do
 
     -- Incoming Battle.net traffic is not evidence that outgoing sends recovered.
     clock:incomingFriend("1|A", 42)
-    clock:incomingFriend("1|status|" .. full("bob-session", 2000000004, 1, "1=25"), 42)
+    clock:incomingFriend(friendsStatus(current, 2000000004, 1, { [1] = "25" }), 42)
     values.level = 26
     clock:advance(8)
     local last = clock.sent[#clock.sent]
-    assert(last.target == peer.whisper and last.message:match("^1|status|.*|1=26$"),
+    assert(last.target == peer.whisper and friendsLevel(current, last, 26),
         "New status keeps using the working character whisper")
 
     battleNetDown = false
@@ -894,7 +972,7 @@ for _, whisperConfirmed in ipairs({ true, false }) do
     values.level = 27
     clock:advance(6)
     last = clock.sent[#clock.sent]
-    assert(last.target == 42 and last.message:match("^1|status|.*|1=27$")
+    assert(last.target == 42 and friendsLevel(current, last, 27)
         and current:GetDataSendStatusText() == "", "A successful probe restores Battle.net and clears its failure")
 end
 
@@ -1743,6 +1821,29 @@ do
 end
 
 -- Prefix failures retry once per interval; disabling every route cancels work.
+do
+    local peer = { id = "bob-fern", name = "Bob-Fern", gameAccountID = 42 }
+    local current, clock = newAddon(nil, false, { guild = true, party = true, friends = { [peer.id] = peer } })
+    local groupPrefix, friendsPrefix = current:GetDataPrefix(), current:GetFriendsDataPrefix()
+    assert(current:RegisterDataFeature("echo", function() end))
+    clock.prefixResults = { [friendsPrefix] = 2 }
+    clock:login()
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD and current.dataState.routes.PARTY
+        and not current.dataState.routes.FRIENDS, "A refused Friends prefix leaves guild and party operational")
+    clock:incomingFriend("1|H", 42)
+    assert(current:SendData("echo", "native") and #clock.sent == 2
+        and clock.sent[1].prefix == groupPrefix and clock.sent[2].prefix == groupPrefix)
+    clock:advance(29)
+    assert(#clock.sent == 2 and #clock.prefixCalls == 2)
+    clock.prefixResults[friendsPrefix] = 1
+    clock:advance(2)
+    assert(#clock.prefixCalls == 3 and clock.prefixCalls[3] == friendsPrefix
+        and #clock.sent == 3 and clock.sent[3].prefix == friendsPrefix and clock.sent[3].message == "1|H",
+        "A retry registers and uses only the previously refused prefix")
+    clock:incomingFriend("1|A", 42)
+    assert(current.dataState.routes.FRIENDS, "Friends connect after their own registration recovers")
+end
+
 for _, failure in ipairs({ "reject", "throw" }) do
     local current, clock = newAddon({ data = { channels = { friends = false } } })
     clock.prefixResult, clock.prefixThrows = 2, failure == "throw"
