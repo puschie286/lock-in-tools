@@ -4,7 +4,7 @@ local loadAddon, settings = support.loadAddon, support.settings
 local loadOptions = dofile("tests/support/ui.lua")
 local copy = dofile("tests/support/helpers.lua").copy
 
--- Solo, guild, party and raid first logins open the same usable player overview.
+-- Solo, guild, party and raid first logins all open the player overview.
 for _, membership in ipairs({ "solo", "guild", "grouped", "raid" }) do
     local addon, api, _, _, world = loadAddon(nil, false)
     if membership ~= "solo" then world[membership] = true end
@@ -12,22 +12,21 @@ for _, membership in ipairs({ "solo", "guild", "grouped", "raid" }) do
     world:initialize()
     local content = addon.contentPanel
     assert(content:IsVisible() and not addon.optionsPanel and addon.db.setupComplete == true)
-    assert(addon:IsDataConnected() == (membership ~= "solo"),
-        "sharing follows native membership without key generation")
+    assert(addon:IsDataConnected() == (membership == "guild"),
+        "Only guild membership starts sharing without any available Friends")
     assert(not addon.db.group and not addon.db.chat and not addon.db.data.channels.global
         and #world.joinCalls == 0 and #world.dataJoinCalls == 0,
         "initial Content never configures or joins a custom channel")
-    if membership == "solo" then
+    if membership ~= "guild" then
         assert(#addon:GetOverviewPlayers() == 0 and content.overviewPage.empty:IsShown(),
-            "solo Content explains that native guild, party or raid sharing is needed")
+            "Content explains that a sharing route is needed")
     else
         assert(#addon:GetOverviewPlayers() == 1 and content.overviewPage.rows[1].playerID == "self-testrealm")
     end
-    if membership ~= "solo" then
+    if membership == "guild" then
         local presence = assert(world.statusSends[1])
-        local distribution = membership == "guild" and "GUILD" or membership == "raid" and "RAID" or "PARTY"
-        assert(presence.distribution == distribution)
-        world.fire("CHAT_MSG_ADDON", presence.prefix, presence.message, distribution, "NativeFriend")
+        assert(presence.distribution == "GUILD")
+        world.fire("CHAT_MSG_ADDON", presence.prefix, presence.message, "GUILD", "NativeFriend")
         assert(#addon:GetOverviewPlayers() == 2 and content.overviewPage.rows[2].playerID == "nativefriend-testrealm",
             "first-login Content discovers players over the current native route")
     end
@@ -51,14 +50,15 @@ end
 do
     local profile = settings("legacy-friends", true)
     profile.showWelcome = true
-    profile.data = { channels = { party = false, guild = false, global = true } }
+    profile.data = { channels = { party = false, guild = false, friends = false, global = true } }
     local addon, api, _, _, world = loadAddon(profile, false)
     world.guild, world.grouped = true, true
     loadOptions(addon, api)
     world:initialize()
     assert(addon.contentPanel:IsVisible() and not addon:IsDataConnected()
-        and not addon:GetDataChannelEnabled("party") and not addon:GetDataChannelEnabled("guild")
-        and not addon.db.group and not addon.db.chat and not addon.db.data.channels.global,
+        and not addon:GetDataChannelEnabled("guild") and not addon:GetDataChannelEnabled("friends")
+        and not addon.db.group and not addon.db.chat and not addon.db.data.channels.global
+        and addon.db.data.channels.party == nil,
         "first opening preserves native sharing opt-outs and removes obsolete settings")
     addon.contentPanel:Hide()
     addon:OpenContent()
@@ -90,7 +90,7 @@ do
     addon.contentPanel.options:Click()
     local options = addon.optionsPanel
     assert(options.selectedTab == "sharing" and not options.playerDataCleanup:IsEnabled()
-        and not options.dataChannels.party:IsEnabled() and not options.dataChannels.guild:IsEnabled())
+        and not options.dataChannels.guild:IsEnabled() and not options.dataChannels.friends:IsEnabled())
     assert(api.LockInToolsDB == profile and profile.schemaVersion == 5
         and profile.group.secret == support.SECRET and profile.important == "keep"
         and profile.setupComplete == false and profile.showWelcome and not profile.chat.autoJoin

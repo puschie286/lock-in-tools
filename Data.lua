@@ -99,7 +99,7 @@ end
 function addon:GetDataSendStatusText()
     local failures, parts = self.dataState and self.dataState.sendFailures, {}
     if not failures then return "" end
-    for _, route in ipairs({ { "PARTY", "party" }, { "RAID", "raid" }, { "GUILD", "guild" } }) do
+    for _, route in ipairs({ { "GUILD", "legacy guild" }, { "COMPACT_GUILD", "compact guild" } }) do
         local reason = failures[route[1]]
         if reason then parts[#parts + 1] = route[2] .. " (" .. reason .. ")" end
     end
@@ -116,28 +116,26 @@ function addon:SetDataConnected(connected)
     self:NotifyDataConnection()
 end
 
-local function SendFrame(self, message)
-    if not self:IsDataConnected() then return false, "Group data is disconnected." end
+local function SendFrame(self, message, compact)
+    if not self:IsDataConnected() then return false, "Data sharing is disconnected." end
     if not self:IsDataFrame(message) then
         return false, "Data message exceeds the supported format."
     end
-    local routes = self:RefreshDataRoutes()
-    if not self:IsDataConnected() then return false, "Group data is disconnected." end
-    local accepted, changed = false, false
-    local failures = self.dataState.sendFailures
-    for _, distribution in ipairs({ "PARTY", "RAID", "GUILD" }) do
-        local route = routes[distribution]
-        if route then
-            local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, distribution)
-            local reason = self:GetDataSendFailure(ok, result)
-            if not reason then accepted = true end
-            if failures[distribution] ~= reason then
-                failures[distribution], changed = reason, true
-            end
-        end
+    self:RefreshDataRoutes()
+    if not self:IsDataConnected() then return false, "Data sharing is disconnected." end
+    local state = self.dataState
+    if (compact and not state.guildCompactActive) or (not compact and not state.guildLegacyActive) then
+        return false, "Data message was not accepted."
     end
-    if changed then self:Notify("DATA_CHANGED") end
-    if not accepted then return false, "Data message was not accepted." end
+    local prefix = compact and self:GetCompactGuildDataPrefix() or PREFIX
+    local format = compact and "COMPACT_GUILD" or "GUILD"
+    local ok, result = pcall(C_ChatInfo.SendAddonMessage, prefix, message, "GUILD")
+    local reason = self:GetDataSendFailure(ok, result)
+    if state.sendFailures[format] ~= reason then
+        state.sendFailures[format] = reason
+        self:Notify("DATA_CHANGED")
+    end
+    if reason then return false, "Data message was not accepted." end
     return true
 end
 
@@ -164,7 +162,7 @@ end
 
 function addon:RegisterDataFeature(name, receive, connectionChanged)
     local state = self.dataState
-    if not state then return false, "Group data is still loading." end
+    if not state then return false, "Data sharing is still loading." end
     if not ValidFeature(name) or type(receive) ~= "function"
         or (connectionChanged ~= nil and type(connectionChanged) ~= "function") then
         return false, "Invalid data feature registration."
@@ -178,7 +176,7 @@ end
 -- A snapshot request fans out once; each peer may return one payload of its own.
 function addon:RegisterDataRequest(name, onRequest, onResponse)
     local state = self.dataState
-    if not state then return false, "Group data is still loading." end
+    if not state then return false, "Data sharing is still loading." end
     if not ValidFeature(name) or type(onRequest) ~= "function" or type(onResponse) ~= "function" then
         return false, "Invalid data request registration."
     end
@@ -192,26 +190,40 @@ function addon:IsDataSelf(sender)
         and IsSelfName(self, SenderName(self, sender)) or false
 end
 
-function addon:RequestData(feature, payload)
-    if not self:IsDataConnected() then return false, "Group data is disconnected." end
+local function RequestFrame(self, feature, payload, compact)
+    if not self:IsDataConnected() then return false, "Data sharing is disconnected." end
     local state = self.dataState
-    if not ValidFeature(feature) or not state.requests[feature] then return false, "Unknown data request." end
-    if IsSecret(payload) or type(payload) ~= "string" then return false, "Invalid data payload." end
     local targets = SelfNames(self)
     if not next(targets) then return false, "The local player name is unavailable." end
     if state.nextRequestID >= MAX_REQUEST_SEQUENCE then return false, "Data request identifiers exhausted." end
     PruneRequests(state)
     state.nextRequestID = state.nextRequestID + 1
     local id = state.requestSession .. "-" .. string.format("%d", state.nextRequestID)
-    local accepted, problem = SendFrame(self, "1|Q|" .. feature .. "|" .. id .. "|" .. payload)
+    local header = compact and "Q" or "1|Q|" .. feature .. "|"
+    local accepted, problem = SendFrame(self, header .. id .. "|" .. payload, compact)
     if not accepted then return false, problem end
-    state.pendingRequests[id] = { feature = feature, targets = targets,
+    state.pendingRequests[id] = { feature = feature, targets = targets, compact = compact == true,
         expires = GetTime() + REQUEST_WINDOW, responders = {} }
     return true, id
 end
 
+function addon:RequestData(feature, payload)
+    if not self:IsDataConnected() then return false, "Data sharing is disconnected." end
+    if not ValidFeature(feature) or not self.dataState.requests[feature] then return false, "Unknown data request." end
+    if IsSecret(payload) or type(payload) ~= "string" then return false, "Invalid data payload." end
+    return RequestFrame(self, feature, payload)
+end
+
+function addon:RequestCompactGuildStatus(payload)
+    return RequestFrame(self, "status", payload, true)
+end
+
+function addon:SendCompactGuildStatus(payload)
+    return SendFrame(self, payload, true)
+end
+
 function addon:SendData(feature, payload)
-    if not self:IsDataConnected() then return false, "Group data is disconnected." end
+    if not self:IsDataConnected() then return false, "Data sharing is disconnected." end
     if not ValidFeature(feature) or not self.dataState.features[feature] then
         return false, "Unknown data feature."
     end
@@ -219,9 +231,8 @@ function addon:SendData(feature, payload)
     return SendFrame(self, "1|" .. feature .. "|" .. payload)
 end
 
-local function ReceiveRequest(self, sender, body, nativeSender)
+local function ReceiveRequest(self, sender, feature, id, payload, nativeSender, compact)
     local state = self.dataState
-    local feature, id, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
     local normalized = SenderName(self, sender)
     if not feature or not ValidRequestID(id) or not normalized or IsSelfName(self, normalized) then return false end
     local registration = state.requests[feature]
@@ -231,26 +242,37 @@ local function ReceiveRequest(self, sender, body, nativeSender)
     if state.repliedRequests[key] then return false end
     state.repliedRequests[key] = now + REQUEST_WINDOW
     local target = nativeSender and SenderName(self, nativeSender) or normalized
-    local header = "1|R|" .. feature .. "|" .. id .. "|" .. target .. "|"
-    local ok, response = pcall(registration.onRequest, sender, payload, MAX_MESSAGE_BYTES - #header)
-    if not ok or IsSecret(response) or type(response) ~= "string" then return false end
-    return SendFrame(self, header .. response)
+    local header = (compact and "R" or "1|R|" .. feature .. "|") .. id .. "|" .. target .. "|"
+    local ok, response = pcall(registration.onRequest, sender, payload, MAX_MESSAGE_BYTES - #header, compact)
+    local sent = ok and not IsSecret(response) and type(response) == "string" and SendFrame(self, header .. response, compact)
+    -- A malformed request or failed reply must not consume the matching
+    -- discovery request arriving over the other guild prefix.
+    if not sent and feature == "status" then state.repliedRequests[key] = nil end
+    return sent
 end
 
-local function ReceiveResponse(self, sender, body)
-    local feature, id, target, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|([^|]+)|(.*)$")
+local function ReceiveResponse(self, sender, feature, id, target, payload, compact)
     local normalized = SenderName(self, sender)
     if not feature or not ValidRequestID(id) or not normalized or IsSelfName(self, normalized) then return false end
     local state = self.dataState
     PruneRequests(state)
     local request = state.pendingRequests[id]
-    if not request or request.feature ~= feature or not request.targets[target] or request.responders[normalized] then
+    if not request or request.feature ~= feature or not request.targets[target] or request.responders[normalized]
+        or request.compact ~= (compact == true) then
         return false
     end
     local registration = state.requests[feature]
     if not registration then return false end
+    if feature == "status" and not self:DecodeGuildStatus(payload, compact) then return false end
     request.responders[normalized] = true
-    local ok, accepted = pcall(registration.onResponse, sender, payload)
+    local ok, accepted = pcall(registration.onResponse, sender, payload, compact)
+    return ok and accepted ~= false
+end
+
+local function ReceiveFeature(self, sender, feature, payload, compact)
+    local registration = self.dataState.features[feature]
+    if not registration then return false end
+    local ok, accepted = pcall(registration.receive, sender, payload, compact)
     return ok and accepted ~= false
 end
 
@@ -258,12 +280,37 @@ function addon:OnDataMessage(sender, message, nativeSender)
     if IsSecret(sender) or type(sender) ~= "string" or sender == "" or not self:IsDataFrame(message) then return false end
     local kind, body = message:match("^1|([^|]+)|(.*)$")
     if not kind then return false end
-    if kind == "Q" then return ReceiveRequest(self, sender, body, nativeSender) end
-    if kind == "R" then return ReceiveResponse(self, sender, body) end
-    local registration = self.dataState.features[kind]
-    if not registration then return false end
-    local ok, accepted = pcall(registration.receive, sender, body)
-    return ok and accepted ~= false
+    if kind == "Q" then
+        local feature, id, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
+        return ReceiveRequest(self, sender, feature, id, payload, nativeSender)
+    end
+    if kind == "R" then
+        local feature, id, target, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|([^|]+)|(.*)$")
+        return ReceiveResponse(self, sender, feature, id, target, payload)
+    end
+    return ReceiveFeature(self, sender, kind, body)
+end
+
+function addon:ParseCompactGuildStatusFrame(message)
+    if not self:IsDataFrame(message) then return nil end
+    local kind = message:sub(1, 1)
+    if kind == "S" then return kind, message end
+    if kind == "Q" then
+        local id, payload = message:match("^Q([^|]+)|(S.*)$")
+        if ValidRequestID(id) then return kind, payload, id end
+    elseif kind == "R" then
+        local id, target, payload = message:match("^R([^|]+)|([^|%c%-]+%-[^|%s%c]+)|(S.*)$")
+        if ValidRequestID(id) then return kind, payload, id, target end
+    end
+end
+
+function addon:OnCompactGuildDataMessage(sender, message, nativeSender)
+    if IsSecret(sender) or type(sender) ~= "string" or sender == "" then return false end
+    local kind, payload, id, target = self:ParseCompactGuildStatusFrame(message)
+    if kind == "S" then return ReceiveFeature(self, sender, "status", payload, true) end
+    if kind == "Q" then return ReceiveRequest(self, sender, "status", id, payload, nativeSender, true) end
+    if kind == "R" then return ReceiveResponse(self, sender, "status", id, target, payload, true) end
+    return false
 end
 
 function addon:GetPlayerDataCleanupEnabled()

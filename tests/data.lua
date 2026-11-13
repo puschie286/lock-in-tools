@@ -1,4 +1,4 @@
--- Shared feature routing uses mocked native guild, party/raid and friend addon messages.
+-- Shared feature routing uses mocked native guild and friend addon messages.
 local loadNotifications = dofile("tests/support/notifications.lua")
 local helpers = dofile("tests/support/helpers.lua")
 local loadModule, copy, equal = helpers.loadModule, helpers.copy, helpers.equal
@@ -9,10 +9,12 @@ local function newAddon(saved, readOnly, native)
         now = 0, epoch = 2000000000, timers = {}, sent = {}, messages = {}, frames = {},
         nativeSends = {}, prefixCalls = {},
         sendResult = 0, sendCalls = 0, sendAttempts = {},
-        guild = native.guild == true, raid = native.raid == true, friends = native.friends or {},
-        party = native.party == true or (native.party == nil and native.guild == nil and native.raid == nil),
+        guild = native.guild ~= false, party = native.party == true, raid = native.raid == true,
+        friends = native.friends or {},
     }
     world.sent = world.nativeSends
+    -- Most fixtures pin the legacy envelope. Dedicated compact cases register both formats.
+    if not native.compact then world.prefixResults = { LITG = 2 } end
     local environment = setmetatable({
         GetTime = function() return world.now end,
         GetServerTime = function() return world.epoch + math.floor(world.now) end,
@@ -49,11 +51,13 @@ local function newAddon(saved, readOnly, native)
         world.sendCalls = world.sendCalls + 1
         local packet = { prefix = prefix, message = message, distribution = distribution, target = target, at = world.now }
         world.sendAttempts[#world.sendAttempts + 1] = packet
-        if world.sendThrows or (world.routeThrows and world.routeThrows[distribution]) then
+        if world.sendThrows or (world.routeThrows and world.routeThrows[distribution])
+            or (world.prefixSendThrows and world.prefixSendThrows[prefix]) then
             error(world.sendError or "Native send unavailable")
         end
         world.nativeSends[#world.nativeSends + 1] = packet
-        local result = world.routeResults and world.routeResults[distribution]
+        local result = world.prefixSendResults and world.prefixSendResults[prefix]
+        if result == nil then result = world.routeResults and world.routeResults[distribution] end
         if result ~= nil then return result end
         return world.sendResult
     end
@@ -67,8 +71,7 @@ local function newAddon(saved, readOnly, native)
             if distribution == "WHISPER" then
                 assert(type(target) == "string" and target ~= "", "Addon whispers target one character")
             else
-                assert(distribution == "GUILD" or distribution == "PARTY" or distribution == "RAID",
-                    "Shared data broadcasts only through native guild and party/raid routes")
+                assert(distribution == "GUILD", "Shared data broadcasts only through guild")
                 assert(target == nil, "Native broadcast routes have no channel target")
             end
             return send(prefix, message, distribution, target)
@@ -110,7 +113,7 @@ local function newAddon(saved, readOnly, native)
     function world:incoming(message, sender, metadata)
         metadata = metadata or {}
         return self:fire("CHAT_MSG_ADDON", metadata.prefix or addon:GetDataPrefix(), message,
-            metadata.distribution or "PARTY", sender)
+            metadata.distribution or "GUILD", sender)
     end
     function world:incomingFriend(message, sender, prefix)
         prefix = prefix or addon:GetFriendsDataPrefix()
@@ -127,20 +130,20 @@ local function newAddon(saved, readOnly, native)
             self.previousMembership = nil
         end
         if not addon.dataState.nativeStarted then self:login()
-        else self:fire("GROUP_ROSTER_UPDATE") end
+        else self:fire("PLAYER_GUILD_UPDATE", "player") end
     end
     function world:disconnect()
         self.previousMembership = { self.party, self.raid, self.guild }
         self.party, self.raid, self.guild = false, false, false
-        self:fire("GROUP_ROSTER_UPDATE")
+        self:fire("PLAYER_GUILD_UPDATE", "player")
     end
     function addon:ReceiveData(sender, message, distribution)
-        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, distribution or "PARTY", sender)
+        return self:OnDataEvent("CHAT_MSG_ADDON", self:GetDataPrefix(), message, distribution or "GUILD", sender)
     end
-    function world:activeTimers()
+    function world:activeTimers(includeRegistration)
         local count = 0
         for _, timer in ipairs(self.timers) do
-            if not timer.cancelled then count = count + 1 end
+            if not timer.cancelled and (includeRegistration or timer ~= addon.dataState.timer) then count = count + 1 end
         end
         return count
     end
@@ -662,7 +665,7 @@ do
 
     local alice = { id = "alice-oak", name = "Alice-Oak", displayName = "Alice Oak", gameAccountID = 21 }
     local _, peerClock, peerSamples = statusFixture({ level = 25 }, true, {
-        party = false, friends = { [alice.id] = alice },
+        guild = false, friends = { [alice.id] = alice },
         configure = function(environment) setRealm(environment, "Bob Fern", bobRealm) end,
     })
     peerClock:advance(5)
@@ -738,7 +741,7 @@ do
     clock:advance(5)
     assert(#samples == 3 and #clock.sent == sends and current:IsDataConnected(),
         "Friends opt-out stops friend traffic while the native guild route stays connected")
-    local reopened, freshClock = newAddon(current.db, false, { party = false, friends = clock.friends })
+    local reopened, freshClock = newAddon(current.db, false, { guild = false, friends = clock.friends })
     freshClock:login()
     freshClock:advance(5)
     assert(not reopened:GetDataChannelEnabled("friends") and not reopened:IsDataConnected() and #freshClock.sent == 0,
@@ -837,7 +840,7 @@ do
     local peer = { id = "bob-fern", name = "Bob-Fern", displayName = "Bob Fern",
         gameAccountID = 42, whisper = "Bob Fern" }
     local current, clock, samples = statusFixture({ level = 24 }, true, {
-        party = false, friends = { [peer.id] = peer },
+        guild = false, friends = { [peer.id] = peer },
     })
     clock:advance(1)
     assert(#clock.sent == 1 and clock.sent[1].message == "1|H" and clock.sent[1].distribution == "BATTLENET"
@@ -868,17 +871,16 @@ do
     assert(#samples == 1 and samples[1].fields.level == "25", "An unknown field does not prevent reading known values")
 end
 
--- A party roster change drops contact for that audience, including a replacement
--- party that never appeared disconnected. A valid duplicate still proves contact.
+-- A local guild change drops cached guild contact. A valid duplicate still proves contact.
 do
     local peer = { id = "bob-fern", name = "Bob-Fern", displayName = "Bob Fern", gameAccountID = 42 }
     local values = { level = 24 }
-    local current, clock, samples = statusFixture(values, true, { party = true, friends = { [peer.id] = peer } })
+    local current, clock, samples = statusFixture(values, true, { guild = true, friends = { [peer.id] = peer } })
     clock:advance(1)
     clock:incomingFriend("1|A", 42)
     local snapshot = "1|status|" .. full("77359400-0-1", 2000000001, 1, "1=25")
     clock:incomingFriend(friendsStatus(current, 2000000001, 1, { [1] = "25" }), 42)
-    clock:incoming(snapshot, peer.name, { distribution = "PARTY" })
+    clock:incoming(snapshot, peer.name)
     clock:advance(5)
     assert(#samples == 1, "The second copy is a valid duplicate, not another status update")
     local function friendHasLevel(level)
@@ -888,22 +890,22 @@ do
         return false
     end
     assert(not friendHasLevel(24), "A valid duplicate proves native contact and avoids a direct snapshot")
-    clock:fire("GROUP_ROSTER_UPDATE")
-    clock:incoming("1|status|5|F|malformed", peer.name, { distribution = "PARTY" })
-    clock:incoming("1|Q|status|invalid!|" .. snapshot:sub(10), peer.name, { distribution = "PARTY" })
-    clock:incoming("1|R|status|valid-id|someone-testrealm|malformed", peer.name, { distribution = "PARTY" })
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    clock:incoming("1|status|5|F|malformed", peer.name)
+    clock:incoming("1|Q|status|invalid!|" .. snapshot:sub(10), peer.name)
+    clock:incoming("1|R|status|valid-id|someone-testrealm|malformed", peer.name)
     values.level = 26
     clock:advance(5)
-    assert(friendHasLevel(26), "A replaced party and malformed frames cannot suppress a direct snapshot")
+    assert(friendHasLevel(26), "A guild change and malformed frames cannot suppress a direct snapshot")
 
-    clock:incoming(snapshot, peer.name, { distribution = "PARTY" })
-    clock.party = false
-    clock:fire("GROUP_ROSTER_UPDATE")
-    clock.party = true
-    clock:fire("GROUP_ROSTER_UPDATE")
+    clock:incoming(snapshot, peer.name)
+    clock.guild = false
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
+    clock.guild = true
+    clock:fire("PLAYER_GUILD_UPDATE", "player")
     values.level = 27
     clock:advance(10)
-    assert(friendHasLevel(27), "Immediately joining another party does not restore stale party contact")
+    assert(friendHasLevel(27), "Immediately joining another guild does not restore stale guild contact")
 end
 
 -- ACKs stay distinct by transport. An outgoing Battle.net failure falls back
@@ -912,7 +914,7 @@ for _, whisperConfirmed in ipairs({ true, false }) do
     local peer = { id = "bob-fern", name = "Bob-Fern", displayName = "Bob Fern",
         gameAccountID = 42, whisper = "Bob Fern" }
     local values = { level = 24 }
-    local current, clock = statusFixture(values, true, { party = false, friends = { [peer.id] = peer } })
+    local current, clock = statusFixture(values, true, { guild = false, friends = { [peer.id] = peer } })
     clock:advance(1)
     if whisperConfirmed then
         clock:incomingFriend("1|H", 42)
@@ -1638,7 +1640,7 @@ do
     clock.sendResult = 11
     assert(not current:SendData("echo", private) and current:IsDataConnected())
     local status = current:GetDataStatusText()
-    assert(status:find("Send failures: guild", 1, true) and status:find("AddOnMessageLockdown", 1, true)
+    assert(status:find("Send failures: legacy guild", 1, true) and status:find("AddOnMessageLockdown", 1, true)
         and status:find("11", 1, true) and not status:find(private, 1, true),
         "Status reports rejected guild messages even though membership remains active")
     assert(notices == 1)
@@ -1676,28 +1678,27 @@ do
 end
 
 
--- Native audiences work without a key and never accept custom-channel data.
-for _, distribution in ipairs({ "PARTY", "RAID", "GUILD" }) do
-    local membership = { party = false, raid = false, guild = false }
-    membership[distribution:lower()] = true
-    local current, clock = newAddon(nil, false, membership)
+-- Guild works without a key and accepts only GUILD distribution.
+do
+    local current, clock = newAddon(nil, false, { guild = true, party = true })
     local received = 0
     assert(current:RegisterDataFeature("echo", function() received = received + 1 end))
     assert(not current:HasDataGroup() or not current:IsDataConnected())
     clock:login()
-    assert(current:IsDataConnected() and current:HasDataGroup() and current.dataState.routes[distribution])
+    assert(current:IsDataConnected() and current:HasDataGroup() and current.dataState.routes.GUILD)
     assert(current:SendData("echo", "native") and #clock.sent == 1
-        and clock.sent[1].distribution == distribution)
-    assert(current:ReceiveData("Friend", "1|echo|native", distribution) and received == 1)
-    assert(not current:ReceiveData("Friend", "1|echo|retired", "CHANNEL")
-        and not current:ReceiveData("Friend", "1|echo|whisper", "WHISPER") and received == 1)
-    assert(current:GetDataStatusText() == "Data routes: " .. distribution:lower() .. ".")
+        and clock.sent[1].distribution == "GUILD")
+    assert(current:ReceiveData("Friend", "1|echo|native", "GUILD") and received == 1)
+    for _, route in ipairs({ "PARTY", "RAID", "CHANNEL", "WHISPER" }) do
+        assert(not current:ReceiveData("Friend", "1|echo|retired", route) and received == 1)
+    end
+    assert(current:GetDataStatusText():match("^Data routes: guild%."))
     assert(not current:GetDataChannelEnabled("global") and not current:SetDataChannelEnabled("global", true))
     clock:advance(60)
     assert(clock:activeTimers() == 0, "A native connection needs no transport watchdog")
 end
 
--- Membership changes preserve request caches while another audience remains.
+-- Party and raid changes preserve guild request caches and cannot maintain a connection alone.
 do
     local current, clock = newAddon(nil, false, { party = true, guild = true })
     local notices = {}
@@ -1705,19 +1706,16 @@ do
     current:RegisterDataRequest("snapshot", function() return "own" end, function() end)
     clock:login()
     local _, id = current:RequestData("snapshot", "pending")
-    assert(current:ReceiveData("Friend", "1|Q|snapshot|peer|", "PARTY"))
+    assert(current:ReceiveData("Friend", "1|Q|snapshot|peer|", "GUILD"))
     local pending, replied, count = current.dataState.pendingRequests, current.dataState.repliedRequests, #notices
     clock.party, clock.raid = false, true
     clock:fire("GROUP_ROSTER_UPDATE")
-    assert(current.dataState.routes.RAID and current.dataState.routes.GUILD and not current.dataState.routes.PARTY)
+    assert(current.dataState.routes.GUILD and not current.dataState.routes.RAID and not current.dataState.routes.PARTY)
     assert(current.dataState.pendingRequests == pending and pending[id]
         and current.dataState.repliedRequests == replied and next(replied) and #notices == count)
     clock.guild = false
     clock:fire("PLAYER_GUILD_UPDATE", "player")
-    assert(current:IsDataConnected() and #notices == count)
-    clock.raid = false
-    clock:fire("GROUP_ROSTER_UPDATE")
-    assert(not current:IsDataConnected() and notices[#notices] == false
+    assert(not current:IsDataConnected() and clock.raid and #notices == count + 1 and notices[#notices] == false
         and next(current.dataState.pendingRequests) == nil and next(current.dataState.repliedRequests) == nil)
     clock.guild = true
     clock:fire("PLAYER_ENTERING_WORLD")
@@ -1729,7 +1727,7 @@ end
 
 -- Sending rechecks membership even before the native roster event arrives.
 do
-    local current, clock = newAddon(nil, false, { party = true })
+    local current, clock = newAddon(nil, false, { guild = true, party = true })
     current:RegisterDataFeature("echo", function() end)
     current:RegisterDataRequest("snapshot", function() return "own" end, function() end)
     clock:login()
@@ -1737,13 +1735,13 @@ do
     assert(accepted and current.dataState.pendingRequests[id])
     clock.party, clock.raid = false, true
     local before = #clock.sendAttempts
-    assert(current:SendData("echo", "raid before roster update")
+    assert(current:SendData("echo", "guild before roster update")
         and #clock.sendAttempts == before + 1
-        and clock.sendAttempts[#clock.sendAttempts].distribution == "RAID"
-        and current.dataState.routes.RAID and not current.dataState.routes.PARTY
+        and clock.sendAttempts[#clock.sendAttempts].distribution == "GUILD"
+        and current.dataState.routes.GUILD and not current.dataState.routes.RAID
         and current.dataState.pendingRequests[id],
-        "A send follows current raid membership while retaining its live request cache")
-    clock.raid = false
+        "A send follows guild membership while retaining its live request cache")
+    clock.guild = false
     before = #clock.sendAttempts
     assert(not current:SendData("echo", "left before roster update")
         and #clock.sendAttempts == before and not current:IsDataConnected()
@@ -1751,42 +1749,30 @@ do
         "Losing the final membership disconnects before attempting the native send")
 end
 
--- Every route gets the same serialized frame even when another route fails.
+-- Guild requests deduplicate repeated frames while streams retain their receive semantics.
 do
-    local current, clock = newAddon(nil, false, { party = true, guild = true })
+    local current, clock = newAddon(nil, false, { guild = true })
     local receives, requests, responses = 0, 0, 0
     current:RegisterDataFeature("echo", function() receives = receives + 1 end)
     current:RegisterDataRequest("snapshot", function() requests = requests + 1; return "own" end,
         function() responses = responses + 1 end)
     clock:login()
-    for index, failure in ipairs({ "reject", "throw", "both" }) do
-        clock.routeResults = { PARTY = 11, GUILD = failure == "both" and 11 or 0 }
-        clock.routeThrows = failure == "throw" and { PARTY = true } or nil
-        local before = #clock.sendAttempts
-        assert(current:SendData("echo", "fanout-" .. index) == (failure ~= "both"))
-        assert(#clock.sendAttempts == before + 2)
-        assert(clock.sendAttempts[before + 1].distribution == "PARTY"
-            and clock.sendAttempts[before + 2].distribution == "GUILD"
-            and clock.sendAttempts[before + 1].message == clock.sendAttempts[before + 2].message)
-    end
-    clock.routeResults, clock.routeThrows = nil, nil
     local before = #clock.sendAttempts
     local accepted, id = current:RequestData("snapshot", "shared")
-    assert(accepted and #clock.sendAttempts == before + 2 and current:GetDataSendStatusText() == "")
-    assert(clock.sendAttempts[before + 1].message == "1|Q|snapshot|" .. id .. "|shared"
-        and clock.sendAttempts[before + 1].message == clock.sendAttempts[before + 2].message)
+    assert(accepted and #clock.sendAttempts == before + 1 and current:GetDataSendStatusText() == "")
+    assert(clock.sendAttempts[before + 1].message == "1|Q|snapshot|" .. id .. "|shared")
     local first = true
-    for _, route in ipairs({ "PARTY", "GUILD" }) do
-        assert(current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer", route) == first)
-        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-overlap|", route) == first)
-        assert(current:ReceiveData("Friend", "1|echo|feature duplicate", route))
+    for _ = 1, 2 do
+        assert(current:ReceiveData("Friend", "1|R|snapshot|" .. id .. "|self-testrealm|answer") == first)
+        assert(current:ReceiveData("Friend", "1|Q|snapshot|peer-overlap|") == first)
+        assert(current:ReceiveData("Friend", "1|echo|feature duplicate"))
         first = false
     end
     assert(responses == 1 and requests == 1 and receives == 2,
-        "Request deduplication spans routes; streaming features keep their own receive semantics")
+        "Duplicate requests and replies dispatch once; streaming features keep their own receive semantics")
 end
 
--- Enabled switches govern sends and receives, including raid through party.
+-- The guild switch governs sends and receives independently of gameplay groups.
 do
     local current, clock = newAddon({ data = { channels = { party = false, guild = true, friends = false } } }, false,
         { guild = true, raid = true })
@@ -1796,9 +1782,8 @@ do
     assert(not current:ReceiveData("Friend", "1|echo|disabled", "RAID"))
     assert(current:SetDataChannelEnabled("guild", false) and not current:IsDataConnected())
     assert(current:GetDataStatusText() == "All data channels are disabled.")
-    assert(current:SetDataChannelEnabled("party", true) and current:IsDataConnected()
-        and current.dataState.routes.RAID and not current.dataState.routes.GUILD)
-    assert(current:SendData("echo", "raid") and clock.sent[#clock.sent].distribution == "RAID")
+    assert(not current:SetDataChannelEnabled("party", true) and not current:IsDataConnected()
+        and not current:SendData("echo", "raid") and #clock.sent == 0)
     assert(not current:SetDataChannelEnabled("party", "yes") and not current:SetDataChannelEnabled("raid", true))
     clock:fire("PLAYER_LOGOUT")
     local sends = #clock.sent
@@ -1807,7 +1792,7 @@ do
     assert(not current:IsDataConnected() and #clock.sent == sends)
 end
 
--- A new audience requests discovery without replacing the active status session.
+-- Native group changes do not trigger guild discovery or replace the status session.
 do
     local current, clock = statusFixture({ level = 24 }, true, { guild = true })
     local status, pending, before = current.dataState.status, current.dataState.pendingRequests, #clock.sent
@@ -1816,49 +1801,246 @@ do
     clock:fire("GROUP_ROSTER_UPDATE")
     clock:advance(5)
     assert(status.session == session and current.dataState.pendingRequests == pending)
-    assert(#clock.sent == before + 2 and clock.sent[before + 1].message:match("^1|Q|status|")
-        and clock.sent[before + 1].message == clock.sent[before + 2].message)
+    assert(#clock.sent == before)
+end
+
+-- A modern client discovers legacy guild peers first and responds in the
+-- format received from a client whose legacy prefix is unavailable.
+do
+    local function client(name, level, compact, refused)
+        return statusFixture({ level = level }, true, { playerName = name, guild = true, compact = compact,
+            configure = function(_, world)
+                if refused then world.prefixResults = { [refused] = 2 } end
+            end })
+    end
+    local current, clock, samples = client("Alice", 24, true)
+    local old, oldClock, oldSamples = client("Bob", 25, false)
+    local compactOnly, compactClock, compactSamples = client("Carol", 26, true, "LockInToolsData")
+    local oldPrefix, compactPrefix = current:GetDataPrefix(), current:GetCompactGuildDataPrefix()
+    local function packetOn(world, prefix, pattern)
+        for _, packet in ipairs(world.sent) do
+            if packet.prefix == prefix and packet.message:match(pattern) then return packet end
+        end
+    end
+    local function deliver(world, packet, sender, route)
+        world:incoming(packet.message, sender, { distribution = route or "GUILD", prefix = packet.prefix })
+    end
+    local legacy = assert(packetOn(clock, oldPrefix, "^1|Q|status|"))
+    local compact = assert(packetOn(compactClock, compactPrefix, "^Q"))
+    local id, encoded = compact.message:match("^Q([^|]+)|(S.*)$")
+    assert(id and assert(current:DecodeFriendsStatus(encoded)).fields[1] == "26"
+        and #clock.sent == 1 and #oldClock.sent == 1 and #compactClock.sent == 1,
+        "Each client sends a single discovery request on its preferred available prefix")
+    assert(not old.dataState.guildCompactActive and not compactOnly.dataState.guildLegacyActive)
+    assert(old:IsDataConnected() and compactOnly:IsDataConnected())
+    assert(compactOnly:RegisterDataFeature("echo", function() end))
+    assert(not compactOnly:SendData("echo", "legacy only"), "A compact-only guild sends status frames only")
+
+    deliver(oldClock, compact, "Carol")
+    deliver(compactClock, legacy, "Alice")
+    assert(#oldSamples == 0 and #compactSamples == 0, "An unavailable guild prefix is ignored")
+    deliver(oldClock, legacy, "Alice")
+    assert(#oldSamples == 1 and oldSamples[1].fields.level == "24")
+    local legacyReply = assert(packetOn(oldClock, oldPrefix, "^1|R|status|"))
+    deliver(clock, legacyReply, "Bob")
+    deliver(clock, compact, "Carol")
+    local compactReply = assert(packetOn(clock, compactPrefix, "^R"))
+    assert(compactReply.message:match("^R([^|]+)|") == id)
+    compactClock:incoming(compactReply.message:gsub("|S.*$", "|S"), "Alice", { prefix = compactPrefix })
+    assert(#compactSamples == 0, "A malformed reply does not consume the sender's response slot")
+    deliver(compactClock, compactReply, "Alice")
+    assert(#compactSamples == 1 and compactSamples[1].fields.level == "24")
+    assert(#samples == 2 and samples[1].fields.level == "25" and samples[2].fields.level == "26",
+        "A modern client exchanges full status with both guild formats")
+
+    local carolSession = assert(current:DecodeFriendsStatus(encoded)).session
+    local legacyNew = "1|status|" .. full(carolSession, 2000000005, 2, "1=27")
+    local compactNew = friendsStatus(current, 2000000005, 2, { [1] = "27" }, carolSession)
+    for _, route in ipairs({ "PARTY", "RAID", "CHANNEL", "WHISPER" }) do
+        clock:incoming(legacyNew, "Carol", { distribution = route, prefix = oldPrefix })
+        clock:incoming(compactNew, "Carol", { distribution = route, prefix = compactPrefix })
+    end
+    clock:incoming(legacyNew, "Carol", { prefix = compactPrefix })
+    clock:incoming(compactNew, "Carol", { prefix = oldPrefix })
+    clock:incoming(compactNew, "Carol", { prefix = current:GetFriendsDataPrefix() })
+    assert(#samples == 2, "The native guild formats and Friends prefix are isolated from other routes")
+    clock:incoming(compactNew, "Carol", { prefix = compactPrefix })
+    clock:incoming(legacyNew, "Carol", { prefix = oldPrefix })
+    clock:incoming(friendsStatus(current, 2000000006, 1, { [1] = "28" }, carolSession), "Carol", { prefix = compactPrefix })
+    assert(#samples == 3 and samples[3].fields.level == "27", "Duplicates and older revisions cannot overwrite status")
+
+    local before = #clock.sent
+    clock:incoming("Qfallback|S", "Bob", { prefix = compactPrefix })
+    clock:incoming("1|Q|status|fallback|" .. full("bob", 2000000007, 1, "1=25"), "Bob", { prefix = oldPrefix })
+    assert(#clock.sent == before + 1 and clock.sent[#clock.sent].prefix == oldPrefix
+        and clock.sent[#clock.sent].message:match("^1|R|status|fallback|"),
+        "A malformed compact request leaves the corresponding legacy discovery answerable")
+end
+
+-- Guild publishes at most one accepted format per tick and includes the latest
+-- fields in the legacy baseline even when they change at the deadline.
+do
+    local values = { level = 24 }
+    local current, clock = statusFixture(values, true, { compact = true, guild = true })
+    local legacy, compact = current:GetDataPrefix(), current:GetCompactGuildDataPrefix()
+    local _, oldClock, oldSamples = statusFixture({ level = 30 }, true, { playerName = "Old", guild = true })
+    local _, newClock, newSamples = statusFixture({ level = 30 }, true,
+        { playerName = "New", guild = true, compact = true })
+    local function deliver(packet)
+        oldClock:incoming(packet.message, "Self", { prefix = packet.prefix })
+        newClock:incoming(packet.message, "Self", { prefix = packet.prefix })
+    end
+    assert(#clock.sent == 1 and clock.sent[1].prefix == legacy and clock.sent[1].at == 0
+        and clock.sent[1].message:match("^1|Q|status|.*|1=24$"))
+    deliver(clock.sent[1])
+    assert(oldSamples[1].fields.level == "24" and newSamples[1].fields.level == "24")
+
+    values.level = 25
+    clock:advance(5)
+    assert(#clock.sent == 2 and clock.sent[2].prefix == compact and clock.sent[2].at == 5
+        and assert(current:DecodeFriendsStatus(clock.sent[2].message)).fields[1] == "25")
+    deliver(clock.sent[2])
+    assert(#oldSamples == 1 and #newSamples == 2 and newSamples[2].fields.level == "25")
+    clock:advance(24)
+    assert(#clock.sent == 2, "Unchanged status does not generate another guild packet before the legacy baseline")
+
+    values.level = 26
+    clock:advance(1)
+    assert(#clock.sent == 3 and clock.sent[3].prefix == legacy and clock.sent[3].at == 30
+        and clock.sent[3].message:match("^1|status|.*|1=26$"),
+        "Legacy baseline takes priority and publishes the latest revision once")
+    deliver(clock.sent[3])
+    assert(#oldSamples == 2 and oldSamples[2].fields.level == "26"
+        and #newSamples == 3 and newSamples[3].fields.level == "26",
+        "The legacy baseline updates old and current clients to the same latest value")
+    clock:advance(29)
+    assert(#clock.sent == 3, "A legacy baseline covers current clients without a follow-up compact snapshot")
+    clock:advance(1)
+    assert(#clock.sent == 4 and clock.sent[4].prefix == legacy and clock.sent[4].at == 60
+        and clock.sent[4].message:match("^1|status|.*|1=26$"))
+end
+
+-- Each format keeps the ordinary cadence when registration leaves it as the
+-- only available guild prefix.
+for _, prefix in ipairs({ "LockInToolsData", "LITG" }) do
+    local values = { level = 24 }
+    local other = prefix == "LITG" and "LockInToolsData" or "LITG"
+    local _, clock = statusFixture(values, true, { compact = true, guild = true,
+        configure = function(_, world) world.prefixResults = { [other] = 2 } end,
+    })
+    assert(#clock.sent == 1 and clock.sent[1].prefix == prefix and clock.sent[1].at == 0)
+    values.level = 25
+    clock:advance(34)
+    assert(#clock.sent == 2 and clock.sent[2].prefix == prefix and clock.sent[2].at == 5)
+    clock:advance(1)
+    assert(#clock.sent == 3 and clock.sent[3].prefix == prefix and clock.sent[3].at == 35,
+        "A single guild format refreshes after thirty seconds without change")
+end
+
+do
+    local _, clock = statusFixture({ level = 24 }, true, { compact = true, guild = true,
+        configure = function(_, world) world.prefixResults = { LockInToolsData = 2 } end,
+    })
+    assert(#clock.sent == 1 and clock.sent[1].prefix == "LITG" and clock.sent[1].message:match("^Q"))
+    clock.prefixResults.LockInToolsData = 0
+    clock:advance(35)
+    assert(#clock.sent == 2 and clock.sent[2].prefix == "LockInToolsData"
+        and clock.sent[2].message:match("^1|status|.*|1=24$"),
+        "A recovered legacy prefix publishes a baseline without repeating discovery")
 end
 
 -- Prefix failures retry once per interval; disabling every route cancels work.
 do
     local peer = { id = "bob-fern", name = "Bob-Fern", gameAccountID = 42 }
-    local current, clock = newAddon(nil, false, { guild = true, party = true, friends = { [peer.id] = peer } })
+    local current, clock = newAddon(nil, false, { guild = true, compact = true, friends = { [peer.id] = peer } })
     local groupPrefix, friendsPrefix = current:GetDataPrefix(), current:GetFriendsDataPrefix()
     assert(current:RegisterDataFeature("echo", function() end))
     clock.prefixResults = { [friendsPrefix] = 2 }
     clock:login()
-    assert(current:IsDataConnected() and current.dataState.routes.GUILD and current.dataState.routes.PARTY
-        and not current.dataState.routes.FRIENDS, "A refused Friends prefix leaves guild and party operational")
+    assert(current:IsDataConnected() and current.dataState.routes.GUILD and not current.dataState.routes.FRIENDS,
+        "A refused Friends prefix leaves guild operational")
     clock:incomingFriend("1|H", 42)
-    assert(current:SendData("echo", "native") and #clock.sent == 2
-        and clock.sent[1].prefix == groupPrefix and clock.sent[2].prefix == groupPrefix)
+    assert(current:SendData("echo", "native") and #clock.sent == 1 and clock.sent[1].prefix == groupPrefix)
     clock:advance(29)
-    assert(#clock.sent == 2 and #clock.prefixCalls == 2)
+    assert(#clock.sent == 1 and #clock.prefixCalls == 3)
     clock.prefixResults[friendsPrefix] = 1
     clock:advance(2)
-    assert(#clock.prefixCalls == 3 and clock.prefixCalls[3] == friendsPrefix
-        and #clock.sent == 3 and clock.sent[3].prefix == friendsPrefix and clock.sent[3].message == "1|H",
+    assert(#clock.prefixCalls == 4 and clock.prefixCalls[4] == friendsPrefix
+        and #clock.sent == 2 and clock.sent[2].prefix == friendsPrefix and clock.sent[2].message == "1|H",
         "A retry registers and uses only the previously refused prefix")
     clock:incomingFriend("1|A", 42)
     assert(current.dataState.routes.FRIENDS, "Friends connect after their own registration recovers")
 end
 
+-- A failed legacy discovery may still publish to current peers, without a
+-- second discovery. The legacy request stays due until it succeeds.
+do
+    local current, clock = statusFixture({ level = 24 }, true, { compact = true, guild = true,
+        configure = function(_, world) world.prefixSendResults = { LockInToolsData = 11 } end,
+    })
+    assert(current:IsDataConnected() and #clock.sendAttempts == 2
+        and clock.sendAttempts[1].prefix == "LockInToolsData" and clock.sendAttempts[1].message:match("^1|Q|status|")
+        and clock.sendAttempts[2].prefix == "LITG" and clock.sendAttempts[2].message:match("^S")
+        and next(current.dataState.pendingRequests) == nil)
+    clock.prefixSendResults.LockInToolsData = 0
+    clock:advance(5)
+    assert(#clock.sendAttempts == 3 and clock.sendAttempts[3].prefix == "LockInToolsData"
+        and clock.sendAttempts[3].message:match("^1|Q|status|") and next(current.dataState.pendingRequests)
+        and current:GetDataSendStatusText() == "", "Legacy discovery retries at the next eligible tick")
+end
+
+-- Rejected updates can fall back without two accepted copies. A failed legacy
+-- baseline stays due until it succeeds.
+do
+    local values = { level = 24 }
+    local current, clock = statusFixture(values, true, { compact = true, guild = true })
+    local legacy, compact = current:GetDataPrefix(), current:GetCompactGuildDataPrefix()
+    clock.prefixSendResults = { [compact] = 11 }
+    values.level = 25
+    clock:advance(5)
+    assert(#clock.sendAttempts == 3 and clock.sendAttempts[2].prefix == compact
+        and clock.sendAttempts[3].prefix == legacy and clock.sendAttempts[3].at == 5
+        and current:GetDataSendStatusText():find("compact guild", 1, true),
+        "A rejected compact update falls back once to legacy and reports the compact failure")
+    clock.prefixSendResults = {}
+    values.level = 26
+    clock:advance(5)
+    assert(#clock.sendAttempts == 4 and clock.sendAttempts[4].prefix == compact
+        and current:GetDataSendStatusText() == "")
+    clock.prefixSendResults[legacy] = 11
+    clock:advance(25)
+    assert(#clock.sendAttempts == 5 and clock.sendAttempts[5].prefix == legacy and clock.sendAttempts[5].at == 35
+        and current:GetDataSendStatusText():find("legacy guild", 1, true),
+        "A rejected legacy baseline does not re-send already-current compact status")
+    clock.prefixSendResults[legacy] = 0
+    clock:advance(5)
+    assert(#clock.sendAttempts == 6 and clock.sendAttempts[6].prefix == legacy and clock.sendAttempts[6].at == 40
+        and current:GetDataSendStatusText() == "", "The failed legacy baseline retries on the next eligible tick")
+    clock.prefixSendResults[legacy] = 11
+    clock:advance(25)
+    values.level = 27
+    clock:advance(5)
+    assert(#clock.sendAttempts == 8 and clock.sendAttempts[7].prefix == legacy
+        and clock.sendAttempts[8].prefix == compact and clock.sendAttempts[8].at == 70
+        and assert(current:DecodeFriendsStatus(clock.sendAttempts[8].message)).fields[1] == "27",
+        "A rejected legacy baseline can publish changed status once over compact")
+end
+
 for _, failure in ipairs({ "reject", "throw" }) do
-    local current, clock = newAddon({ data = { channels = { friends = false } } })
+    local current, clock = newAddon({ data = { channels = { friends = false } } }, false, { compact = true })
     clock.prefixResult, clock.prefixThrows = 2, failure == "throw"
     clock:login()
-    assert(not current:IsDataConnected() and clock:activeTimers() == 1)
+    assert(not current:IsDataConnected() and clock:activeTimers(true) == 1)
     for _ = 1, 20 do clock:fire("GROUP_ROSTER_UPDATE"); clock:fire("PLAYER_ENTERING_WORLD") end
     clock:advance(29)
-    assert(#clock.prefixCalls == 1 and clock:activeTimers() == 1)
+    assert(#clock.prefixCalls == 2 and clock:activeTimers(true) == 1)
     clock:advance(1)
-    assert(#clock.prefixCalls == 2 and clock:activeTimers() == 1)
-    assert(current:SetDataChannelEnabled("party", false) and current:SetDataChannelEnabled("guild", false))
-    assert(clock:activeTimers() == 0)
+    assert(#clock.prefixCalls == 4 and clock:activeTimers(true) == 1)
+    assert(current:SetDataChannelEnabled("guild", false))
+    assert(clock:activeTimers(true) == 0)
     clock.prefixResult, clock.prefixThrows = 1, false
-    assert(current:SetDataChannelEnabled("party", true) and current:IsDataConnected()
-        and clock:activeTimers() == 0, "A duplicate registered prefix is reusable")
+    assert(current:SetDataChannelEnabled("guild", true) and current:IsDataConnected()
+        and clock:activeTimers(true) == 0, "A duplicate registered prefix is reusable")
 end
 
 do
@@ -1866,7 +2048,7 @@ do
         environment.C_ChatInfo.SendAddonMessage = false
     end })
     clock:login()
-    assert(not current:IsDataConnected() and current:GetDataStatusText() == "The native group-data API is unavailable.")
+    assert(not current:IsDataConnected() and current:GetDataStatusText() == "The native addon messaging API is unavailable.")
     clock.environment.C_ChatInfo.SendAddonMessage = function() return 0 end
     clock:advance(60)
     assert(not current:IsDataConnected() and #clock.prefixCalls == 0 and clock:activeTimers() == 0,

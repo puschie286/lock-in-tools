@@ -861,7 +861,7 @@ function addon:RefreshRankingOverlay()
     local hasStandings = ranking.grouped or ranking.hasFriends
     local players, own = hasStandings and ranking.players or {}, ranking.own
     if not hasStandings then
-        panel.empty:SetText("Waiting for Friends, guild, or group sharing. You can also choose players in Content > Friends.")
+        panel.empty:SetText("Waiting for guild or Friends sharing. You can also choose players in Content > Friends.")
         own = nil
     else
         panel.empty:SetText("Waiting for shown players with usable progress.")

@@ -1,7 +1,7 @@
 local _, addon = ...
 
-local CHANNEL_OPTIONS = { party = true, guild = true, friends = true }
-local FRIENDS_PREFIX = "LITF"
+local CHANNEL_OPTIONS = { guild = true, friends = true }
+local FRIENDS_PREFIX, COMPACT_GUILD_PREFIX = "LITF", "LITG"
 local PREFIX_RETRY_DELAY = 30
 local FRIEND_SEND_GAP, FRIEND_PROBE_INTERVAL, FRIEND_TIMEOUT = 0.5, 30, 90
 local NATIVE_CONTACT_TIMEOUT = 45
@@ -21,16 +21,16 @@ local function CanUseData(self)
         and not self.dataState.stopped
 end
 
-local function NativeEnabled(self)
-    return self:GetDataChannelEnabled("party") or self:GetDataChannelEnabled("guild")
-end
-
 local function Enabled(self)
-    return NativeEnabled(self) or self:GetDataChannelEnabled("friends")
+    return self:GetDataChannelEnabled("guild") or self:GetDataChannelEnabled("friends")
 end
 
 function addon:GetFriendsDataPrefix()
     return FRIENDS_PREFIX
+end
+
+function addon:GetCompactGuildDataPrefix()
+    return COMPACT_GUILD_PREFIX
 end
 
 function addon:GetDataChannelEnabled(channel)
@@ -47,7 +47,6 @@ end
 
 function addon:HasDataGroup()
     return (self:GetDataChannelEnabled("guild") and self:HasGuild())
-        or (self:GetDataChannelEnabled("party") and (NativeMembership(IsInRaid) or NativeMembership(IsInGroup)))
         or (self.dataState and self.dataState.routes.FRIENDS == true)
 end
 
@@ -62,11 +61,11 @@ local function FriendSendAPI(friend, distribution)
 end
 
 local function HasNativeContact(state, peer, now)
-    for distribution, heardAt in pairs(peer.nativeContact) do
-        if state.routes[distribution] and not state.sendFailures[distribution]
-            and now - heardAt < NATIVE_CONTACT_TIMEOUT then return true end
-    end
-    return false
+    local legacy, compact = peer.nativeContact.GUILD, peer.nativeContact.COMPACT_GUILD
+    return (state.guildLegacyActive and not state.sendFailures.GUILD and legacy
+            and now - legacy < NATIVE_CONTACT_TIMEOUT)
+        or (state.guildCompactActive and not state.sendFailures.COMPACT_GUILD and compact
+            and now - compact < NATIVE_CONTACT_TIMEOUT)
 end
 
 local function Confirmed(peer, distribution, now)
@@ -194,9 +193,8 @@ local function RefreshDataFriends(self)
                 peer = { nativeContact = {}, friendContact = {}, sendFailures = {}, pendingProbes = {} }
             end
             peer.friend, current[id] = friend, peer
-            for distribution in pairs(peer.nativeContact) do
-                if not state.routes[distribution] then peer.nativeContact[distribution] = nil end
-            end
+            if not state.guildLegacyActive then peer.nativeContact.GUILD = nil end
+            if not state.guildCompactActive then peer.nativeContact.COMPACT_GUILD = nil end
             local native = HasNativeContact(state, peer, now)
             local route = not native and ConfirmedRoute(peer, now) or nil
             if not native then
@@ -256,7 +254,7 @@ function addon:InitializeDataChannel()
         and prefixResults.Success ~= nil and prefixResults.DuplicatePrefix ~= nil and sendResults.Success ~= nil
         or false
     self.dataEvents = self:RegisterGameEvents({ "CHAT_MSG_ADDON", "BN_CHAT_MSG_ADDON", "PLAYER_ENTERING_WORLD",
-        "GROUP_ROSTER_UPDATE", "PLAYER_GUILD_UPDATE", "PLAYER_LOGOUT" }, self.OnDataEvent)
+        "PLAYER_GUILD_UPDATE", "PLAYER_LOGOUT" }, self.OnDataEvent)
     self:RegisterNotification("FRIEND_DATA_CHANGED", function()
         self:RefreshDataRoutes()
         self:Notify("DATA_CHANGED")
@@ -270,16 +268,14 @@ end
 
 function addon:RefreshDataRoutes()
     local state, routes = self.dataState, {}
-    local previous, connected = state.routes, state.connected
+    local connected, guildBefore = state.connected, state.routes.GUILD
     state.routes = routes
+    state.guildLegacyActive, state.guildCompactActive = false, false
     local friendAdded
     if CanUseData(self) and state.nativeStarted and state.nativeAvailable then
-        if state.prefixRegistered then
-            if self:GetDataChannelEnabled("party") then
-                if NativeMembership(IsInRaid) then routes.RAID = true
-                elseif NativeMembership(IsInGroup) then routes.PARTY = true end
-            end
-            if self:GetDataChannelEnabled("guild") and self:HasGuild() then routes.GUILD = true end
+        if self:GetDataChannelEnabled("guild") and self:HasGuild() then
+            state.guildLegacyActive, state.guildCompactActive = state.prefixRegistered, state.compactGuildPrefixRegistered
+            if state.guildLegacyActive or state.guildCompactActive then routes.GUILD = true end
         end
         if state.friendsPrefixRegistered then
             local active
@@ -287,15 +283,15 @@ function addon:RefreshDataRoutes()
             if active then routes.FRIENDS = true end
         end
     else ResetFriendMessages(state) end
-    for distribution in pairs(state.sendFailures) do
-        if not routes[distribution] then state.sendFailures[distribution] = nil end
-    end
+    if not state.guildLegacyActive then state.sendFailures.GUILD = nil end
+    if not state.guildCompactActive then state.sendFailures.COMPACT_GUILD = nil end
     -- Keep the status session while any existing route remains active.
     self:SetDataConnected(next(routes) ~= nil)
     if connected and state.connected and self.RequestDataStatusSnapshot then
-        local nativeAdded = (routes.GUILD and not previous.GUILD) or (routes.PARTY and not previous.PARTY)
-            or (routes.RAID and not previous.RAID)
-        if nativeAdded or friendAdded then self:RequestDataStatusSnapshot(nativeAdded, friendAdded) end
+        local guildAdded = routes.GUILD and not guildBefore
+        if guildAdded or friendAdded then
+            self:RequestDataStatusSnapshot(guildAdded, friendAdded)
+        end
     end
     return routes
 end
@@ -318,12 +314,18 @@ function addon:StartDataMessages()
         state.detail = nil
         if Enabled(self) then
             if not state.nativeAvailable then
-                state.detail = "The native group-data API is unavailable."
+                state.detail = "The native addon messaging API is unavailable."
             else
                 local failed = {}
-                if NativeEnabled(self) and not state.prefixRegistered then
-                    state.prefixRegistered = RegisterDataPrefix(self:GetDataPrefix())
-                    if not state.prefixRegistered then failed[#failed + 1] = "group-data" end
+                if self:GetDataChannelEnabled("guild") then
+                    if not state.prefixRegistered then
+                        state.prefixRegistered = RegisterDataPrefix(self:GetDataPrefix())
+                        if not state.prefixRegistered then failed[#failed + 1] = "legacy guild" end
+                    end
+                    if not state.compactGuildPrefixRegistered then
+                        state.compactGuildPrefixRegistered = RegisterDataPrefix(self:GetCompactGuildDataPrefix())
+                        if not state.compactGuildPrefixRegistered then failed[#failed + 1] = "compact guild" end
+                    end
                 end
                 if self:GetDataChannelEnabled("friends") and not state.friendsPrefixRegistered then
                     state.friendsPrefixRegistered = RegisterDataPrefix(self:GetFriendsDataPrefix())
@@ -370,6 +372,7 @@ function addon:OnDataEvent(event, ...)
         self:CancelDataTimer()
         ResetFriendMessages(state)
         state.stopped, state.routes, state.sendFailures = true, {}, {}
+        state.guildLegacyActive, state.guildCompactActive = false, false
         self:SetDataConnected(false)
         return
     end
@@ -382,24 +385,25 @@ function addon:OnDataEvent(event, ...)
             if not state.friendsPrefixRegistered or prefix ~= self:GetFriendsDataPrefix() then return end
             return self:OnFriendDataMessage(message, sender, event == "BN_CHAT_MSG_ADDON" and "BATTLENET" or "WHISPER")
         end
-        if prefix ~= self:GetDataPrefix() or type(sender) ~= "string" or distribution == "FRIENDS"
-            or not self:IsDataConnected() or not state.routes[distribution] then return end
+        if distribution ~= "GUILD" or type(sender) ~= "string"
+            or not self:IsDataConnected() or not state.routes.GUILD then return end
+        local compact = prefix == self:GetCompactGuildDataPrefix() and state.guildCompactActive
+        if not compact and (prefix ~= self:GetDataPrefix() or not state.guildLegacyActive) then return end
         local friend, id
         if self.FindDataFriend then friend, id = self:FindDataFriend(sender) end
         local peer = id and state.friends[id]
-        if peer and self:IsValidDataStatusFrame(message) then
-            -- The native route can deliver even if the status decoder has
+        if peer and self:IsValidDataStatusFrame(message, compact) then
+            -- The guild route can deliver even if the status decoder has
             -- already seen this revision over another route.
-            peer.nativeContact[distribution] = GetTime()
+            peer.nativeContact[compact and "COMPACT_GUILD" or "GUILD"] = GetTime()
         end
+        if compact then return self:OnCompactGuildDataMessage(friend and friend.name or sender, message, sender) end
         return self:OnDataMessage(friend and friend.name or sender, message, sender)
     else
-        if event == "GROUP_ROSTER_UPDATE" then
-            for _, peer in pairs(state.friends) do peer.nativeContact.PARTY, peer.nativeContact.RAID = nil, nil end
-        elseif event == "PLAYER_GUILD_UPDATE" then
+        if event == "PLAYER_GUILD_UPDATE" then
             local unit = ...
             if not IsSecret(unit) and (unit == nil or unit == "player") then
-                for _, peer in pairs(state.friends) do peer.nativeContact.GUILD = nil end
+                for _, peer in pairs(state.friends) do peer.nativeContact.GUILD, peer.nativeContact.COMPACT_GUILD = nil, nil end
             end
         end
         self:RefreshDataRoutes()
@@ -452,13 +456,11 @@ function addon:GetDataStatusText()
     if self.savedDataReadOnly then return "Saved preferences are read-only." end
     if not Enabled(self) then return "All data channels are disabled." end
     local state, routes = self.dataState, {}
-    if state.routes.PARTY then routes[#routes + 1] = "party" end
-    if state.routes.RAID then routes[#routes + 1] = "raid" end
     if state.routes.GUILD then routes[#routes + 1] = "guild" end
     if state.routes.FRIENDS then routes[#routes + 1] = "friends" end
     local status
     if #routes == 0 then
-        status = state.detail or "Waiting for an enabled party, raid, guild or friends route."
+        status = state.detail or "Waiting for an enabled guild or Friends route."
     else
         status = "Data routes: " .. table.concat(routes, ", ") .. "."
         if state.detail then status = status .. " " .. state.detail end

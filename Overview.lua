@@ -369,7 +369,7 @@ function addon:RefreshOverview()
     local players, now = self:GetOverviewPlayers(), GetServerTime()
     RefreshPlayerTable(page, players, OverviewName)
     if #players == 0 then
-        page.empty:SetText("Waiting for players sharing through Friends, Guild, or Party / raid.")
+        page.empty:SetText("Waiting for players sharing through Guild or Friends.")
     end
     local menu = page.actionMenu
     for index, row in ipairs(page.rows) do

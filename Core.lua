@@ -3,7 +3,7 @@ local addonName, addon = ...
 local SCHEMA_VERSION = 4
 
 local function DefaultDataSettings()
-    return { channels = { party = true, guild = true, friends = true }, cleanupOldPlayers = true }
+    return { channels = { guild = true, friends = true }, cleanupOldPlayers = true }
 end
 
 addon.name = addonName
@@ -51,10 +51,10 @@ function addon:Initialize()
         if type(database.data) ~= "table" then database.data = DefaultDataSettings() end
         if type(database.data.cleanupOldPlayers) ~= "boolean" then database.data.cleanupOldPlayers = true end
         if type(database.data.channels) ~= "table" then database.data.channels = {} end
-        for _, channel in ipairs({ "party", "guild", "friends" }) do
+        for _, channel in ipairs({ "guild", "friends" }) do
             if type(database.data.channels[channel]) ~= "boolean" then database.data.channels[channel] = true end
         end
-        database.data.channels.global = nil
+        database.data.channels.global, database.data.channels.party = nil, nil
         if type(database.roster) == "table" then database.roster.groupFingerprint = nil end
 
         database.schemaVersion = SCHEMA_VERSION

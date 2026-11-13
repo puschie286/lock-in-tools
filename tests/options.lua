@@ -12,8 +12,8 @@ do
     api.SlashCmdList.LOCKINTOOLS("options")
     local panel = addon.optionsPanel
     assert(panel:IsVisible() and panel.selectedTab == "sharing")
-    assert(panel.dataChannels.friends and panel.dataChannels.friends:IsEnabled())
-    for _, control in ipairs({ panel.dataChannels.party, panel.dataChannels.guild, panel.dataChannels.friends,
+    assert(not panel.dataChannels.party and panel.dataChannels.guild:IsEnabled() and panel.dataChannels.friends:IsEnabled())
+    for _, control in ipairs({ panel.dataChannels.guild, panel.dataChannels.friends,
         panel.rankingEnabled,
         panel.rankingBurningEffect, panel.rankingTransparencySlider,
         panel.playerDataCleanup, panel.clearPlayerData }) do
@@ -27,7 +27,6 @@ do
         and not panel.positionStatus and not panel.positionStatusHelp,
         "position sharing has no Settings controls")
     assert(not panel.rankingIncludeFriends, "friend ranking inclusion is controlled on each Friends row")
-    assert(panel.dataChannels.party:IsEnabled() and panel.dataChannels.guild:IsEnabled())
     assert(not panel.tabs.group and not panel.secret and not panel.autoJoin
         and not panel.join and not panel.leave and not panel.dataChannels.global,
         "the removed global group and chat have no settings controls")
@@ -122,8 +121,9 @@ do
     saved.data = { channels = { party = true, guild = true } }
     local addon, api, _, _, world = loadAddon(saved, false)
     world:initialize()
-    assert(api.LockInToolsDB.data.channels.friends == true, "upgraded profiles default Friends sharing on")
-    local calls, setter = { party = 0, guild = 0, friends = 0 }, addon.SetDataChannelEnabled
+    assert(api.LockInToolsDB.data.channels.friends == true and api.LockInToolsDB.data.channels.party == nil,
+        "upgraded profiles enable Friends sharing and remove the retired party preference")
+    local calls, setter = { guild = 0, friends = 0 }, addon.SetDataChannelEnabled
     addon.SetDataChannelEnabled = function(self, channel, enabled)
         calls[channel] = calls[channel] + 1
         return setter(self, channel, enabled)
@@ -290,14 +290,14 @@ do
     end
     addon:OpenOptions("sharing")
     local panel, tooltip = addon.optionsPanel, api.GameTooltip
-    panel.dataChannels.party.scripts.OnEnter(panel.dataChannels.party)
-    assert(tooltip:IsShown() and tooltip:IsOwned(panel.dataChannels.party) and tooltip.anchor == "ANCHOR_CURSOR",
+    panel.dataChannels.guild.scripts.OnEnter(panel.dataChannels.guild)
+    assert(tooltip:IsShown() and tooltip:IsOwned(panel.dataChannels.guild) and tooltip.anchor == "ANCHOR_CURSOR",
         "Settings help follows the global tooltip position")
     panel.tabs.restedxp:Click()
     assert(not tooltip:IsShown(), "switching settings pages dismisses globally positioned help")
     panel.tabs.sharing:Click()
     panel.playerDataCleanup:SetEnabled(false)
-    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.party.labelButton, panel.playerDataCleanup }) do
+    for _, widget in ipairs({ panel.dataChannels.guild, panel.dataChannels.guild.labelButton, panel.playerDataCleanup }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
             "checkboxes, labels and disabled control help share global tooltip positioning")
@@ -319,7 +319,7 @@ do
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())
     end
-    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.guild.labelButton,
+    for _, widget in ipairs({ panel.dataChannels.guild, panel.dataChannels.guild.labelButton,
         panel.dataChannels.friends.labelButton }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",

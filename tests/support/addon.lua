@@ -3,8 +3,8 @@
 local loadNotifications = dofile("tests/support/notifications.lua")
 local helpers = dofile("tests/support/helpers.lua")
 local loadModule = helpers.loadModule
-local function isStatusMessage(message)
-    return message:match("^1|status|") or message:match("^1|[QR]|status|")
+local function isStatusMessage(prefix, message)
+    return prefix == "LITG" or message:match("^1|status|") or message:match("^1|[QR]|status|")
 end
 
 local function loadAddon(savedVariables, loggedIn)
@@ -134,10 +134,10 @@ local function loadAddon(savedVariables, loggedIn)
                 return 0
             end,
             SendAddonMessage = function(prefix, message, distribution, target)
-                assert(distribution == "PARTY" or distribution == "RAID"
-                    or distribution == "GUILD", "production data uses only eligible broadcast routes")
+                assert(distribution == "GUILD" or distribution == "WHISPER" and prefix == "LITF",
+                    "Production data broadcasts through guild and whispers only on the Friends prefix")
                 -- Keep feature assertions separate from independent status traffic.
-                local sends = isStatusMessage(message) and world.statusSends or world.dataSends
+                local sends = isStatusMessage(prefix, message) and world.statusSends or world.dataSends
                 sends[#sends + 1] = {
                     prefix = prefix, message = message, distribution = distribution, target = target,
                 }

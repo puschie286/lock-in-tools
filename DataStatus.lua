@@ -157,7 +157,25 @@ local function DecodeStatus(payload)
     return message
 end
 
-function addon:IsValidDataStatusFrame(message)
+local function DecodeCompactStatus(self, payload)
+    local message = self:DecodeFriendsStatus(payload)
+    if not message then return nil end
+    for id, value in pairs(message.fields) do
+        if not ValidStatusValue(id, value) then return nil end
+    end
+    return message
+end
+
+function addon:DecodeGuildStatus(payload, compact)
+    if compact then return DecodeCompactStatus(self, payload) end
+    return DecodeStatus(payload)
+end
+
+function addon:IsValidDataStatusFrame(message, compact)
+    if compact then
+        local _, payload = self:ParseCompactGuildStatusFrame(message)
+        return payload ~= nil and DecodeCompactStatus(self, payload) ~= nil
+    end
     if not self:IsDataFrame(message) then return false end
     local payload = message:match("^1|status|(.*)$")
     if not payload then
@@ -302,12 +320,8 @@ end
 
 function addon:ReceiveFriendsStatusSnapshot(sender, frame)
     if not self.dataState.status then return false end
-    local message = self:DecodeFriendsStatus(frame)
-    if not message then return false end
-    for id, value in pairs(message.fields) do
-        if not ValidStatusValue(id, value) then return false end
-    end
-    return ProcessStatus(self, sender, message)
+    local message = DecodeCompactStatus(self, frame)
+    return message and ProcessStatus(self, sender, message) or false
 end
 
 local function ScheduleStatus(self)
@@ -328,10 +342,10 @@ local function StatusConnectionChanged(self, connected)
     status.connected = connected
     status.received = {}
     status.current, status.revision = nil, 0
-    status.native, status.friends = { needed = connected }, { needed = connected }
+    status.guild, status.friends = { needed = connected }, { needed = connected }
     if connected then
         -- Revisions restart after reconnecting. Peers need a fresh wire session
-        -- even when the group and server timestamp are unchanged.
+        -- even when the audience and server timestamp are unchanged.
         status.sessionSequence = status.sessionSequence + 1
         status.session = state.requestSession .. "-" .. status.sessionSequence
     end
@@ -346,7 +360,7 @@ end
 -- so adding a provider does not add another wire feature or another scheduler.
 function addon:RegisterDataStatusProvider(name, collect, receive, connectionChanged)
     local state = self.dataState
-    if not state then return false, "Group data is still loading." end
+    if not state then return false, "Data sharing is still loading." end
     if not ValidProviderName(name) or type(collect) ~= "function" or type(receive) ~= "function"
         or (connectionChanged ~= nil and type(connectionChanged) ~= "function") then
         return false, "Invalid status provider registration."
@@ -362,23 +376,25 @@ function addon:RegisterDataStatusProvider(name, collect, receive, connectionChan
     -- Replace the snapshot so registration during a callback cannot alter its active iteration.
     status.providerNames = StatusNames(status.providers)
     if first then
-        self:RegisterDataRequest("status", function(sender, payload, budget)
-            local message = DecodeStatus(payload)
+        self:RegisterDataRequest("status", function(sender, payload, budget, compact)
+            local message = self:DecodeGuildStatus(payload, compact)
             if not message then return nil end
             ProcessStatus(self, sender, message, true)
             local fields, revision = CurrentStatus(self)
             if fields == nil then return nil end
             local snapshot = StatusSnapshot(self, fields, revision)
             if not snapshot then return nil end
-            local response = EncodeStatus(snapshot)
-            if #response <= budget then return response end
+            local response
+            if compact then response = self:EncodeFriendsStatus(snapshot)
+            else response = EncodeStatus(snapshot) end
+            if response and #response <= budget then return response end
             -- Replies do not replace the public snapshot or postpone its refresh.
-        end, function(sender, payload)
-            local message = DecodeStatus(payload)
+        end, function(sender, payload, compact)
+            local message = self:DecodeGuildStatus(payload, compact)
             return message and ProcessStatus(self, sender, message, true) or false
         end)
-        self:RegisterDataFeature("status", function(sender, payload)
-            local message = DecodeStatus(payload)
+        self:RegisterDataFeature("status", function(sender, payload, compact)
+            local message = self:DecodeGuildStatus(payload, compact)
             return message and ProcessStatus(self, sender, message) or false
         end, function(connected) StatusConnectionChanged(self, connected) end)
     elseif connectionChanged then pcall(connectionChanged, self:IsDataConnected()) end
@@ -387,10 +403,10 @@ end
 
 -- An added route needs discovery without resetting the current wire session or
 -- cached peers. Keep the normal scheduler's cadence instead of sending inline.
-function addon:RequestDataStatusSnapshot(nativeAdded, friendAdded)
+function addon:RequestDataStatusSnapshot(guildAdded, friendAdded)
     local status = self.dataState and self.dataState.status
     if not status or not status.connected then return end
-    if nativeAdded then status.native.needed = true end
+    if guildAdded then status.guild.needed, status.guild.legacySentAt = true, nil end
     if friendAdded then status.friends.needed = true end
     ScheduleStatus(self)
 end
@@ -407,6 +423,51 @@ local function SnapshotSent(publication, revision, now)
     publication.needed, publication.revision, publication.sentAt = false, revision, now
 end
 
+local function LegacyGuildRefreshDue(guild, now)
+    return not guild.legacySentAt or now - guild.legacySentAt >= STATUS_REFRESH_INTERVAL
+end
+
+local function SendGuildSnapshot(self, snapshot, frame, now)
+    local state, guild = self.dataState, self.dataState.status.guild
+    local changed = guild.revision ~= snapshot.revision
+    local refresh = not guild.sentAt or now - guild.sentAt >= STATUS_REFRESH_INTERVAL
+    local legacyDue = state.guildLegacyActive and (guild.needed or LegacyGuildRefreshDue(guild, now))
+
+    guild.attemptedAt = now
+    if legacyDue then
+        local payload = EncodeStatus(snapshot)
+        local sent
+        if guild.needed then sent = self:RequestData("status", payload)
+        else sent = self:SendData("status", payload) end
+        if sent then
+            guild.legacySentAt = now
+            SnapshotSent(guild, snapshot.revision, now)
+            return true
+        end
+    end
+
+    if state.guildCompactActive and frame and (changed or refresh or (guild.needed and not legacyDue)) then
+        local sent
+        if guild.needed and not legacyDue then sent = self:RequestCompactGuildStatus(frame)
+        else sent = self:SendCompactGuildStatus(frame) end
+        if sent then
+            -- A compact broadcast can keep upgraded peers current during a
+            -- legacy failure. It does not satisfy an outstanding discovery.
+            local legacyDiscoveryNeeded = legacyDue and guild.needed
+            SnapshotSent(guild, snapshot.revision, now)
+            guild.needed = legacyDiscoveryNeeded
+            return true
+        end
+    end
+
+    if not legacyDue and state.guildLegacyActive and self:SendData("status", EncodeStatus(snapshot)) then
+        guild.legacySentAt = now
+        SnapshotSent(guild, snapshot.revision, now)
+        return true
+    end
+    return false
+end
+
 function addon:DataStatusTick()
     local state = self.dataState
     local status = state and state.status
@@ -418,33 +479,29 @@ function addon:DataStatusTick()
     local now = GetTime()
     local routes = self:RefreshDataRoutes()
     if not self:IsDataConnected() then return false end
-    local native, friends = status.native, status.friends
-    local nativeReady = (routes.GUILD or routes.PARTY or routes.RAID) and CanAttemptSnapshot(native, now, STATUS_INTERVAL)
+    local guild, friends = status.guild, status.friends
+    local guildReady = routes.GUILD and CanAttemptSnapshot(guild, now, STATUS_INTERVAL)
     local friendsReady = routes.FRIENDS and CanAttemptSnapshot(friends, now, FRIENDS_STATUS_INTERVAL)
-    if not nativeReady and not friendsReady then ScheduleStatus(self); return false end
+    if not guildReady and not friendsReady then ScheduleStatus(self); return false end
     local fields, revision = CurrentStatus(self)
-    local nativeSent, friendsSent = false, false
+    local guildSent, friendsSent = false, false
     if fields ~= nil and self:IsDataConnected() then
-        local nativeDue = nativeReady and SnapshotDue(native, revision, now, STATUS_REFRESH_INTERVAL)
         local friendsDue = friendsReady and SnapshotDue(friends, revision, now, FRIENDS_STATUS_REFRESH_INTERVAL)
-        if not nativeDue and not friendsDue then ScheduleStatus(self); return false end
+        local guildDue = guildReady and (SnapshotDue(guild, revision, now, STATUS_REFRESH_INTERVAL)
+            or (state.guildLegacyActive and LegacyGuildRefreshDue(guild, now)))
+        if not guildDue and not friendsDue then ScheduleStatus(self); return false end
         local snapshot = StatusSnapshot(self, fields, revision)
         if snapshot then
-            if nativeDue then
-                native.attemptedAt = now
-                local payload = EncodeStatus(snapshot)
-                if native.needed then nativeSent = self:RequestData("status", payload)
-                else nativeSent = self:SendData("status", payload) end
-                if nativeSent then SnapshotSent(native, revision, now) end
-            end
+            local frame
+            if friendsDue or (guildDue and state.guildCompactActive) then frame = self:EncodeFriendsStatus(snapshot) end
+            if guildDue then guildSent = SendGuildSnapshot(self, snapshot, frame, now) end
             if friendsDue then
                 friends.attemptedAt = now
-                local frame = self:EncodeFriendsStatus(snapshot)
                 friendsSent = frame ~= nil and self:SendFriendsStatusSnapshot(frame)
                 if friendsSent then SnapshotSent(friends, revision, now) end
             end
         end
     end
     ScheduleStatus(self)
-    return nativeSent or friendsSent
+    return guildSent or friendsSent
 end

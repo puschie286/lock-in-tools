@@ -125,6 +125,7 @@ for _, legacy in ipairs({
     migrationWorld:advance(30)
     assert(migrated.db.schemaVersion == 4 and migrated.db.showWelcome == false)
     assert(migrated.db.group == nil and migrated.db.chat == nil and migrated.db.data.channels.global == nil
+        and migrated.db.data.channels.party == nil
         and migrated.db.roster.groupFingerprint == nil and migrated.db.position.groupFingerprint == nil)
     assert(migrationWorld.contentOpened == 0 and #migrationWorld.joinCalls == 0 and #migrationWorld.dataJoinCalls == 0)
     assert(not contains(output, SECRET), "migration never prints a retired group key")

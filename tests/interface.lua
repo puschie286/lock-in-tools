@@ -24,11 +24,11 @@ do
     content.options:Click()
     assert(options:IsVisible() and not content:IsVisible())
     assert(not options.positionSharing and not options.positionRetention
-        and options.dataChannels.party:IsVisible() and options.dataChannels.guild:IsVisible()
+        and options.dataChannels.guild:IsVisible() and options.dataChannels.friends:IsVisible()
         and options.rankingEnabled:IsVisible() and options.rankingBurningEffect:IsVisible()
         and options.rankingTransparencySlider:IsVisible() and options.playerDataCleanup:IsVisible()
-        and options.clearPlayerData:IsVisible() and not options.dataChannels.global,
-        "General contains native data routes, ranking and player data preferences")
+        and options.clearPlayerData:IsVisible() and not options.dataChannels.global and not options.dataChannels.party,
+        "General contains Guild and Friends sharing, ranking and player data preferences")
     options.content:Click()
     content.options:Click()
     assert(options.selectedTab == "sharing" and options.pages.sharing:IsVisible())
@@ -133,16 +133,16 @@ do
         assert(overviewCalls == entry[2] and optionsCalls == entry[3])
     end
     local options, writes = addon.optionsPanel, 0
-    for _, widget in ipairs({ options.dataChannels.party, options.dataChannels.guild }) do
+    for _, widget in ipairs({ options.dataChannels.guild, options.dataChannels.friends }) do
         for _, name in ipairs({ "SetText", "SetEnabled", "SetChecked" }) do
             local original = widget[name]
             widget[name] = function(self, ...) writes = writes + 1; return original(self, ...) end
         end
     end
-    assert(addon:SetDataChannelEnabled("party", false) and addon:SetDataChannelEnabled("guild", false))
+    assert(addon:SetDataChannelEnabled("guild", false) and addon:SetDataChannelEnabled("friends", false))
     assert(writes == 0)
     addon:OpenOptions()
-    assert(writes > 0 and not options.dataChannels.party:GetChecked() and not options.dataChannels.guild:GetChecked(),
+    assert(writes > 0 and not options.dataChannels.guild:GetChecked() and not options.dataChannels.friends:GetChecked(),
         "reopening catches up native sharing preferences changed while hidden")
 end
 

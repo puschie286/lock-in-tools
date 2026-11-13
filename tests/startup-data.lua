@@ -17,14 +17,13 @@ for _, seed in ipairs({
     local profile = settings("", false)
     profile.data = seed.data
     local channels = type(seed.data) == "table" and type(seed.data.channels) == "table" and seed.data.channels
-    local party, guild, friends = not channels or channels.party ~= false,
-        not channels or channels.guild ~= false, not channels or channels.friends ~= false
+    local guild, friends = not channels or channels.guild ~= false, not channels or channels.friends ~= false
     local current, _, _, event = loadAddon(profile, false)
     event("ADDON_LOADED", "LockInTools")
-    assert(current:GetDataChannelEnabled("party") == party and current:GetDataChannelEnabled("guild") == guild
+    assert(not current:GetDataChannelEnabled("party") and current:GetDataChannelEnabled("guild") == guild
         and current:GetDataChannelEnabled("friends") == friends
         and not current:GetDataChannelEnabled("global")
-        and profile.data.channels.party == party and profile.data.channels.guild == guild
+        and profile.data.channels.party == nil and profile.data.channels.guild == guild
         and profile.data.channels.friends == friends and profile.data.channels.global == nil,
         "Channel defaults repair malformed values while retaining saved false values")
     if type(seed.data) == "table" then
@@ -45,14 +44,14 @@ do
     event("ADDON_LOADED", "LockInTools")
     local changes = 0
     current:RegisterNotification("DATA_CHANGED", function() changes = changes + 1 end)
-    assert(current:SetDataChannelEnabled("party", true) and current:SetDataChannelEnabled("guild", true)
+    assert(current:SetDataChannelEnabled("friends", true) and current:SetDataChannelEnabled("guild", true)
         and not current:SetDataChannelEnabled("global", true) and changes == 2)
     clock:advance(30)
     assert(#clock.dataJoinCalls == 0 and #clock.statusSends == 0 and #clock.dataSends == 0,
         "Enabling routes during loading cannot send or join before login")
-    assert(current:SetDataChannelEnabled("party", false) and current:SetDataChannelEnabled("guild", false)
+    assert(current:SetDataChannelEnabled("friends", false) and current:SetDataChannelEnabled("guild", false)
         and not current:SetDataChannelEnabled("global", false) and changes == 4)
-    assert(not current:SetDataChannelEnabled("raid", true)
+    assert(not current:SetDataChannelEnabled("party", true) and not current:SetDataChannelEnabled("raid", true)
         and not current:SetDataChannelEnabled("guild", "true")
         and not current:SetDataChannelEnabled(nil, false)
         and not current:GetDataChannelEnabled("guild") and changes == 4,
@@ -80,15 +79,12 @@ do
     current:RegisterNotification("DATA_CHANGED", function()
         statuses[#statuses + 1] = current:GetDataStatusText()
     end)
-    assert(current:SetDataChannelEnabled("party", false) and #statuses == 1
-        and statuses[1] == "Data routes: guild." and current:IsDataConnected())
-    assert(current:SetDataChannelEnabled("guild", false) and #statuses == 2
-        and statuses[2] == "All data channels are disabled." and not current:IsDataConnected())
-    assert(current:SetDataChannelEnabled("party", true) and #statuses == 3
-        and statuses[3] == "Data routes: party." and current:IsDataConnected())
-    assert(current:SetDataChannelEnabled("guild", true) and #statuses == 4
-        and statuses[4] == "Data routes: party, guild.")
-    assert(current:SetDataChannelEnabled("guild", true) and #statuses == 4,
+    assert(not current:SetDataChannelEnabled("party", false) and #statuses == 0 and current:IsDataConnected())
+    assert(current:SetDataChannelEnabled("guild", false) and #statuses == 1
+        and statuses[1] == "All data channels are disabled." and not current:IsDataConnected())
+    assert(current:SetDataChannelEnabled("guild", true) and #statuses == 2
+        and statuses[2] == "Data routes: guild." and current:IsDataConnected())
+    assert(current:SetDataChannelEnabled("guild", true) and #statuses == 2,
         "Unchanged sharing preferences do not refresh views")
 end
 
@@ -102,7 +98,7 @@ do
     local current, environment, _, _, clock = loadAddon(profile, false)
     clock.grouped, clock.guild = true, true
     clock:initialize()
-    assert(not current:SetDataChannelEnabled("party", true)
+    assert(not current:SetDataChannelEnabled("guild", true) and not current:SetDataChannelEnabled("party", true)
         and not current:SetDataChannelEnabled("global", false))
     clock:advance(30)
     assert(environment.LockInToolsDB == profile and profile.schemaVersion == 5
@@ -163,8 +159,8 @@ do
     assert(friend.friendOnly and friend.level == 33 and friend.seenAt == stamp + 5,
         "Legacy location contact cannot outrank a more recent native friend level")
 end
--- Native guild and party/raid routes connect the complete addon without setup.
--- Overlapping deliveries keep one roster entry and Burned report per player.
+-- Guild discovery and later compact updates connect the complete addon without
+-- setup and keep one roster entry and Burned report per player.
 do
     local aliceProfile, bobProfile = settings(nil, false), settings(OTHER_SECRET, false)
     aliceProfile.burned, bobProfile.burned = { status = 20 }, { status = 80 }
@@ -190,7 +186,7 @@ do
     assert(alice:IsDataConnected() and bob:IsDataConnected()
         and not alice.dataState.routes.CHANNEL and not bob.dataState.routes.CHANNEL
         and #aliceWorld.dataJoinCalls == 0 and #bobWorld.dataJoinCalls == 0,
-        "Party and guild start all status providers without custom channels")
+        "Guild starts all status providers without custom channels")
     local function deliver(sends, first, last, receive, sender)
         for index = first, last do
             local sent = assert(sends[index])
@@ -205,20 +201,20 @@ do
         end
         return found, count
     end
+    assert(#aliceWorld.statusSends == 1 and #bobWorld.statusSends == 1)
+    local legacy = aliceWorld.statusSends[1]
+    assert(legacy.distribution == "GUILD" and legacy.prefix == "LockInToolsData"
+        and legacy.message:match("^1|Q|status|.*|10=[0-7]|11=7|12=20$")
+        and not legacy.message:find("|8=", 1, true) and not legacy.message:find("|9=", 1, true),
+        "Guild discovery uses one compatible request with complete status values")
+    deliver(aliceWorld.statusSends, 1, 1, bobEvent, "Alice")
+    deliver(bobWorld.statusSends, 1, 1, aliceEvent, "Bob")
     assert(#aliceWorld.statusSends == 2 and #bobWorld.statusSends == 2
-        and aliceWorld.statusSends[1].distribution == "PARTY"
-        and aliceWorld.statusSends[2].distribution == "GUILD"
-        and aliceWorld.statusSends[1].message == aliceWorld.statusSends[2].message
-        and aliceWorld.statusSends[1].message:match("|10=[0-7]|11=7|12=20$")
-        and not aliceWorld.statusSends[1].message:find("|8=", 1, true)
-        and not aliceWorld.statusSends[1].message:find("|9=", 1, true),
-        "Every native route carries the same initial request ID and snapshot")
-    deliver(aliceWorld.statusSends, 1, 2, bobEvent, "Alice")
-    deliver(bobWorld.statusSends, 1, 2, aliceEvent, "Bob")
-    assert(#aliceWorld.statusSends == 4 and #bobWorld.statusSends == 4,
-        "A request arriving on party and guild produces one reply fanned out over both routes")
-    deliver(aliceWorld.statusSends, 3, 4, bobEvent, "Alice")
-    deliver(bobWorld.statusSends, 3, 4, aliceEvent, "Bob")
+        and aliceWorld.statusSends[2].prefix == bobWorld.statusSends[1].prefix
+        and bobWorld.statusSends[2].prefix == aliceWorld.statusSends[1].prefix,
+        "Each peer replies once in the request's format")
+    deliver(aliceWorld.statusSends, 2, 2, bobEvent, "Alice")
+    deliver(bobWorld.statusSends, 2, 2, aliceEvent, "Bob")
     local bobRow, aliceCount = player(alice, "bob-testrealm")
     local aliceRow, bobCount = player(bob, "alice-testrealm")
     assert(aliceCount == 2 and bobCount == 2 and bobRow.online and aliceRow.online
@@ -226,7 +222,7 @@ do
         and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 50
         and bob:GetGroupBurnedStatus().count == 2 and bob:GetGroupBurnedStatus().average == 50
         and bobRow.class == "HUNTER" and aliceRow.class == "MAGE",
-        "Native routes exchange XP, class and Burned without double-counting")
+        "Guild formats exchange XP, class and Burned without double-counting")
 
     local rosterChanges, burnedChanges = 0, 0
     alice:RegisterNotification("ROSTER_CHANGED", function() rosterChanges = rosterChanges + 1 end)
@@ -234,9 +230,14 @@ do
     bobWorld.xp = 925
     assert(bob:SetBurnedStatus(90))
     bobWorld:advance(5)
-    deliver(bobWorld.statusSends, 5, 5, aliceEvent, "Bob")
+    assert(#bobWorld.statusSends == 3 and bobWorld.statusSends[3].prefix == "LITG")
+    local compact = bobWorld.statusSends[3]
+    local snapshot = assert(bob:DecodeFriendsStatus(compact.message))
+    assert(snapshot.fields[2] == "925" and snapshot.fields[11] == "3" and snapshot.fields[12] == "90"
+        and not snapshot.fields[8] and not snapshot.fields[9])
+    deliver(bobWorld.statusSends, 3, 3, aliceEvent, "Bob")
     aliceWorld:advance(1)
-    deliver(bobWorld.statusSends, 6, 6, aliceEvent, "BOB-Test Realm")
+    deliver(bobWorld.statusSends, 3, 3, aliceEvent, "BOB-Test Realm")
     bobRow, aliceCount = player(alice, "bob-testrealm")
     assert(bobRow.xp == 925 and aliceCount == 2
         and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 55
@@ -249,34 +250,34 @@ do
     local accepted, requestID = alice:RequestData("probe", "pending")
     assert(accepted)
     local state = alice.dataState
-    local session, received, pending = state.status.session, state.status.received, state.pendingRequests[requestID]
-    local peer = alice.burnedState.peers["bob-testrealm"]
+    local session, pending = state.status.session, state.pendingRequests[requestID]
     aliceWorld.grouped, aliceWorld.raid = false, true
     bobWorld.grouped, bobWorld.raid = false, true
     aliceEvent("GROUP_ROSTER_UPDATE")
     bobEvent("GROUP_ROSTER_UPDATE")
-    assert(state.routes.RAID and state.routes.GUILD and not state.routes.PARTY
+    assert(state.routes.GUILD and not state.routes.RAID and not state.routes.PARTY
         and state.status.session == session and state.pendingRequests[requestID] == pending)
     bobWorld.xp = 975
-    local firstRaid = #bobWorld.statusSends + 1
+    local firstGuild = #bobWorld.statusSends + 1
     bobWorld:advance(4)
-    assert(bobWorld.statusSends[firstRaid].distribution == "RAID")
-    deliver(bobWorld.statusSends, firstRaid, #bobWorld.statusSends, aliceEvent, "Bob")
+    assert(#bobWorld.statusSends == firstGuild and bobWorld.statusSends[firstGuild].prefix == "LITG")
+    local fresh = bobWorld.statusSends[firstGuild]
+    for _, route in ipairs({ "PARTY", "RAID" }) do
+        aliceEvent("CHAT_MSG_ADDON", fresh.prefix, fresh.message, route, "Bob")
+    end
+    assert(player(alice, "bob-testrealm").xp == 925, "Party and raid do not accept guild status frames")
+    deliver(bobWorld.statusSends, firstGuild, #bobWorld.statusSends, aliceEvent, "Bob")
     assert(player(alice, "bob-testrealm").xp == 975 and alice:GetGroupBurnedStatus().count == 2,
-        "Party-to-raid changes send and receive status without resetting other routes")
+        "Party-to-raid gameplay changes leave guild status sharing active")
     aliceWorld.guild = false
     aliceEvent("PLAYER_GUILD_UPDATE", "player")
-    assert(state.routes.RAID and not state.routes.GUILD and alice:IsDataConnected())
-    aliceWorld.raid = false
-    aliceEvent("GROUP_ROSTER_UPDATE")
     assert(not alice:IsDataConnected() and next(state.pendingRequests) == nil
-        and alice:GetGroupBurnedStatus().count == 0,
-        "Losing every native route disconnects and retires live state")
+        and aliceWorld.raid and alice:GetGroupBurnedStatus().count == 0,
+        "Losing guild membership disconnects and retires live state despite being in a raid")
     aliceWorld.guild = true
     aliceEvent("PLAYER_GUILD_UPDATE", "player")
     assert(alice:IsDataConnected() and state.routes.GUILD and not state.routes.RAID
         and state.status.session ~= session and alice:GetGroupBurnedStatus().count == 1)
-    local fresh = bobWorld.statusSends[firstRaid]
     aliceEvent("CHAT_MSG_ADDON", fresh.prefix, fresh.message, "GUILD", "Bob")
     assert(player(alice, "bob-testrealm").xp == 975 and alice:GetGroupBurnedStatus().count == 2,
         "Guild membership restores full native status reception")
@@ -340,6 +341,12 @@ do
         local burned = alice.addon:GetGroupBurnedStatus()
         assert(count == 1 and found and burned.count == 2 and burned.average == 50)
     end
+    local function latestGuild(world, prefix)
+        for index = #world.statusSends, 1, -1 do
+            local packet = world.statusSends[index]
+            if packet.distribution == "GUILD" and (not prefix or packet.prefix == prefix) then return packet end
+        end
+    end
     assert(alice.addon:GetDataStatusText() == "Data routes: friends.")
     checkBob(750)
 
@@ -349,7 +356,7 @@ do
     end
     bob.world.xp = 925
     bob.world:advance(5)
-    local sent = assert(bob.world.statusSends[#bob.world.statusSends])
+    local sent = assert(latestGuild(bob.world, "LockInToolsData"))
     assert(sent.distribution == "GUILD")
     alice.fire("CHAT_MSG_ADDON", sent.prefix, sent.message, "GUILD", "Bob Reed-" .. bob.realm)
     checkBob(925)
@@ -367,7 +374,8 @@ do
     -- roster returns. A delayed packet still belongs to the same session.
     bob.world.xp = 950
     bob.world:advance(5)
-    local newer = assert(bob.world.statusSends[#bob.world.statusSends])
+    local newer = assert(latestGuild(bob.world))
+    assert(newer.prefix == "LITG")
     alice.fire("CHAT_MSG_ADDON", newer.prefix, newer.message, "GUILD", "Bob Reed-" .. bob.realm)
     checkBob(950)
     alice.friendRemoved = false
