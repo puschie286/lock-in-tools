@@ -2,6 +2,7 @@ local _, addon = ...
 
 -- Complete player-status snapshots on change and periodic presence refreshes.
 local STATUS_INTERVAL, STATUS_REFRESH_INTERVAL = 5, 30
+local FRIENDS_STATUS_INTERVAL, FRIENDS_STATUS_REFRESH_INTERVAL = 10, 60
 local MAX_STATUS_REVISION, MAX_STATUS_STAMP = 999999999, 9999999999
 
 local function IsSecret(value)
@@ -158,6 +159,22 @@ local function DecodeStatus(payload)
     return message
 end
 
+function addon:IsValidDataStatusFrame(message)
+    if not self:IsDataFrame(message) then return false end
+    local payload = message:match("^1|status|(.*)$")
+    if not payload then
+        local id
+        id, payload = message:match("^1|Q|status|([^|]+)|(.*)$")
+        if not id then
+            -- Native replies are broadcast. A valid reply to another player
+            -- still shows that this route can deliver the sender's status.
+            id, payload = message:match("^1|R|status|([^|]+)|[^|%c%-]+%-[^|%s%c]+|(.*)$")
+        end
+        if not ValidStatusSession(id) then return false end
+    end
+    return DecodeStatus(payload) ~= nil
+end
+
 local function SameStatus(left, right)
     if not left or not right then return left == right end
     for name, value in pairs(left) do if value ~= right[name] then return false end end
@@ -248,6 +265,9 @@ local function ProcessStatus(self, sender, message, requested)
     local status = self.dataState.status
     local normalized, isSelf = self:GetDataSenderIdentity(sender)
     if not normalized or isSelf then return false end
+    -- Forever's full character name is stable even when Friends and native
+    -- routes use different realm suffixes or the Friends roster changes.
+    if self.GetRankingPlayerKey then normalized = self:GetRankingPlayerKey(normalized) end
     local peer = status.received[normalized]
     if not peer then
         peer = { retired = {} }
@@ -291,15 +311,15 @@ local function StatusConnectionChanged(self, connected)
     if status.connected == connected then return end
     if status.timer then status.timer:Cancel(); status.timer = nil end
     status.connected = connected
-    status.received, status.lastAttemptAt, status.lastBroadcastAt = {}, nil, nil
-    status.current, status.revision, status.lastSentRevision = nil, 0, 0
+    status.received = {}
+    status.current, status.revision = nil, 0
+    status.native, status.friends = { needed = connected }, { needed = connected }
     if connected then
         -- Revisions restart after reconnecting. Peers need a fresh wire session
         -- even when the group and server timestamp are unchanged.
         status.sessionSequence = status.sessionSequence + 1
         status.session = state.requestSession .. "-" .. status.sessionSequence
     end
-    status.requestNeeded = connected
     for _, name in ipairs(status.providerNames) do
         local callback = status.providers[name].connectionChanged
         if callback then pcall(callback, connected) end
@@ -350,11 +370,24 @@ end
 
 -- An added route needs discovery without resetting the current wire session or
 -- cached peers. Keep the normal scheduler's cadence instead of sending inline.
-function addon:RequestDataStatusSnapshot()
+function addon:RequestDataStatusSnapshot(nativeAdded, friendAdded)
     local status = self.dataState and self.dataState.status
     if not status or not status.connected then return end
-    status.requestNeeded = true
+    if nativeAdded then status.native.needed = true end
+    if friendAdded then status.friends.needed = true end
     ScheduleStatus(self)
+end
+
+local function CanAttemptSnapshot(publication, now, interval)
+    return not publication.attemptedAt or now - publication.attemptedAt >= interval
+end
+
+local function SnapshotDue(publication, revision, now, refreshInterval)
+    return publication.needed or revision ~= publication.revision or now - publication.sentAt >= refreshInterval
+end
+
+local function SnapshotSent(publication, revision, now)
+    publication.needed, publication.revision, publication.sentAt = false, revision, now
 end
 
 function addon:DataStatusTick()
@@ -366,21 +399,33 @@ function addon:DataStatusTick()
         return false
     end
     local now = GetTime()
-    if status.lastAttemptAt and now - status.lastAttemptAt < STATUS_INTERVAL then ScheduleStatus(self); return false end
+    local routes = self:RefreshDataRoutes()
+    if not self:IsDataConnected() then return false end
+    local native, friends = status.native, status.friends
+    local nativeReady = (routes.GUILD or routes.PARTY or routes.RAID) and CanAttemptSnapshot(native, now, STATUS_INTERVAL)
+    local friendsReady = routes.FRIENDS and CanAttemptSnapshot(friends, now, FRIENDS_STATUS_INTERVAL)
+    if not nativeReady and not friendsReady then ScheduleStatus(self); return false end
     local fields, revision = CurrentStatus(self)
-    local sent = false
-    if fields ~= nil and self:IsDataConnected() and (status.requestNeeded or revision ~= status.lastSentRevision
-        or (status.lastBroadcastAt and now - status.lastBroadcastAt >= STATUS_REFRESH_INTERVAL)) then
+    local nativeSent, friendsSent = false, false
+    if fields ~= nil and self:IsDataConnected() then
+        local nativeDue = nativeReady and SnapshotDue(native, revision, now, STATUS_REFRESH_INTERVAL)
+        local friendsDue = friendsReady and SnapshotDue(friends, revision, now, FRIENDS_STATUS_REFRESH_INTERVAL)
+        if not nativeDue and not friendsDue then ScheduleStatus(self); return false end
         local payload = EncodeStatus(self, fields, revision)
         if payload then
-            status.lastAttemptAt = now
-            if status.requestNeeded then sent = self:RequestData("status", payload)
-            else sent = self:SendData("status", payload) end
-            if sent then
-                status.requestNeeded, status.lastSentRevision, status.lastBroadcastAt = false, revision, now
+            if nativeDue then
+                native.attemptedAt = now
+                if native.needed then nativeSent = self:RequestData("status", payload)
+                else nativeSent = self:SendData("status", payload) end
+                if nativeSent then SnapshotSent(native, revision, now) end
+            end
+            if friendsDue then
+                friends.attemptedAt = now
+                friendsSent = self:SendFriendsStatusSnapshot(payload)
+                if friendsSent then SnapshotSent(friends, revision, now) end
             end
         end
     end
     ScheduleStatus(self)
-    return sent
+    return nativeSent or friendsSent
 end

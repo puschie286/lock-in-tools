@@ -81,6 +81,7 @@ function addon:ReceiveBurnedStatus(sender, fields, stamp, sequence, metadata)
         or sender == "" or #sender > 128 or sender:find("[|%c]") then return false end
     local id, isSelf = self:GetDataSenderIdentity(sender)
     if not id or isSelf or not Number(stamp, 9999999999) or not Number(sequence, 999999999) then return false end
+    if self.GetRankingPlayerKey then id = self:GetRankingPlayerKey(id) end
     local state, previous = self.burnedState, self.burnedState.peers[id]
     -- The shared protocol orders complete snapshots. Direct callers retain the
     -- same monotonic stamp/sequence protection as other status consumers.

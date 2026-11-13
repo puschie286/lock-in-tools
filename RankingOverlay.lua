@@ -462,7 +462,7 @@ local function RefreshBurnedMeters(panel)
     local text = "Group burned: "
     if group.average ~= nil then
         text = text .. string.format("%.0f%%", group.average) .. " (" .. group.count .. " reporting)"
-    elseif not addon:HasDataGroup() then text = text .. "no group"
+    elseif not addon:HasDataGroup() then text = text .. "waiting for a sharing route"
     elseif not addon:IsDataConnected() then text = text .. "disconnected"
     else text = text .. "awaiting reports" end
     PaintMeter(panel.groupBurned, group.average, text)
@@ -861,7 +861,7 @@ function addon:RefreshRankingOverlay()
     local hasStandings = ranking.grouped or ranking.hasFriends
     local players, own = hasStandings and ranking.players or {}, ranking.own
     if not hasStandings then
-        panel.empty:SetText("Choose friends in Content > Friends or enable guild or group sharing.")
+        panel.empty:SetText("Waiting for Friends, guild, or group sharing. You can also choose players in Content > Friends.")
         own = nil
     else
         panel.empty:SetText("Waiting for shown players with usable progress.")

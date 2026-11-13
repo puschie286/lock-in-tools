@@ -183,11 +183,13 @@ local function CreateDataControls(panel, page)
     local channels = {
         { "party", "Party / raid", "Send and receive data with players in your current party or raid." },
         { "guild", "Guild", "Send and receive data with players in your guild." },
+        { "friends", "Friends", "Share data with online WoW or Battle.net friends in your Forever realm pool."
+            .. " Both players need LockInTools and Friends sharing enabled." },
     }
     for index, entry in ipairs(channels) do
         local channel = entry[1]
         local checkbox = UI:Checkbox(page)
-        checkbox:SetPoint("TOPLEFT", 12, -78 - (index - 1) * 36)
+        checkbox:SetPoint("TOPLEFT", 12, -78 - (index - 1) * 30)
         checkbox:SetSize(28, 28)
         panel.dataChannels[channel] = checkbox
         BindPreference(panel, checkbox, function() return addon:GetDataChannelEnabled(channel) end,

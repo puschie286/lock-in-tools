@@ -12,7 +12,8 @@ do
     api.SlashCmdList.LOCKINTOOLS("options")
     local panel = addon.optionsPanel
     assert(panel:IsVisible() and panel.selectedTab == "sharing")
-    for _, control in ipairs({ panel.dataChannels.party, panel.dataChannels.guild,
+    assert(panel.dataChannels.friends and panel.dataChannels.friends:IsEnabled())
+    for _, control in ipairs({ panel.dataChannels.party, panel.dataChannels.guild, panel.dataChannels.friends,
         panel.rankingEnabled,
         panel.rankingBurningEffect, panel.rankingTransparencySlider,
         panel.playerDataCleanup, panel.clearPlayerData }) do
@@ -117,9 +118,12 @@ end
 
 -- Data channels default on; checkbox and label actions save once and survive reloads.
 do
-    local addon, api, _, _, world = loadAddon(settings(SECRET, false), false)
+    local saved = settings(SECRET, false)
+    saved.data = { channels = { party = true, guild = true } }
+    local addon, api, _, _, world = loadAddon(saved, false)
     world:initialize()
-    local calls, setter = { party = 0, guild = 0 }, addon.SetDataChannelEnabled
+    assert(api.LockInToolsDB.data.channels.friends == true, "upgraded profiles default Friends sharing on")
+    local calls, setter = { party = 0, guild = 0, friends = 0 }, addon.SetDataChannelEnabled
     addon.SetDataChannelEnabled = function(self, channel, enabled)
         calls[channel] = calls[channel] + 1
         return setter(self, channel, enabled)
@@ -223,7 +227,7 @@ end
 do
     local saved = { schemaVersion = 5, showWelcome = false, important = "keep",
         group = { secret = SECRET }, chat = { autoJoin = false },
-        data = { channels = { party = false, guild = true, global = false } } }
+        data = { channels = { party = false, guild = true, friends = false, global = false } } }
     local addon, api, _, _, world = loadAddon(saved, false)
     world:initialize()
     local transparencyWrites = 0
@@ -272,7 +276,8 @@ do
     assert(panel.selectedTab == "sharing" and not panel.rankingBurningEffect:IsEnabled())
     assert(api.LockInToolsDB == saved and saved.schemaVersion == 5 and saved.important == "keep"
         and saved.group.secret == SECRET and not saved.chat.autoJoin and saved.ranking == nil
-        and not saved.data.channels.party and saved.data.channels.guild and not saved.data.channels.global)
+        and not saved.data.channels.party and saved.data.channels.guild
+        and not saved.data.channels.friends and not saved.data.channels.global)
 end
 
 -- Every settings help path uses the global anchor and retains owner-based cleanup.
@@ -314,7 +319,8 @@ do
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())
     end
-    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.guild.labelButton }) do
+    for _, widget in ipairs({ panel.dataChannels.party, panel.dataChannels.guild.labelButton,
+        panel.dataChannels.friends.labelButton }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR",
             "data controls use the shared tooltip position")

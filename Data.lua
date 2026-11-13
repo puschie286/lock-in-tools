@@ -7,6 +7,11 @@ local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
 end
 
+function addon:IsDataFrame(message)
+    return not IsSecret(message) and type(message) == "string" and #message <= MAX_MESSAGE_BYTES
+        and not message:find("\000", 1, true)
+end
+
 local function ValidFeature(feature)
     return not IsSecret(feature) and type(feature) == "string" and #feature <= 32
         and feature:match("^[a-z][a-z0-9_-]*$")
@@ -85,6 +90,12 @@ local function SendFailureReason(ok, result)
     return "code " .. tostring(result)
 end
 
+function addon:GetDataSendFailure(ok, result)
+    if not ok or IsSecret(result) or result ~= Enum.SendAddonMessageResult.Success then
+        return SendFailureReason(ok, result)
+    end
+end
+
 function addon:GetDataSendStatusText()
     local failures, parts = self.dataState and self.dataState.sendFailures, {}
     if not failures then return "" end
@@ -92,6 +103,8 @@ function addon:GetDataSendStatusText()
         local reason = failures[route[1]]
         if reason then parts[#parts + 1] = route[2] .. " (" .. reason .. ")" end
     end
+    local friends = self:GetFriendsDataSendFailure()
+    if friends then parts[#parts + 1] = "friends (" .. friends .. ")" end
     return #parts > 0 and ("Send failures: " .. table.concat(parts, "; ") .. ".") or ""
 end
 
@@ -105,23 +118,19 @@ end
 
 local function SendFrame(self, message)
     if not self:IsDataConnected() then return false, "Group data is disconnected." end
-    if #message > MAX_MESSAGE_BYTES or message:find("\000", 1, true) then
+    if not self:IsDataFrame(message) then
         return false, "Data message exceeds the supported format."
     end
     local routes = self:RefreshDataRoutes()
     if not self:IsDataConnected() then return false, "Group data is disconnected." end
-    -- No queue or automatic retry: each feature decides when its data is current.
-    -- Reuse the exact frame (including request IDs) so existing protocol guards
-    -- suppress overlapping deliveries. Every route gets a chance, even on failure.
     local accepted, changed = false, false
     local failures = self.dataState.sendFailures
     for _, distribution in ipairs({ "PARTY", "RAID", "GUILD" }) do
         local route = routes[distribution]
         if route then
             local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, message, distribution)
-            local reason
-            if ok and not IsSecret(result) and result == Enum.SendAddonMessageResult.Success then accepted = true
-            else reason = SendFailureReason(ok, result) end
+            local reason = self:GetDataSendFailure(ok, result)
+            if not reason then accepted = true end
             if failures[distribution] ~= reason then
                 failures[distribution], changed = reason, true
             end
@@ -210,7 +219,7 @@ function addon:SendData(feature, payload)
     return SendFrame(self, "1|" .. feature .. "|" .. payload)
 end
 
-local function ReceiveRequest(self, sender, body)
+local function ReceiveRequest(self, sender, body, nativeSender)
     local state = self.dataState
     local feature, id, payload = body:match("^([a-z][a-z0-9_-]*)|([^|]+)|(.*)$")
     local normalized = SenderName(self, sender)
@@ -221,7 +230,8 @@ local function ReceiveRequest(self, sender, body)
     local key = normalized .. "|" .. feature .. "|" .. id
     if state.repliedRequests[key] then return false end
     state.repliedRequests[key] = now + REQUEST_WINDOW
-    local header = "1|R|" .. feature .. "|" .. id .. "|" .. normalized .. "|"
+    local target = nativeSender and SenderName(self, nativeSender) or normalized
+    local header = "1|R|" .. feature .. "|" .. id .. "|" .. target .. "|"
     local ok, response = pcall(registration.onRequest, sender, payload, MAX_MESSAGE_BYTES - #header)
     if not ok or IsSecret(response) or type(response) ~= "string" then return false end
     return SendFrame(self, header .. response)
@@ -244,12 +254,11 @@ local function ReceiveResponse(self, sender, body)
     return ok and accepted ~= false
 end
 
--- Native events supply ordinary bounded strings. Only the addon protocol needs
--- decoding; all receives enter through an eligible native addon-message route.
-function addon:OnDataMessage(sender, message)
+function addon:OnDataMessage(sender, message, nativeSender)
+    if IsSecret(sender) or type(sender) ~= "string" or sender == "" or not self:IsDataFrame(message) then return false end
     local kind, body = message:match("^1|([^|]+)|(.*)$")
     if not kind then return false end
-    if kind == "Q" then return ReceiveRequest(self, sender, body) end
+    if kind == "Q" then return ReceiveRequest(self, sender, body, nativeSender) end
     if kind == "R" then return ReceiveResponse(self, sender, body) end
     local registration = self.dataState.features[kind]
     if not registration then return false end
@@ -285,18 +294,26 @@ end
 
 function addon:PrunePlayerData()
     if not CanChangePlayerData(self) or not self:GetPlayerDataCleanupEnabled() then return 0 end
-    local lastSeen, cutoff = {}, GetServerTime() - PLAYER_DATA_MAX_AGE
+    local lastSeen, activeCharacters, cutoff = {}, {}, GetServerTime() - PLAYER_DATA_MAX_AGE
     -- Expire a player's history together using the most recent roster contact.
     for _, peers in ipairs({ self.db.roster.peers, self.rosterState.peers }) do
         for id, peer in pairs(peers) do
             local stamp = peer.seenAt
-            if type(stamp) == "number" then lastSeen[id] = math.max(lastSeen[id] or 0, stamp) end
+            if type(stamp) == "number" then
+                lastSeen[id] = math.max(lastSeen[id] or 0, stamp)
+                if stamp > cutoff then activeCharacters[self:GetRankingPlayerKey(id)] = true end
+            end
         end
     end
-    local maps, count = PlayerDataMaps(self), 0
+    local count = 0
     for id, stamp in pairs(lastSeen) do
         if stamp <= cutoff then
-            for _, map in ipairs(maps) do map[id] = nil end
+            self.db.roster.peers[id], self.rosterState.peers[id], self.rosterState.progress[id] = nil, nil, nil
+            -- Both protocol maps use the same character key across name forms.
+            local key = self:GetRankingPlayerKey(id)
+            if not activeCharacters[key] then
+                self.burnedState.peers[key], self.dataState.status.received[key] = nil, nil
+            end
             count = count + 1
         end
     end

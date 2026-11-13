@@ -246,6 +246,48 @@ do
     assert(mismatchClock:find("friend-testrealm"), "Legacy group fingerprints cannot discard saved metadata")
 end
 
+-- Friends sharing retains a validated complete display name alongside the native identity.
+do
+    local addon, world = newAddon()
+    local friends = {
+        ["Ari-Stone"] = { id = "ari-stone", displayName = "Ari Stone" },
+        ["Ari-Flint"] = { id = "ari-flint", displayName = "Ari Flint" },
+    }
+    function addon:FindDataFriend(sender) return friends[sender] end
+    world:login(); world:connect()
+    for sender, friend in pairs(friends) do
+        assert(world:status(sender, { level = 31, xp = 50, xpMax = 100, xpState = "known", inParty = false }))
+        assert(world:find(friend.id).displayName == friend.displayName
+            and addon.db.roster.peers[friend.id].displayName == friend.displayName)
+        assert(addon:PerformOverviewAction(friend.id, "invite"))
+        assert(world.invites[#world.invites] == friend.displayName)
+    end
+
+    local profile = copy(addon.db)
+    profile.roster.peers["ambiguous-remoterealm"] = { name = "Ambiguous-RemoteRealm", level = 20,
+        seenAt = world.epoch, displayName = "Another Name" }
+    local restored, clock = newAddon(profile)
+    clock:login(); clock:connect()
+    for sender, friend in pairs(friends) do
+        local row = assert(clock:find(friend.id))
+        assert(row.displayName == friend.displayName and row.name == sender and not row.online and row.xp == 50,
+            "Previously shared surnames and XP survive reload without current Friends observations")
+    end
+    local ambiguous = assert(clock:find("ambiguous-remoterealm"))
+    assert(ambiguous.displayName == nil and ambiguous.name == "Ambiguous-RemoteRealm"
+        and restored.db.roster.peers[ambiguous.id].displayName == nil,
+        "An invalid display name cannot change a saved native identity")
+
+    profile.roster.peers["ari-stone"].displayName = nil
+    local old, oldClock = newAddon(profile)
+    oldClock:login(); oldClock:connect()
+    old:Notify("FRIENDS_CHANGED", { { id = "ari-stone", displayName = "Ari Stone", online = false } })
+    local oldRow = assert(oldClock:find("ari-stone"))
+    assert(oldRow.displayName == "Ari Stone" and oldRow.name == "Ari-Stone" and not oldRow.online
+        and old.db.roster.peers[oldRow.id].displayName == "Ari Stone",
+        "An offline native Friends observation can recover and persist older history's complete name")
+end
+
 -- Legacy bare names use the saved realm before login APIs are ready and remain qualified on later reloads.
 do
     local source, clock = newAddon()

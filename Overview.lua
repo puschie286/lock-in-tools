@@ -17,6 +17,10 @@ local function HideTooltip(button)
     if GameTooltip and GameTooltip:IsOwned(button) then GameTooltip:Hide() end
 end
 
+local function OverviewName(player)
+    return player.displayName or addon:GetPlayerDisplayName(player.name)
+end
+
 local function KnownXP(player)
     return player.level and player.xpState == "known" and type(player.xp) == "number"
         and type(player.xpMax) == "number" and player.xpMax > 0
@@ -26,7 +30,7 @@ local function ProgressTooltip(cell)
     local player = cell.player
     if not player or not GameTooltip then return end
     GameTooltip_SetDefaultAnchor(GameTooltip, cell)
-    GameTooltip:SetText(addon:GetPlayerDisplayName(player.name)
+    GameTooltip:SetText(OverviewName(player)
         .. (player.level and " — level " .. player.level or " — level unknown"))
     if KnownXP(player) then
         GameTooltip:AddLine("XP: " .. player.xp .. " / " .. player.xpMax)
@@ -358,20 +362,14 @@ local function RefreshPlayerTable(page, players, displayName)
     if #players == 0 then page.empty:Show() else page.empty:Hide() end
 end
 
-local function OverviewName(player)
-    return addon:GetPlayerDisplayName(player.name)
-end
-
 function addon:RefreshOverview()
     local panel = self.contentPanel
     local page = panel and panel.overviewPage
     if not page or not page:IsVisible() or panel.selectedTab ~= "overview" then return end
     local players, now = self:GetOverviewPlayers(), GetServerTime()
     RefreshPlayerTable(page, players, OverviewName)
-    if not self:HasDataGroup() then
-        page.empty:SetText("Join a guild, party or raid with sharing enabled to see your friends.")
-    elseif #players == 0 then
-        page.empty:SetText("Waiting for players on this realm and faction.")
+    if #players == 0 then
+        page.empty:SetText("Waiting for players sharing through Friends, Guild, or Party / raid.")
     end
     local menu = page.actionMenu
     for index, row in ipairs(page.rows) do

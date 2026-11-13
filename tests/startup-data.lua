@@ -9,33 +9,36 @@ local OTHER_SECRET = fixtures.OTHER_SECRET
 for _, seed in ipairs({
     {}, { data = false }, { data = "invalid" },
     { data = { channels = 12, future = "preserved" } },
-    { data = { channels = { party = false, guild = "false", global = false, future = "preserved" },
+    { data = { channels = { party = false, guild = "false", friends = false, global = false, future = "preserved" },
+        future = "preserved" } },
+    { data = { channels = { friends = "false", future = "preserved" },
         future = "preserved" } },
 }) do
     local profile = settings("", false)
     profile.data = seed.data
     local channels = type(seed.data) == "table" and type(seed.data.channels) == "table" and seed.data.channels
-    local party, guild = not channels or channels.party ~= false,
-        not channels or channels.guild ~= false
+    local party, guild, friends = not channels or channels.party ~= false,
+        not channels or channels.guild ~= false, not channels or channels.friends ~= false
     local current, _, _, event = loadAddon(profile, false)
     event("ADDON_LOADED", "LockInTools")
     assert(current:GetDataChannelEnabled("party") == party and current:GetDataChannelEnabled("guild") == guild
+        and current:GetDataChannelEnabled("friends") == friends
         and not current:GetDataChannelEnabled("global")
         and profile.data.channels.party == party and profile.data.channels.guild == guild
-        and profile.data.channels.global == nil,
+        and profile.data.channels.friends == friends and profile.data.channels.global == nil,
         "Channel defaults repair malformed values while retaining saved false values")
     if type(seed.data) == "table" then
         assert(profile.data.future == "preserved")
         if channels then assert(profile.data.channels.future == "preserved") end
     end
-    assert(profile.schemaVersion == 4, "Retired channel preferences migrate to the native-only schema")
+    assert(profile.schemaVersion == 4, "Existing channel preferences migrate to the current schema")
 end
 
 -- Saving channel preferences before login changes only account-wide settings;
 -- all-disabled profiles remain quiet across reloads despite native membership.
 do
     local profile = settings(nil, false)
-    profile.data = { channels = { party = false, guild = false, global = false } }
+    profile.data = { channels = { party = false, guild = false, friends = false, global = false } }
     local current, _, _, event, clock = loadAddon(profile, false)
     clock.grouped, clock.guild = true, true
     assert(not current:SetDataChannelEnabled("guild", true))
@@ -59,7 +62,8 @@ do
     restoredClock:initialize()
     restoredClock:advance(30)
     assert(not restored:GetDataChannelEnabled("party") and not restored:GetDataChannelEnabled("guild")
-        and not restored:GetDataChannelEnabled("global") and not restored:IsDataConnected()
+        and not restored:GetDataChannelEnabled("friends") and not restored:GetDataChannelEnabled("global")
+        and not restored:IsDataConnected()
         and #restoredClock.dataJoinCalls == 0 and #restoredClock.statusSends == 0
         and #restoredClock.dataSends == 0,
         "Saved opt-outs keep native sharing disabled after reload")
@@ -67,7 +71,9 @@ end
 
 -- Sharing changes refresh views once, after the final route status is available.
 do
-    local current, _, _, _, clock = loadAddon(settings(nil, false), false)
+    local profile = settings(nil, false)
+    profile.data = { channels = { friends = false } }
+    local current, _, _, _, clock = loadAddon(profile, false)
     clock.grouped, clock.guild = true, true
     clock:initialize()
     local statuses = {}
@@ -277,6 +283,98 @@ do
     assert(#aliceWorld.notificationErrors == 0 and #bobWorld.notificationErrors == 0)
 end
 
+-- The production Friends roster supplies Battle.net targets across internal realms.
+do
+    local alice = { name = "Alice Stone", realm = "CAMWOWEU5Realm8PvP", gameID = 21, xp = 125, burned = 20 }
+    local bob = { name = "Bob Reed", realm = "CAMWOWEU5Realm6PvP", gameID = 42, xp = 750, burned = 80 }
+    for _, client in ipairs({ alice, bob }) do
+        local friend = client == alice and bob or alice
+        local profile = settings(nil, false)
+        profile.burned = { status = client.burned }
+        local addon, environment, _, fire, world = loadAddon(profile, false)
+        client.addon, client.fire, client.world = addon, fire, world
+        environment.WOW_PROJECT_CAMELOT, environment.WOW_PROJECT_ID, environment.BNET_CLIENT_WOW = 18, 18, "WoW"
+        environment.GetNormalizedRealmName = function() return client.realm end
+        environment.UnitFullName = function() return client.name, client.realm end
+        environment.BNGetNumFriends = function() return client.friendRemoved and 0 or 1 end
+        client.sent = {}
+        environment.C_BattleNet = {
+            GetFriendAccountInfo = function() return { bnetAccountID = friend.gameID + 100, isFriend = true,
+                appearOffline = false } end,
+            GetFriendNumGameAccounts = function() return 1 end,
+            GetFriendGameAccountInfo = function() return { gameAccountID = friend.gameID, characterName = friend.name,
+                realmName = friend.realm, clientProgram = "WoW", wowProjectID = 18, isInCurrentRegion = true,
+                isOnline = true, isAppearOffline = false, characterLevel = 12 } end,
+            SendGameData = function(target, prefix, message)
+                assert(target == friend.gameID)
+                client.sent[#client.sent + 1] = { prefix, message }
+                return 0
+            end,
+        }
+        world.xp = client.xp
+        world:initialize()
+    end
+    assert(not alice.addon:IsDataConnected() and not bob.addon:IsDataConnected())
+    for _ = 1, 8 do
+        for _, client in ipairs({ alice, bob }) do
+            local friend = client == alice and bob or alice
+            client.world:advance(1)
+            for _, packet in ipairs(client.sent) do
+                friend.fire("BN_CHAT_MSG_ADDON", packet[1], packet[2], "WHISPER", client.gameID)
+            end
+            client.sent = {}
+        end
+    end
+    local function checkBob(xp)
+        local count, found = 0, false
+        for _, row in ipairs(alice.addon:GetOverviewPlayers()) do
+            if not row.isSelf then
+                count = count + 1
+                found = row.online and row.xp == xp
+            end
+        end
+        local burned = alice.addon:GetGroupBurnedStatus()
+        assert(count == 1 and found and burned.count == 2 and burned.average == 50)
+    end
+    assert(alice.addon:GetDataStatusText() == "Data routes: friends.")
+    checkBob(750)
+
+    for _, client in ipairs({ alice, bob }) do
+        client.world.guild = true
+        client.fire("PLAYER_GUILD_UPDATE", "player")
+    end
+    bob.world.xp = 925
+    bob.world:advance(5)
+    local sent = assert(bob.world.statusSends[#bob.world.statusSends])
+    assert(sent.distribution == "GUILD")
+    alice.fire("CHAT_MSG_ADDON", sent.prefix, sent.message, "GUILD", "Bob Reed-" .. bob.realm)
+    checkBob(925)
+
+    alice.friendRemoved = true
+    alice.fire("BN_FRIEND_LIST_SIZE_CHANGED")
+    assert(not next(alice.addon:GetDataFriends()))
+    alice.world:advance(1)
+    local session = assert(sent.message:match("5|F|([^|]+)|"))
+    local delayed = "1|status|5|F|" .. session .. "|2000000001|1|1=12|2=125|3=1000|4=1|10=0|12=20"
+    alice.fire("CHAT_MSG_ADDON", sent.prefix, delayed, "GUILD", "Bob Reed-" .. bob.realm)
+    checkBob(925)
+
+    -- Receive fresh guild status under the native spelling before the Friends
+    -- roster returns. A delayed packet still belongs to the same session.
+    bob.world.xp = 950
+    bob.world:advance(5)
+    local newer = assert(bob.world.statusSends[#bob.world.statusSends])
+    alice.fire("CHAT_MSG_ADDON", newer.prefix, newer.message, "GUILD", "Bob Reed-" .. bob.realm)
+    checkBob(950)
+    alice.friendRemoved = false
+    alice.fire("BN_FRIEND_LIST_SIZE_CHANGED")
+    assert(alice.addon:GetDataFriends()["bob-reed"])
+    alice.world:advance(1)
+    alice.fire("CHAT_MSG_ADDON", sent.prefix, sent.message, "GUILD", "Bob Reed-" .. bob.realm)
+    checkBob(950)
+    assert(#alice.world.notificationErrors == 0 and #bob.world.notificationErrors == 0)
+end
+
 -- Channel preferences never bypass login, native membership or newer-schema protection.
 do
     local loading, _, _, loadingEvent, loadingWorld = loadAddon(settings(nil, false), false)
@@ -461,7 +559,7 @@ end
 for _, saved in ipairs({ {}, { cleanupOldPlayers = false }, { cleanupOldPlayers = "false" } }) do
     local profile = settings("", false)
     profile.data = { cleanupOldPlayers = saved.cleanupOldPlayers, future = "preserved",
-        channels = { party = false, guild = false, global = false } }
+        channels = { party = false, guild = false, friends = false, global = false } }
     local current, _, _, event = loadAddon(profile, false)
     local accepted, problem = current:SetPlayerDataCleanupEnabled(false)
     assert(not accepted and type(problem) == "string")
@@ -483,7 +581,7 @@ end
 do
     local cutoff = 2000000000 - 10 * 86400
     local profile = settings(nil, false)
-    profile.data = { channels = { party = false, guild = false, global = false } }
+    profile.data = { channels = { party = false, guild = false, friends = false, global = false } }
     profile.roster = { peers = {} }
     profile.position = { sharing = false, keepLastKnown = true, peers = {
         ["cachedposition-testrealm"] = { name = "CachedPosition", stamp = cutoff + 1, seenAt = cutoff + 1,
@@ -533,6 +631,33 @@ do
     current.rosterState.peers["disabled-testrealm"] = profile.roster.peers["disabled-testrealm"]
     clock:advance(3600)
     assert(profile.roster.peers["disabled-testrealm"], "Disabling cleanup cancels the active hourly job")
+end
+
+-- Expired aliases must leave the current character's shared status intact.
+do
+    local cutoff = 2000000000 - 10 * 86400
+    local canonicalID, currentID = "bob-reed", "bob reed-camwoweu5realm6pvp"
+    local profile = settings(nil, false)
+    profile.data = { cleanupOldPlayers = false }
+    profile.roster = { peers = {
+        [canonicalID] = { name = "Bob-Reed", level = 12, seenAt = cutoff },
+        [currentID] = { name = "Bob Reed-CAMWOWEU5Realm6PvP", level = 12, seenAt = cutoff + 1 },
+    } }
+    local addon, environment, _, fire, world = loadAddon(profile, false)
+    environment.WOW_PROJECT_ID, environment.WOW_PROJECT_CAMELOT = 18, 18
+    fire("ADDON_LOADED", "LockInTools")
+    local statuses, burned = addon.dataState.status.received, addon.burnedState.peers
+    local snapshot, report = {}, {}
+    statuses[canonicalID], burned[canonicalID] = snapshot, report
+
+    assert(addon:SetPlayerDataCleanupEnabled(true))
+    assert(not profile.roster.peers[canonicalID] and not addon.rosterState.peers[canonicalID])
+    assert(profile.roster.peers[currentID] and statuses[canonicalID] == snapshot and burned[canonicalID] == report)
+
+    world:advance(1)
+    assert(addon:PrunePlayerData() == 1)
+    assert(not profile.roster.peers[currentID] and not addon.rosterState.peers[currentID]
+        and not statuses[canonicalID] and not burned[canonicalID])
 end
 
 -- Clearing player data removes persisted and live peer reports without changing

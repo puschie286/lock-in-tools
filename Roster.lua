@@ -41,6 +41,12 @@ local function SavedName(name, id)
     return name:find("-", 1, true) and name or (name .. "-" .. realm)
 end
 
+local function FriendDisplayName(name, id)
+    if IsSecret(name) or type(name) ~= "string" or #name > 128 or name:find("[|%c]") then return nil end
+    local first, surname = name:match("^([^%s%-]+) ([^%s%-]+)$")
+    if first and (first .. "-" .. surname):lower() == id then return name end
+end
+
 local function SelfName()
     if NameUtil and type(NameUtil.GetUnmodifiedUnitFullName) == "function" then
         local ok, name = pcall(NameUtil.GetUnmodifiedUnitFullName, "player")
@@ -171,7 +177,8 @@ local STATUS_FLAGS = { "inParty", "canInvite", "partyFull" }
 
 local function SavePeer(self, id, peer)
     if self.savedDataReadOnly then return end
-    local saved = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt, class = peer.class }
+    local saved = { name = SavedName(peer.name, id), level = peer.level, seenAt = peer.seenAt, class = peer.class,
+        displayName = peer.displayName }
     for _, name in ipairs(STATUS_FLAGS) do saved[name] = peer[name] end
     local progress = self.rosterState.progress[id]
     if progress and progress.level == peer.level then
@@ -179,6 +186,21 @@ local function SavePeer(self, id, peer)
         saved.xpState, saved.xpUpdatedAt = progress.xpState, progress.xpUpdatedAt
     end
     self.db.roster.peers[id] = saved
+end
+
+local function RestoreFriendDisplayNames(self, friends)
+    if self.savedDataReadOnly or not friends then return end
+    local changed = false
+    for _, friend in ipairs(friends) do
+        local peer = self.rosterState.peers[friend.id]
+        local displayName = FriendDisplayName(friend.displayName, friend.id)
+        if peer and displayName and not peer.displayName then
+            peer.displayName = displayName
+            SavePeer(self, friend.id, peer)
+            changed = true
+        end
+    end
+    if changed then Refresh(self) end
 end
 
 local function RestoreProgress(saved)
@@ -244,6 +266,7 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
     if not Active(self) or not self:IsDataConnected() or not Identity(sender)
         or self:IsDataSelf(sender) then return false end
     local id, state = Identity(sender), self.rosterState
+    local friend = self.FindDataFriend and self:FindDataFriend(sender)
     local function Reject()
         -- A valid protocol frame may still contain invalid player data.
         -- Retain the last good values visibly stale until a valid report arrives.
@@ -293,6 +316,7 @@ function addon:ReceivePlayerStatus(sender, fields, stamp, sequence, metadata)
         peer = { name = sender }
         state.peers[id] = peer
     end
+    if friend then peer.displayName = FriendDisplayName(friend.displayName, id) or peer.displayName end
     peer.level, peer.seenAt, peer.lastReceived = level, now, GetTime()
     peer.inParty, peer.canInvite, peer.partyFull = flags.inParty, flags.canInvite, flags.partyFull
     peer.class = ClassToken(fields.class) or peer.class
@@ -313,7 +337,7 @@ function addon:InitializeRoster()
         if name and Number(saved.seenAt, 9999999999)
             and (saved.level == nil or Number(saved.level, 1000)) then
             local peer = { name = name, level = saved.level, seenAt = saved.seenAt, class = ClassToken(saved.class),
-                statusSynchronized = false }
+                statusSynchronized = false, displayName = FriendDisplayName(saved.displayName, id) }
             for _, flag in ipairs(STATUS_FLAGS) do
                 if type(saved[flag]) == "boolean" then peer[flag] = saved[flag] end
             end
@@ -324,6 +348,7 @@ function addon:InitializeRoster()
             settings.peers[id] = nil
         end
     end
+    self:RegisterNotification("FRIENDS_CHANGED", function(_, friends) RestoreFriendDisplayNames(self, friends) end)
     self:RegisterDataStatusProvider("player", function()
         if Active(self) then return LocalStatus(self) end
     end, function(sender, fields, stamp, sequence, metadata)
@@ -386,7 +411,7 @@ function addon:GetOverviewPlayers(includeSoloSelf)
         local row = { id = id, name = peer.name, level = peer.level, seenAt = peer.seenAt, isSelf = isSelf,
             online = isSelf or (self:IsDataConnected() and peer.lastReceived ~= nil and GetTime() - peer.lastReceived < TIMEOUT),
             inParty = peer.inParty, canInvite = peer.canInvite, partyFull = peer.partyFull, class = peer.class,
-            statusSynchronized = peer.statusSynchronized }
+            statusSynchronized = peer.statusSynchronized, displayName = peer.displayName }
         local progress = isSelf and self.rosterState.localStatus or self.rosterState.progress[id]
         row.xpState, row.xpStale = "unavailable", false
         if progress then
@@ -407,9 +432,22 @@ function addon:GetOverviewPlayers(includeSoloSelf)
             class = status.class }, true)
     end
     if not hasDataGroup then return rows end
-    for id, peer in pairs(self.rosterState.peers) do
-        if id ~= ownID and not self:IsDataSelf(peer.name) then Add(id, peer, false) end
+    local function Key(id)
+        return self.GetRankingPlayerKey and self:GetRankingPlayerKey(id) or id
     end
+    local ownKey = Key(ownID)
+    local selected = {}
+    for id, peer in pairs(self.rosterState.peers) do
+        local key = Key(id)
+        if key ~= ownKey and not self:IsDataSelf(peer.name) then
+            local previousID = selected[key]
+            local previous = previousID and self.rosterState.peers[previousID]
+            if not previous or (peer.lastReceived or -1) > (previous.lastReceived or -1)
+                or (peer.lastReceived == previous.lastReceived and (peer.seenAt > previous.seenAt
+                    or (peer.seenAt == previous.seenAt and id < previousID))) then selected[key] = id end
+        end
+    end
+    for _, id in pairs(selected) do Add(id, self.rosterState.peers[id], false) end
     table.sort(rows, function(left, right)
         if left.isSelf ~= right.isSelf then return left.isSelf == true end
         if left.online ~= right.online then return left.online == true end
@@ -423,12 +461,13 @@ function addon:GetOverviewActionState(id)
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     local reason
-    if not Active(self) then reason = "After login, join a guild, party or raid with sharing enabled."
+    if not Active(self) then reason = "Wait for player data sharing to connect."
     elseif not row then reason = "This player is no longer available."
     elseif row.isSelf then reason = "This is your character."
     elseif not row.online then reason = "No recent contact with this player."
     elseif row.statusSynchronized == false then reason = "Waiting for this player's current status."
-    elseif NativeBoolean(UnitInParty, row.name) or NativeBoolean(UnitInRaid, row.name) then
+    elseif NativeBoolean(UnitInParty, row.displayName or row.name)
+        or NativeBoolean(UnitInRaid, row.displayName or row.name) then
         reason = "Already in your party or raid."
     end
     if reason then
@@ -466,7 +505,7 @@ function addon:PerformOverviewAction(id, action)
     local row
     for _, candidate in ipairs(self:GetOverviewPlayers()) do if candidate.id == id then row = candidate; break end end
     if not row then return false, "This player is no longer available." end
-    local target = row.name
+    local target = row.displayName or row.name
     local character, realm = target:match("^([^%-]+)%-(.+)$")
     local localRealm = NativeGroupRealm()
     -- Match native party-menu naming without shortening foreign realms or surnames.

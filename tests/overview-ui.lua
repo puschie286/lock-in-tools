@@ -465,7 +465,8 @@ do
     progressWorld:initialize()
     local now, snapshots = api.GetServerTime(), 0
     local players = {
-        { id = "alpha", name = "Alpha-Other Realm", level = 24, xp = 420, xpMax = 1000, xpState = "known", online = true },
+        { id = "alpha", name = "Alpha-Stone", displayName = "Alpha Stone", level = 24,
+            xp = 420, xpMax = 1000, xpState = "known", online = true },
         { id = "bravo", name = "Bravo", level = 24, xp = 0, xpMax = 1000, xpState = "known", online = true },
         { id = "charlie", name = "Charlie", level = 24, xp = 999, xpMax = 1000, xpState = "known", online = true },
         { id = "delta", name = "Delta", level = 60, xpState = "max", online = false },
@@ -508,7 +509,7 @@ do
         and page.rows[8].progressFill.textureColor[4] == 0.35,
         "stale and offline progress omit the tilde while retaining dimmed percentages and bars")
     row.levelCell.scripts.OnEnter(row.levelCell)
-    assert(tooltip.shown and tooltip.owner == row.levelCell
+    assert(tooltip.shown and tooltip.owner == row.levelCell and tooltip.text == "Alpha Stone — level 24"
         and tooltip.lines[1] == "XP: 420 / 1000" and tooltip.lines[2] == "To next level: 580 XP"
         and #tooltip.lines == 2, "the whole Level cell explains exact XP and remaining XP without report details")
     assert(#anchorOwners == 1 and anchorOwners[1] == row.levelCell and tooltip.anchor == "ANCHOR_CURSOR",
