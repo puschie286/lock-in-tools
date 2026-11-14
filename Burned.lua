@@ -9,7 +9,7 @@ end
 
 local function Active(self)
     return self.initialized and self.ready and self.burnedState and not self.burnedState.stopped
-        and not self.savedDataReadOnly and self:HasDataGroup()
+        and not self.savedDataReadOnly and self:GetBurnedEnabled() and self:IsInNativeGroup() and self:HasDataGroup()
 end
 
 local function Refresh(self)
@@ -45,6 +45,27 @@ local function ScheduleExpiry(self)
     end)
 end
 
+function addon:GetBurnedEnabled()
+    local state = self.burnedState
+    return state == nil or state.enabled
+end
+
+function addon:SetBurnedEnabled(enabled)
+    local state = self.burnedState
+    if not self.initialized or not state then return false, "Still loading. Please try again after login." end
+    if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
+    if (issecretvalue and issecretvalue(enabled)) or type(enabled) ~= "boolean" then
+        return false, "Choose on or off."
+    end
+    if state.enabled == enabled then return true end
+    state.enabled, self.db.burned.enabled = enabled, enabled
+    if not enabled then self:DiscardQueuedFriendsBurnedStatus() end
+    ResetPeers(self)
+    self:Notify("BURNED_SETTINGS_CHANGED")
+    if self.ready then self:DataStatusTick() end
+    return true
+end
+
 function addon:GetBurnedStatus()
     return self.burnedState and self.burnedState.value or 0
 end
@@ -57,6 +78,7 @@ end
 function addon:SetBurnedStatus(value)
     if not self.initialized or not self.burnedState then return false, "Still loading. Please try again after login." end
     if self.savedDataReadOnly then return false, "Update LockInTools before changing saved preferences." end
+    if not self:GetBurnedEnabled() then return false, "Burned status is disabled." end
     if (issecretvalue and issecretvalue(value)) or type(value) ~= "number" or value ~= value
         or value < 0 or value > 100 then return false, "Choose a burned status from 0 to 100%." end
     value = math.floor(value + 0.5)
@@ -79,9 +101,10 @@ function addon:ReceiveBurnedStatus(sender, fields, stamp, sequence, metadata)
     if not Active(self) or not self:IsDataConnected()
         or (issecretvalue and issecretvalue(sender)) or type(sender) ~= "string"
         or sender == "" or #sender > 128 or sender:find("[|%c]") then return false end
-    local id, isSelf = self:GetDataSenderIdentity(sender)
-    if not id or isSelf or not Number(stamp, 9999999999) or not Number(sequence, 999999999) then return false end
-    if self.GetRankingPlayerKey then id = self:GetRankingPlayerKey(id) end
+    local id = self:GetNativeGroupMemberKey(sender)
+    if not id or self:IsDataSelf(sender) or not Number(stamp, 9999999999) or not Number(sequence, 999999999) then
+        return false
+    end
     local state, previous = self.burnedState, self.burnedState.peers[id]
     -- The shared protocol orders complete snapshots. Direct callers retain the
     -- same monotonic stamp/sequence protection as other status consumers.
@@ -105,8 +128,10 @@ end
 function addon:GetGroupBurnedStatus()
     if not Active(self) or not self:IsDataConnected() then return { average = nil, count = 0 } end
     local total, count, now = self:GetBurnedStatus(), 1, GetTime()
-    for _, peer in pairs(self.burnedState.peers) do
-        if now - peer.receivedAt < CONTACT_TIMEOUT then total, count = total + peer.value, count + 1 end
+    for id, peer in pairs(self.burnedState.peers) do
+        if now - peer.receivedAt < CONTACT_TIMEOUT and self:HasNativeGroupMemberKey(id) then
+            total, count = total + peer.value, count + 1
+        end
     end
     return { average = total / count, count = count }
 end
@@ -116,24 +141,39 @@ function addon:InitializeBurned()
     local database = self.savedDataReadOnly and type(LockInToolsDB) == "table" and LockInToolsDB or self.db
     local saved = type(database.burned) == "table" and database.burned or {}
     local value = Number(saved.status, 100) and saved.status or 0
+    local enabled = saved.enabled ~= false
     local now, deadline = GetServerTime(), saved.changeAvailableAt
     deadline = Number(deadline, 9999999999) and deadline > now
         and math.min(deadline, now + CHANGE_COOLDOWN) or nil
     if not self.savedDataReadOnly then
         self.db.burned = saved
+        saved.enabled = enabled
         saved.status = value
         saved.changeAvailableAt = deadline
     end
     -- The account-wide server deadline survives reloads, relogs and group changes.
     -- Within a session, monotonic time keeps server-clock corrections from changing
     -- the five-minute interval. Peer reports remain live contact, never saved data.
-    self.burnedState = { value = value, peers = {},
+    self.burnedState = { enabled = enabled, value = value, peers = {},
         changeAvailableAfter = deadline and GetTime() + deadline - now or nil }
     self:RegisterDataStatusProvider("burned", function()
         if Active(self) then return { burned = self:GetBurnedStatus() } end
     end, function(sender, fields, stamp, sequence, metadata)
         return self:ReceiveBurnedStatus(sender, fields, stamp, sequence, metadata)
     end, function() ResetPeers(self) end)
+    self:RegisterNotification("NATIVE_GROUP_CHANGED", function()
+        if not self:IsInNativeGroup() then
+            self:DiscardQueuedFriendsBurnedStatus()
+            ResetPeers(self)
+        else
+            local changed
+            for id in pairs(self.burnedState.peers) do
+                if not self:HasNativeGroupMemberKey(id) then self.burnedState.peers[id], changed = nil, true end
+            end
+            if changed then ScheduleExpiry(self) end
+            Refresh(self)
+        end
+    end)
     self.burnedEvents = self:RegisterGameEvents({ "PLAYER_LOGOUT" }, function(self)
         self.burnedState.stopped = true
         ResetPeers(self)

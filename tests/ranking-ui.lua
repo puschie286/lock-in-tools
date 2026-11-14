@@ -323,6 +323,7 @@ do
     saved.burned = { status = 20 }
     local ranking, api, _, _, world = loadAddon(saved, false)
     world.guild = true
+    world.grouped = true
     world:initialize()
     loadOverlay(ranking, api)
     assert(ranking:SetRankingEnabled(true))
@@ -399,6 +400,56 @@ do
     assert(writes == 2 and personal:GetValue() == 40 and ranking:GetBurnedStatus() == 40
         and ranking:GetBurnedStatusCooldown() == 0 and personal:IsEnabled() and sends() == hideSends,
         "hiding the interface cancels its uncommitted personal draft and a stale release cannot publish it")
+end
+
+-- Disabling Burned reclaims both meter slots and cancels an in-flight personal edit.
+do
+    local saved = settings(SECRET, false)
+    saved.burned = { status = 80 }
+    local ranking, api, _, _, world = loadAddon(saved, false)
+    world.guild, world.grouped = true, true
+    world:initialize()
+    loadOverlay(ranking, api)
+    local player = row("Peer", 1, 24, 850, 1000)
+    ranking.GetPlayerRanking = function() return { grouped = true, players = { player } } end
+    assert(ranking:SetRankingEnabled(true))
+    ranking:OpenOptions()
+    local panel, toggle = ranking.rankingOverlay, ranking.optionsPanel.burnedEnabled
+    local group, personal = panel.groupBurned, panel.personalBurned
+    local function top(widget)
+        local _, _, _, _, y = widget:GetPoint()
+        return y
+    end
+    local enabledHeight, enabledTop = panel:GetHeight(), top(panel.rowViewport)
+    assert(group.value == 80 and group.burningEffect.scripts.OnUpdate and personal.burningEffect.scripts.OnUpdate,
+        "both enabled hot meters are animated in a group")
+    personal:SetValue(90)
+    assert(personal.pendingBurned == 90 and personal:GetValue() == 90, "the active drag previews its draft")
+    toggle:Click()
+    assert(panel:IsVisible() and panel.rows[1].player == player and panel.rows[1]:IsVisible()
+        and not group:IsShown() and not personal:IsShown() and not personal:IsEnabled()
+        and panel:GetHeight() == enabledHeight - 88 and top(panel.rowViewport) == enabledTop + 44
+        and top(panel.empty) == enabledTop + 40,
+        "turning Burned off retains rankings and removes both meter spaces from the layout")
+    assert(not group.burningEffect:IsShown() and not group.burningEffect.scripts.OnUpdate
+        and not personal.burningEffect:IsShown() and not personal.burningEffect.scripts.OnUpdate
+        and personal.pendingBurned == nil and not personal.editingBurned,
+        "turning Burned off immediately stops both effects and cancels the drag")
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(ranking:GetBurnedStatus() == 80 and ranking:GetBurnedStatusCooldown() == 0,
+        "a stale release while disabled cannot commit the canceled draft")
+    toggle:Click()
+    personal.scripts.OnMouseUp(personal, "LeftButton")
+    assert(group:IsVisible() and personal:IsVisible() and personal:IsEnabled()
+        and panel:GetHeight() == enabledHeight and top(panel.rowViewport) == enabledTop
+        and personal:GetValue() == 80 and saved.burned.status == 80 and ranking:GetBurnedStatusCooldown() == 0
+        and group.burningEffect.scripts.OnUpdate and personal.burningEffect.scripts.OnUpdate,
+        "reenabling Burned restores the prior layout, effects and saved value without committing the draft")
+    world.grouped = false
+    world.fire("GROUP_ROSTER_UPDATE")
+    assert(group.value == nil and not group.fill:IsShown() and group.label:GetText():find("join a party or raid", 1, true)
+        and personal:IsVisible() and personal:IsEnabled() and personal:GetValue() == 80 and panel.rows[1]:IsVisible(),
+        "leaving the group clears its meter while keeping the solo personal control and rankings")
 end
 
 -- Burning is a local visual preference: high meters animate independently and stop when hidden.

@@ -14,7 +14,7 @@ do
     assert(panel:IsVisible() and panel.selectedTab == "sharing")
     assert(not panel.dataChannels.party and panel.dataChannels.guild:IsEnabled() and panel.dataChannels.friends:IsEnabled())
     for _, control in ipairs({ panel.dataChannels.guild, panel.dataChannels.friends,
-        panel.rankingEnabled,
+        panel.rankingEnabled, panel.burnedEnabled,
         panel.rankingBurningEffect, panel.rankingTransparencySlider,
         panel.playerDataCleanup, panel.clearPlayerData }) do
         assert(control:IsVisible(), "all general preferences are available on one page")
@@ -57,6 +57,39 @@ do
     assert(not panel.rankingBurningEffect:GetChecked() and calls == 1)
     assert(not addon.db.ranking.enabled and not addon.db.ranking.burningEffect,
         "The effect preference stays editable and persists independently of overlay visibility")
+end
+
+-- Turning off Burned disables the visual preference and preserves its saved value.
+do
+    local saved = settings(SECRET, false)
+    local addon, api, _, _, world = loadAddon(saved, false)
+    world:initialize()
+    loadOptions(addon, api)
+    addon:OpenOptions()
+    local burned, effect = addon.optionsPanel.burnedEnabled, addon.optionsPanel.rankingBurningEffect
+    assert(burned:GetChecked() and effect:GetChecked() and effect:IsEnabled(),
+        "Burned and the burning effect default on")
+    burned.scripts.OnEnter(burned)
+    assert(api.GameTooltip.lines[1]:find("stops Burned sharing", 1, true)
+        and api.GameTooltip.lines[1]:find("hides both meters", 1, true),
+        "Burned help describes the effect on sharing and both meters")
+    burned.labelButton:Click()
+    assert(saved.burned.enabled == false and not burned:GetChecked() and not effect:IsEnabled()
+        and not effect.labelButton:IsEnabled() and effect:GetChecked() and saved.ranking.burningEffect,
+        "the Burned checkbox applies immediately and disables flame editing without clearing its preference")
+    effect:Click()
+    assert(effect:GetChecked() and saved.ranking.burningEffect, "a disabled flame control cannot change the preference")
+
+    local restored, restoredAPI, _, _, restoredWorld = loadAddon(saved, false)
+    restoredWorld:initialize()
+    loadOptions(restored, restoredAPI)
+    restored:OpenOptions()
+    local restoredPanel = restored.optionsPanel
+    assert(not restoredPanel.burnedEnabled:GetChecked() and not restoredPanel.rankingBurningEffect:IsEnabled(),
+        "Burned remains disabled after reloading saved variables")
+    assert(restored:SetBurnedEnabled(true))
+    assert(restoredPanel.burnedEnabled:GetChecked() and restoredPanel.rankingBurningEffect:GetChecked()
+        and restoredPanel.rankingBurningEffect:IsEnabled(), "reenabling Burned restores the saved flame control")
 end
 
 -- Ranking transparency applies live, without refresh writes or changes to other preferences.
@@ -235,7 +268,7 @@ do
     loadOptions(addon, api)
     addon:OpenOptions()
     local panel = addon.optionsPanel
-    for _, control in ipairs({ panel.rankingBurningEffect,
+    for _, control in ipairs({ panel.burnedEnabled, panel.rankingBurningEffect,
         panel.rankingTransparencySlider, panel.playerDataCleanup, panel.clearPlayerData }) do
         assert(not control:IsEnabled())
     end
@@ -256,6 +289,11 @@ do
     effect.scripts.OnClick(effect)
     assert(addon:GetRankingSettings().burningEffect == previous and effect:GetChecked() == previous,
         "even a directly invoked callback cannot write read-only preferences")
+    local burned, burnedEnabled = panel.burnedEnabled, addon:GetBurnedEnabled()
+    burned:SetChecked(not burnedEnabled)
+    burned.scripts.OnClick(burned)
+    assert(burned:GetChecked() == burnedEnabled and saved.burned == nil,
+        "direct Burned callbacks restore the checkbox and preserve future-schema saved variables")
     panel.tabs.sharing:Click()
     for channel, checkbox in pairs(panel.dataChannels) do
         local previous = addon:GetDataChannelEnabled(channel)
@@ -307,7 +345,7 @@ do
     for _, widget in ipairs({ panel.rankingBurningEffect, panel.rankingBurningEffect.labelButton }) do
         widget.scripts.OnEnter(widget)
         assert(tooltip:IsShown() and tooltip:IsOwned(widget) and tooltip.anchor == "ANCHOR_CURSOR"
-            and tooltip.lines[1]:find("70%%") and tooltip.lines[1]:find("both burned meters"),
+            and tooltip.lines[1]:find("70%%") and tooltip.lines[1]:find("both Burned meters"),
             "Burning effect help explains its threshold and both meters using the shared tooltip")
         widget.scripts.OnLeave(widget)
         assert(not tooltip:IsShown())

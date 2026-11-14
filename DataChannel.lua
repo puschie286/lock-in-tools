@@ -234,6 +234,22 @@ function addon:SendFriendsStatusSnapshot(message)
     return queued
 end
 
+function addon:DiscardQueuedFriendsBurnedStatus()
+    local state, discarded = self.dataState, false
+    for index = #state.friendOutbox, 1, -1 do
+        local packet = state.friendOutbox[index]
+        if packet.kind == "snapshot" then
+            local snapshot = self:DecodeFriendsStatus(packet.message)
+            if snapshot and snapshot.fields[12] ~= nil then
+                table.remove(state.friendOutbox, index)
+                discarded = true
+            end
+        end
+    end
+    if discarded then self:RequestDataStatusSnapshot(false, true) end
+    if #state.friendOutbox == 0 then CancelFriendTimer(state, "friendSendTimer") end
+end
+
 function addon:GetFriendsDataSendFailure()
     local failure
     for _, peer in pairs(self.dataState.friends) do

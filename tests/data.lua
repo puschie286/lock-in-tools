@@ -10,7 +10,7 @@ local function newAddon(saved, readOnly, native)
         nativeSends = {}, prefixCalls = {},
         sendResult = 0, sendCalls = 0, sendAttempts = {},
         guild = native.guild ~= false, party = native.party == true, raid = native.raid == true,
-        friends = native.friends or {},
+        friends = native.friends or {}, groupMembers = native.groupMembers or {},
     }
     world.sent = world.nativeSends
     -- Most fixtures pin the legacy envelope. Dedicated compact cases register both formats.
@@ -22,7 +22,13 @@ local function newAddon(saved, readOnly, native)
         IsInGuild = function() return world.guild end,
         IsInGroup = function() return world.party or world.raid end,
         IsInRaid = function() return world.raid end,
-        UnitFullName = function(unit) assert(unit == "player"); return native.playerName or "Self", "Test Realm" end,
+        UnitFullName = function(unit)
+            if unit == "player" then return native.playerName or "Self", "Test Realm" end
+            local member = world.groupMembers[tonumber(unit:match("%d+$"))]
+            if member then return member.name, member.realm end
+        end,
+        GetNumSubgroupMembers = function() return world.party and #world.groupMembers or 0 end,
+        GetNumGroupMembers = function() return world.raid and #world.groupMembers or 0 end,
         JoinTemporaryChannel = function() error("Native data must never join a custom channel") end,
         LeaveChannelByName = function() error("Native data must never leave a custom channel") end,
         CreateFrame = function(kind)
@@ -1545,6 +1551,11 @@ end
 do
     local bus = newRequestBus(function(client)
         client.addon.db.burned = { status = ({ Alice = 30, Bob = 60, Carol = 90 })[client.name] }
+        client.world.party = true
+        for _, name in ipairs({ "Alice", "Bob", "Carol" }) do
+            if name ~= client.name then table.insert(client.world.groupMembers, { name = name, realm = "Test Realm" }) end
+        end
+        loadModule("Roster.lua", client.addon, client.world.environment)
         loadModule("Burned.lua", client.addon, client.world.environment)
         client.addon:InitializeBurned()
     end)
@@ -1577,8 +1588,13 @@ do
     assert(mean.count == 1 and mean.average == 80 and changes > beforeExpiry,
         "Unrefreshed peers expire after 90 seconds and notify the meter without new packets")
     assert(receive(alice.addon, "Friend", full("friend", 2000000090, 1, "12=20")))
+    assert(alice.addon:GetGroupBurnedStatus().count == 1, "A guildmate outside the native group cannot report Burned")
+    alice.world.groupMembers = { { name = "Friend", realm = "Test Realm" } }
+    alice.world:fire("GROUP_ROSTER_UPDATE")
+    assert(alice.addon:GetGroupBurnedStatus().count == 1, "Joining a group cannot reuse an out-of-group report")
+    assert(receive(alice.addon, "Friend", full("friend", 2000000090, 2, "12=20")))
     assert(alice.addon:GetGroupBurnedStatus().average == 50)
-    local revision = 1
+    local revision = 2
     for _, body in ipairs({ "1=24", "12=101", "12=-1", "12=1.5", "12=nan", "12=" }) do
         revision = revision + 1
         assert(receive(alice.addon, "Friend", full("friend", 2000000090, revision, body)))
@@ -1590,6 +1606,16 @@ do
     assert(not receive(alice.addon, "Friend", full("friend", 2000000090, 1, "12=100")))
     assert(alice.addon:GetGroupBurnedStatus().average == 50,
         "An old status revision cannot overwrite a current burned report")
+    alice.world.groupMembers = { { name = "Friend", realm = "Other Realm" } }
+    alice.world:fire("GROUP_ROSTER_UPDATE")
+    assert(alice.addon:IsDataConnected() and alice.addon:GetGroupBurnedStatus().count == 1
+        and next(alice.addon.burnedState.peers) == nil,
+        "Replacing a member with the same first name on another realm prunes the previous report")
+    alice.world.groupMembers = { { name = "Friend", realm = "Test Realm" } }
+    alice.world:fire("GROUP_ROSTER_UPDATE")
+    assert(alice.addon:GetGroupBurnedStatus().count == 1, "Returning members must report again")
+    assert(receive(alice.addon, "Friend", full("friend", 2000000091, revision, "12=20")))
+    assert(alice.addon:GetGroupBurnedStatus().average == 50)
     alice.world:disconnect()
     assert(alice.addon:GetGroupBurnedStatus().average == nil
         and alice.addon:GetGroupBurnedStatus().count == 0 and next(alice.addon.burnedState.peers) == nil)
@@ -1603,10 +1629,101 @@ do
         "Logout cancels presence expiry and transport work")
 end
 
+-- Burned follows current native group membership and the account preference;
+-- ordinary status continues across both changes on the same guild route.
+do
+    local current, clock = newAddon({ burned = { status = 40, changeAvailableAt = 2000000300 } }, false,
+        { compact = true, groupMembers = { { name = "Friend", realm = "Test Realm" } } })
+    loadModule("Roster.lua", current, clock.environment)
+    loadModule("Burned.lua", current, clock.environment)
+    local values, samples = { level = 24, xp = 40, xpMax = 100, xpState = "known" }, {}
+    current:InitializeBurned()
+    assert(current:RegisterDataStatusProvider("player", function() return values end,
+        function(_, fields) samples[#samples + 1] = fields end))
+    clock:login()
+    local discovery = clock.sent[1].message
+    assert(current:GetBurnedEnabled() and not discovery:find("|12=", 1, true)
+        and discovery:find("|1=24|2=40|3=100|4=1", 1, true)
+        and current:GetGroupBurnedStatus().count == 0, "Solo guild status includes XP fields without Burned")
+    assert(receive(current, "Friend", full("friend", 2000000000, 1, "1=25|12=80")))
+    assert(current:GetGroupBurnedStatus().count == 0 and samples[1].level == "25")
+
+    clock.party = true
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(current:GetGroupBurnedStatus().count == 1 and current:GetGroupBurnedStatus().average == 40)
+    clock:advance(5)
+    local function lastFields()
+        local packet = clock.sent[#clock.sent]
+        assert(packet.prefix == "LITG" and packet.distribution == "GUILD")
+        return assert(current:DecodeFriendsStatus(packet.message)).fields
+    end
+    assert(lastFields()[12] == "40" and lastFields()[1] == "24")
+    assert(receive(current, "Friend", full("friend", 2000000005, 2, "1=26|12=80")))
+    assert(current:GetGroupBurnedStatus().count == 2 and current:GetGroupBurnedStatus().average == 60)
+
+    local deadline = current.db.burned.changeAvailableAt
+    assert(current:SetBurnedEnabled(false) and not current:GetBurnedEnabled() and current.db.burned.enabled == false)
+    assert(current:GetGroupBurnedStatus().count == 0 and next(current.burnedState.peers) == nil
+        and not current:SetBurnedStatus(70) and current:GetBurnedStatus() == 40 and current:GetBurnedStatusCooldown() == 295)
+    assert(receive(current, "Friend", full("friend", 2000000005, 3, "1=27|12=90")))
+    assert(samples[#samples].level == "27" and next(current.burnedState.peers) == nil,
+        "Disabled Burned ignores the report without dropping a peer's other fields")
+    values.xp = 65
+    clock:advance(5)
+    assert(lastFields()[12] == nil and lastFields()[2] == "65")
+
+    assert(current:SetBurnedEnabled(true) and current:GetGroupBurnedStatus().count == 1
+        and current.db.burned.changeAvailableAt == deadline and current:GetBurnedStatusCooldown() == 290)
+    assert(not receive(current, "Friend", full("friend", 2000000005, 3, "1=27|12=90"))
+        and current:GetGroupBurnedStatus().count == 1, "Re-enabling does not replay a report heard while disabled")
+    assert(receive(current, "Friend", full("friend", 2000000010, 4, "1=27|12=70")))
+    assert(current:GetGroupBurnedStatus().count == 2 and current:GetGroupBurnedStatus().average == 55)
+    clock:advance(5)
+    assert(lastFields()[12] == "40")
+    clock.party = false
+    clock:fire("GROUP_ROSTER_UPDATE")
+    assert(current:IsDataConnected() and current:GetGroupBurnedStatus().count == 0)
+    clock:advance(5)
+    assert(lastFields()[12] == nil and lastFields()[2] == "65", "Leaving the group withdraws only Burned")
+end
+
+-- Turning Burned off withdraws a direct snapshot still waiting in the paced queue.
+do
+    local peer = { id = "bob-fern", name = "Bob-Fern", gameAccountID = 42 }
+    local current, clock = newAddon({ burned = { status = 40 } }, false, {
+        guild = false, party = true, friends = { [peer.id] = peer },
+        groupMembers = { { name = "Bob Fern", realm = "Test Realm" } },
+    })
+    loadModule("Roster.lua", current, clock.environment)
+    loadModule("Burned.lua", current, clock.environment)
+    current:InitializeBurned()
+    local values = { level = 24, xp = 40, xpMax = 100, xpState = "known" }
+    assert(current:RegisterDataStatusProvider("player", function() return values end, function() end))
+    clock:login()
+    clock:advance(0.5)
+    assert(#clock.sent == 1 and clock.sent[1].message == "1|H")
+    clock:incomingFriend("1|A", 42)
+    local queued = current.dataState.friendOutbox[1]
+    local fields = assert(queued and current:DecodeFriendsStatus(queued.message)).fields
+    assert(fields[12] == "40" and fields[2] == "40" and #clock.sent == 1)
+
+    assert(current:SetBurnedEnabled(false))
+    values.xp = 65
+    clock:advance(10)
+    assert(#clock.sent == 1, "Disabling Burned withdraws the queued snapshot and retains the Friends send cadence")
+    clock:advance(0.5)
+    local packet = clock.sent[2]
+    assert(#clock.sent == 2 and packet.at == 11 and packet.prefix == "LITF"
+        and packet.distribution == "BATTLENET" and packet.target == 42)
+    fields = assert(current:DecodeFriendsStatus(packet.message)).fields
+    assert(fields[12] == nil and fields[2] == "65", "The next Friends snapshot carries fresh XP without Burned")
+end
+
 -- Personal edit cooldowns do not delay discovery, accepted edit delivery, or
 -- idle status heartbeats carrying the same saved Burned value.
 do
-    local current, clock = newAddon(nil, false, { guild = true })
+    local current, clock = newAddon(nil, false, { guild = true, party = true })
+    loadModule("Roster.lua", current, clock.environment)
     loadModule("Burned.lua", current, clock.environment)
     current:InitializeBurned()
     clock:login()

@@ -166,8 +166,8 @@ do
     aliceProfile.burned, bobProfile.burned = { status = 20 }, { status = 80 }
     local alice, aliceEnvironment, _, aliceEvent, aliceWorld = loadAddon(aliceProfile, false)
     local bob, bobEnvironment, _, bobEvent, bobWorld = loadAddon(bobProfile, false)
-    aliceEnvironment.UnitFullName = function() return "Alice", "Test Realm" end
-    bobEnvironment.UnitFullName = function() return "Bob", "Test Realm" end
+    aliceEnvironment.UnitFullName = function(unit) return unit == "player" and "Alice" or "Bob", "Test Realm" end
+    bobEnvironment.UnitFullName = function(unit) return unit == "player" and "Bob" or "Alice", "Test Realm" end
     aliceEnvironment.UnitClass = function() return "Mage", "MAGE" end
     bobEnvironment.UnitClass = function() return "Hunter", "HUNTER" end
     local mapReads = 0
@@ -177,6 +177,7 @@ do
     end
     aliceWorld.grouped, aliceWorld.guild, aliceWorld.xp = true, true, 125
     bobWorld.grouped, bobWorld.guild, bobWorld.xp = true, true, 750
+    aliceWorld.groupMembers, bobWorld.groupMembers = { { name = "Bob" } }, { { name = "Alice" } }
     aliceEvent("ADDON_LOADED", "LockInTools")
     bobEvent("ADDON_LOADED", "LockInTools")
     assert(not alice:IsDataConnected() and not bob:IsDataConnected()
@@ -256,7 +257,9 @@ do
     aliceEvent("GROUP_ROSTER_UPDATE")
     bobEvent("GROUP_ROSTER_UPDATE")
     assert(state.routes.GUILD and not state.routes.RAID and not state.routes.PARTY
-        and state.status.session == session and state.pendingRequests[requestID] == pending)
+        and state.status.session == session and state.pendingRequests[requestID] == pending
+        and alice:GetGroupBurnedStatus().count == 2 and alice:GetGroupBurnedStatus().average == 55,
+        "Converting to a raid retains the reports of members still present")
     bobWorld.xp = 975
     local firstGuild = #bobWorld.statusSends + 1
     bobWorld:advance(4)
@@ -296,7 +299,10 @@ do
         client.addon, client.fire, client.world = addon, fire, world
         environment.WOW_PROJECT_CAMELOT, environment.WOW_PROJECT_ID, environment.BNET_CLIENT_WOW = 18, 18, "WoW"
         environment.GetNormalizedRealmName = function() return client.realm end
-        environment.UnitFullName = function() return client.name, client.realm end
+        environment.UnitFullName = function(unit)
+            if unit == "player" then return client.name, client.realm end
+            if unit == "party1" then return friend.name, friend.realm end
+        end
         environment.BNGetNumFriends = function() return client.friendRemoved and 0 or 1 end
         client.sent = {}
         environment.C_BattleNet = {
@@ -312,7 +318,7 @@ do
                 return 0
             end,
         }
-        world.xp = client.xp
+        world.xp, world.grouped, world.groupMembers = client.xp, true, { { name = friend.name, realm = friend.realm } }
         world:initialize()
     end
     assert(not alice.addon:IsDataConnected() and not bob.addon:IsDataConnected())
@@ -349,6 +355,15 @@ do
     end
     assert(alice.addon:GetDataStatusText() == "Data routes: friends.")
     checkBob(750)
+
+    alice.world.grouped = false
+    alice.fire("GROUP_ROSTER_UPDATE")
+    assert(alice.addon:GetGroupBurnedStatus().count == 0 and alice.addon:IsDataConnected(),
+        "Leaving the native group clears Burned without disconnecting the cross-realm Friends route")
+    alice.world.grouped = true
+    alice.fire("GROUP_ROSTER_UPDATE")
+    assert(alice.addon:GetGroupBurnedStatus().count == 1,
+        "Rejoining keeps local Burned without reviving a previous friend's report")
 
     for _, client in ipairs({ alice, bob }) do
         client.world.guild = true
@@ -426,11 +441,12 @@ end
 -- by the same newer-schema rules as the other saved preferences.
 do
     local current, _, _, event, clock = loadAddon(settings("", false), false)
-    assert(current:GetBurnedStatus() == 0 and not current:SetBurnedStatus(20))
+    assert(current:GetBurnedStatus() == 0 and not current:SetBurnedStatus(20) and not current:SetBurnedEnabled(false))
     event("ADDON_LOADED", "LockInTools")
     local changes = 0
     current:RegisterNotification("BURNED_CHANGED", function() changes = changes + 1 end)
-    assert(current:GetBurnedStatus() == 0 and current.db.burned.status == 0)
+    assert(current:GetBurnedEnabled() and current:GetBurnedStatus() == 0 and current.db.burned.status == 0
+        and not current:SetBurnedEnabled("false"), "Burned defaults on and requires a boolean preference")
     assert(current:SetBurnedStatus(64.6) and current:GetBurnedStatus() == 65)
     assert(current:SetBurnedStatus(65) and changes == 1,
         "Rounding a drag to the saved integer must not cause duplicate updates")
@@ -446,21 +462,25 @@ do
     assert(current.db.burned.status == 100 and #clock.dataJoinCalls == 0 and #clock.statusSends == 0
         and current:GetGroupBurnedStatus().count == 0,
         "A personal preference without a group must not initiate traffic or invent a group average")
+    assert(current:SetBurnedEnabled(false) and current.db.burned.enabled == false)
     local reloaded, _, _, _, reloadClock = loadAddon(current.db, false)
     reloadClock:initialize()
-    assert(reloaded:GetBurnedStatus() == 100, "The personal burned status survives account-wide reloads")
+    assert(not reloaded:GetBurnedEnabled() and reloaded:GetBurnedStatus() == 100
+        and reloaded:GetBurnedStatusCooldown() == 300, "The Burned preference, value and cooldown survive reload")
     local malformed = settings("", false)
-    malformed.burned = { status = 150, future = "preserved" }
+    malformed.burned = { enabled = "false", status = 150, future = "preserved" }
     local repaired, _, _, _, repairClock = loadAddon(malformed, false)
     repairClock:initialize()
-    assert(repaired:GetBurnedStatus() == 0 and malformed.burned.status == 0
+    assert(repaired:GetBurnedEnabled() and malformed.burned.enabled == true
+        and repaired:GetBurnedStatus() == 0 and malformed.burned.status == 0
         and malformed.burned.future == "preserved")
     local newer = settings()
     newer.schemaVersion, newer.burned = 5,
-        { status = 73, changeAvailableAt = 2000009000, future = "untouched" }
+        { enabled = false, status = 73, changeAvailableAt = 2000009000, future = "untouched" }
     local future, _, _, _, futureClock = loadAddon(newer, false)
     futureClock:initialize()
-    assert(future:GetBurnedStatus() == 73 and not future:SetBurnedStatus(25)
+    assert(not future:GetBurnedEnabled() and not future:SetBurnedEnabled(true) and newer.burned.enabled == false
+        and future:GetBurnedStatus() == 73 and not future:SetBurnedStatus(25)
         and newer.burned.status == 73 and newer.burned.changeAvailableAt == 2000009000
         and newer.burned.future == "untouched"
         and future:GetGroupBurnedStatus().average == nil and future:GetGroupBurnedStatus().count == 0)
@@ -680,7 +700,7 @@ do
     profile.burned = { status = 40, changeAvailableAt = 2000000300, future = "preserved" }
     profile.position = { showDeathMarkers = false }
     local current, environment, _, event, clock = loadAddon(profile, false)
-    clock.guild = true
+    clock.guild, clock.grouped, clock.groupMembers = true, true, { { name = "Friend", realm = "Test Realm" } }
     clock:initialize()
     assert(current:ReceivePlayerStatus("Friend-TestRealm", { level = "24", xp = "25", xpMax = "100",
         xpState = "known", class = "MAGE" }, 2000000000, 1))

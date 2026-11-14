@@ -2,7 +2,6 @@ local _, addon = ...
 local UI = addon.Theme
 local WIDTH, ROW_WIDTH, ROW_HEIGHT = 326, 302, 34
 local HEADER_HEIGHT, METER_HEIGHT = 34, 44
-local ROW_TOP = HEADER_HEIGHT + METER_HEIGHT
 local VISIBLE_ROWS = 5
 local BURNED_STEP = 10
 local BURNING_THRESHOLD, BURNING_FRAME_TIME = 70, 1 / 30
@@ -197,19 +196,29 @@ local function PaintRowMotion(panel, motion)
     if row:GetFrameLevel() ~= level then row:SetFrameLevel(level) end
 end
 
+local function RowTop(panel)
+    return HEADER_HEIGHT + (panel.burnedEnabled and METER_HEIGHT or 0)
+end
+
+local function OverlayHeight(panel, rowsHeight)
+    return RowTop(panel) + rowsHeight + (panel.burnedEnabled and METER_HEIGHT or 0) + 8
+end
+
 local function PaintRowLayout(panel)
     local height = panel.rowLayout.display
     panel.rowViewport:SetHeight(math.max(1, height))
-    panel.personalBurned:ClearAllPoints()
-    panel.personalBurned:SetPoint("TOPLEFT", 12, -ROW_TOP - height - 25)
-    panel:SetHeight(ROW_TOP + height + METER_HEIGHT + 8)
+    if panel.burnedEnabled then
+        panel.personalBurned:ClearAllPoints()
+        panel.personalBurned:SetPoint("TOPLEFT", 12, -RowTop(panel) - height - 25)
+    end
+    panel:SetHeight(OverlayHeight(panel, height))
 end
 
 local function FitRankingPanel(panel)
     local height = panel:GetHeight()
     -- Fit the larger layout once, rather than zooming the whole overlay while
     -- the own-row space opens/closes. Screen changes may still refit mid-motion.
-    if panel.rowScaleHeight then panel:SetHeight(math.max(height, panel.rowScaleHeight)) end
+    if panel.rowFitHeight then panel:SetHeight(math.max(height, OverlayHeight(panel, panel.rowFitHeight))) end
     UI:Fit(panel)
     panel:SetHeight(height)
 end
@@ -228,7 +237,7 @@ local function ResetRowMotion(panel)
         end
     end
     for _, ghost in ipairs(panel.rowGhosts) do ReleaseRowGhost(ghost) end
-    panel.rowMotion, panel.rowLayout, panel.rowScaleHeight, panel.rowMotionReady = {}, nil, nil, false
+    panel.rowMotion, panel.rowLayout, panel.rowFitHeight, panel.rowMotionReady = {}, nil, nil, false
 end
 
 local function SetMotionTarget(motion, target, alpha, animate)
@@ -290,7 +299,7 @@ local function AnimateRankingRows(animator, elapsed)
     end
     if not active then
         animator:SetScript("OnUpdate", nil)
-        panel.rowScaleHeight = nil
+        panel.rowFitHeight = nil
         FitRankingPanel(panel)
     end
 end
@@ -310,7 +319,7 @@ FinishRowMotion = function(panel)
         PaintRowLayout(panel)
     end
     panel.rowAnimator:SetScript("OnUpdate", nil)
-    panel.rowScaleHeight = nil
+    panel.rowFitHeight = nil
     FitRankingPanel(panel)
 end
 
@@ -320,7 +329,7 @@ local function RefreshRowAnimator(panel)
         if motion.elapsed then active = true; break end
     end
     panel.rowAnimator:SetScript("OnUpdate", panel:IsVisible() and active and AnimateRankingRows or nil)
-    if not active then panel.rowScaleHeight = nil end
+    if not active then panel.rowFitHeight = nil end
     FitRankingPanel(panel)
 end
 
@@ -450,20 +459,43 @@ end
 
 local function CanEditBurned()
     return addon.initialized and addon.ready and not addon.savedDataReadOnly
-        and addon:GetBurnedStatusCooldown() == 0
+        and addon:GetBurnedEnabled() and addon:GetBurnedStatusCooldown() == 0
 end
 
 local function CancelBurnedEdit(meter)
     meter.editingBurned, meter.pendingBurned = nil, nil
 end
 
+local function RefreshBurnedVisibility(panel)
+    local enabled = addon:GetBurnedEnabled()
+    if panel.burnedEnabled == enabled then return end
+    panel.burnedEnabled = enabled
+    local top = RowTop(panel)
+    panel.rowViewport:ClearAllPoints()
+    panel.rowViewport:SetPoint("TOPLEFT", 12, -top)
+    panel.empty:ClearAllPoints()
+    panel.empty:SetPoint("TOPLEFT", 12, -top - 4)
+    if enabled then
+        panel.groupBurned:Show()
+        panel.personalBurned:Show()
+    else
+        CancelBurnedEdit(panel.personalBurned)
+        panel.personalBurned:SetEnabled(false)
+        StopBurningEffect(panel.groupBurned)
+        StopBurningEffect(panel.personalBurned)
+        panel.groupBurned:Hide()
+        panel.personalBurned:Hide()
+    end
+    return true
+end
+
 local function RefreshBurnedMeters(panel)
+    if not panel.burnedEnabled then return end
     local group = addon:GetGroupBurnedStatus()
     local text = "Group burned: "
     if group.average ~= nil then
         text = text .. string.format("%.0f%%", group.average) .. " (" .. group.count .. " reporting)"
-    elseif not addon:HasDataGroup() then text = text .. "waiting for a sharing route"
-    elseif not addon:IsDataConnected() then text = text .. "disconnected"
+    elseif not addon:IsInNativeGroup() then text = text .. "join a party or raid"
     else text = text .. "awaiting reports" end
     PaintMeter(panel.groupBurned, group.average, text)
 
@@ -758,7 +790,6 @@ local function CreateOverlay()
     panel.rowAnimator.panel = panel
     panel.rowAnimator:EnableMouse(false)
     panel.rowViewport = CreateFrame("ScrollFrame", nil, panel)
-    panel.rowViewport:SetPoint("TOPLEFT", 12, -ROW_TOP)
     panel.rowViewport:SetSize(ROW_WIDTH, 1)
     panel.rowViewport:EnableMouse(false)
     panel.rowContent = CreateFrame("Frame", nil, panel.rowViewport)
@@ -816,7 +847,7 @@ local function CreateOverlay()
     panel.separator = Label(panel.rowContent, "Your position", 0, 0, ROW_WIDTH, 10, "muted")
     panel.separator:SetJustifyH("CENTER")
     panel.separator:Hide()
-    panel.empty = Label(panel, "", 12, ROW_TOP + 4, ROW_WIDTH, 11, "muted")
+    panel.empty = Label(panel, "", 12, HEADER_HEIGHT + 4, ROW_WIDTH, 11, "muted")
     panel.empty:SetHeight(36)
     if panel.empty.SetWordWrap then panel.empty:SetWordWrap(true) end
 
@@ -852,6 +883,7 @@ function addon:RefreshRankingOverlay()
         return
     end
     if not panel then panel = CreateOverlay() end
+    RefreshBurnedVisibility(panel)
     local animate = panel:IsVisible() and panel.rowMotionReady and not panel.moving
     for _, motion in pairs(panel.rowMotion) do motion.seen = false end
     for _, progress in pairs(panel.xpProgress) do progress.row = nil end
@@ -866,8 +898,6 @@ function addon:RefreshRankingOverlay()
     else
         panel.empty:SetText("Waiting for shown players with usable progress.")
     end
-
-    panel.empty:SetPoint("TOPLEFT", 12, -ROW_TOP - 4)
 
     local count, ownVisible = 0, false
     for index, row in ipairs(panel.rows) do
@@ -903,7 +933,7 @@ function addon:RefreshRankingOverlay()
     end
     if not panel.rowLayout then panel.rowLayout = { display = bottom, target = bottom, alpha = 1, targetAlpha = 1 } end
     SetMotionTarget(panel.rowLayout, bottom, 1, animate)
-    if animate then panel.rowScaleHeight = math.max(panel.rowScaleHeight or panel:GetHeight(), ROW_TOP + bottom + METER_HEIGHT + 8) end
+    if animate then panel.rowFitHeight = math.max(panel.rowFitHeight or panel.rowLayout.display, bottom) end
     RetireRankingRows(panel, animate)
     PaintRowLayout(panel)
     RefreshBurnedMeters(panel)
@@ -928,7 +958,13 @@ end)
 
 addon:RegisterNotification("BURNED_CHANGED", function()
     local panel = addon.rankingOverlay
-    if panel and panel:IsVisible() then RefreshBurnedMeters(panel) end
+    if panel and panel:IsVisible() then
+        if RefreshBurnedVisibility(panel) then
+            PaintRowLayout(panel)
+            FitRankingPanel(panel)
+        end
+        RefreshBurnedMeters(panel)
+    end
 end)
 
 addon:RegisterGameEvents({ "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED" }, function(self)

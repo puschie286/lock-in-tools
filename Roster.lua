@@ -64,7 +64,7 @@ local function NativeBoolean(callback, ...)
     return ok and not IsSecret(value) and value and true or false
 end
 
-local function Grouped()
+function addon:IsInNativeGroup()
     return NativeBoolean(IsInGroup) or NativeBoolean(IsInRaid)
 end
 
@@ -206,6 +206,23 @@ function addon:GetNativeGroupMemberID(unit)
     if id and state.units[id] == unit then return id, name end
 end
 
+local function GroupMemberKey(self, id)
+    return self.GetRankingPlayerKey and self:GetRankingPlayerKey(id) or id
+end
+
+function addon:GetNativeGroupMemberKey(name)
+    self:InitializeNativeGroupMembership()
+    local state = self.nativeGroupMembership
+    local id = NativeGroupIdentity(name, state.realm)
+    local key = id and GroupMemberKey(self, id)
+    if key and state.memberUnits[key] then return key end
+end
+
+function addon:HasNativeGroupMemberKey(key)
+    local state = self.nativeGroupMembership
+    return state ~= nil and state.memberUnits[key] ~= nil
+end
+
 function addon:GetNativePlayerID()
     return NativeGroupUnitID("player", NativeGroupRealm())
 end
@@ -227,13 +244,22 @@ function addon:RefreshNativeGroupMembership()
             end
         end
     end
-    state.units = units
+    local memberUnits, ambiguousMembers = {}, {}
+    local playerID = next(units) and NativeGroupUnitID("player", state.realm)
+    local playerKey = playerID and GroupMemberKey(self, playerID)
+    -- Friends and guild can spell the same Forever name differently. Use the
+    -- shared player key for matching reports and keep native unit IDs intact.
+    for id, unit in pairs(units) do
+        local key = GroupMemberKey(self, id)
+        if key ~= playerKey then CacheNativeGroupUnit(memberUnits, ambiguousMembers, key, unit) end
+    end
+    state.units, state.memberUnits = units, memberUnits
     self:Notify("NATIVE_GROUP_CHANGED")
 end
 
 function addon:InitializeNativeGroupMembership()
     if self.nativeGroupMembership then return end
-    self.nativeGroupMembership = { units = {} }
+    self.nativeGroupMembership = { units = {}, memberUnits = {} }
     self:RegisterGameEvents({ "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD",
         "UNIT_NAME_UPDATE" }, function(self, event, unit)
         if event == "UNIT_NAME_UPDATE" then
@@ -312,7 +338,7 @@ local function LocalStatus(self)
         state.pendingLevel, state.waitingForXP, state.xpUpdateAfterLevel = nil, nil, nil
     end
     local level = state.pendingLevel and math.max(nativeLevel, state.pendingLevel) or nativeLevel
-    local result = { level = level, xpState = "unavailable", inParty = Grouped(),
+    local result = { level = level, xpState = "unavailable", inParty = self:IsInNativeGroup(),
         canInvite = NativeBoolean(C_PartyInfo and C_PartyInfo.CanInvite),
         partyFull = NativeBoolean(C_PartyInfo and C_PartyInfo.IsPartyFull) }
     if type(UnitClass) == "function" then
@@ -564,8 +590,8 @@ function addon:GetOverviewActionState(id)
     elseif row.inParty == nil then inviteReason = "This player's party status is unavailable."
     elseif row.inParty then
         inviteReason = "This player is already grouped."
-        if Grouped() then result.partyInfo = "Already in another group" end
-    elseif Grouped() and not NativeBoolean(UnitIsGroupLeader, "player")
+        if self:IsInNativeGroup() then result.partyInfo = "Already in another group" end
+    elseif self:IsInNativeGroup() and not NativeBoolean(UnitIsGroupLeader, "player")
         and not NativeBoolean(UnitIsGroupAssistant, "player") then result.suggest = true
     elseif NativeBoolean(C_PartyInfo.CanInvite) then result.invite = true
     else inviteReason = "You cannot invite players right now." end
@@ -573,7 +599,7 @@ function addon:GetOverviewActionState(id)
     if not result.suggest then result.suggestReason = inviteReason or "You cannot suggest an invitation right now." end
     if not C_PartyInfo or type(C_PartyInfo.RequestInviteFromUnit) ~= "function" then
         result.requestReason = "Join requests are unavailable in this client."
-    elseif Grouped() then result.requestReason = "Leave your current party before requesting to join another."
+    elseif self:IsInNativeGroup() then result.requestReason = "Leave your current party before requesting to join another."
     elseif not row.inParty then result.requestReason = "No active party is known for this player."
     elseif row.partyFull == nil then result.requestReason = "Their party capacity is unavailable."
     elseif row.partyFull then result.requestReason = "Their party or raid is full."

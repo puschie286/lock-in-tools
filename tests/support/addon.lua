@@ -17,7 +17,7 @@ local function loadAddon(savedVariables, loggedIn)
         optionsOpened = 0, contentOpened = 0, overviewOpened = 0, welcomeOpened = 0, minimapButtonCreations = 0,
         cursorX = 1000, cursorY = 600, cursorReads = 0,
         level = 12, xp = 0, xpMax = 1000, maxLevel = 60,
-        grouped = false, raid = false, guild = false,
+        grouped = false, raid = false, guild = false, groupMembers = {},
     }
     local function newTimer(delay, callback)
         local timer = { at = world.now + delay, callback = callback, cancelled = false }
@@ -84,7 +84,11 @@ local function loadAddon(savedVariables, loggedIn)
         GetMinimapShape = function() return world.minimapShape or "ROUND" end,
         GetServerTime = function() return 2000000000 + math.floor(world.now) end,
         GetNormalizedRealmName = function() return "TestRealm" end,
-        UnitFullName = function(unit) assert(unit == "player"); return "Self", "Test Realm" end,
+        UnitFullName = function(unit)
+            if unit == "player" then return "Self", "Test Realm" end
+            local member = world.groupMembers[tonumber(unit:match("%d+$"))]
+            if member then return member.name, member.realm end
+        end,
         UnitLevel = function(unit) assert(unit == "player"); return world.level end,
         UnitXP = function(unit) assert(unit == "player"); return world.xp end,
         UnitXPMax = function(unit) assert(unit == "player"); return world.xpMax end,
@@ -92,6 +96,8 @@ local function loadAddon(savedVariables, loggedIn)
         IsInGuild = function() return world.guild end,
         IsInGroup = function() return world.grouped or world.raid end,
         IsInRaid = function() return world.raid end,
+        GetNumSubgroupMembers = function() return world.grouped and #world.groupMembers or 0 end,
+        GetNumGroupMembers = function() return world.raid and #world.groupMembers or 0 end,
         C_Map = {
             GetBestMapForUnit = function() return 37 end,
             GetPlayerMapPosition = function()

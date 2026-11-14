@@ -421,20 +421,11 @@ local function CreateOptionsPanel()
         "Temporarily hide the overlay while you are in combat. It returns after combat if enabled.\n\n"
             .. "This preference saves across reloads and characters.", 260)
 
-    panel.rankingBurningEffect = UI:Checkbox(sharing)
-    panel.rankingBurningEffect:SetPoint("TOPLEFT", 12, -272)
-    panel.rankingBurningEffect:SetSize(28, 28)
-    BindPreference(panel, panel.rankingBurningEffect, function() return addon:GetRankingSettings().burningEffect end,
-        addon.SetRankingBurningEffect)
-    PreferenceLabel(sharing, panel.rankingBurningEffect, "Enable burning effect",
-        "Add bright glow and animated flames to both burned meters at 70% and above. Turn this off to hide the effect.\n\n"
-            .. "This preference saves across reloads and characters.", 260)
-
     local help, slider = CreateTransparencyControl(panel, sharing, "ranking", "Background transparency",
         function() return addon:GetRankingSettings().backgroundTransparency or 0 end,
         function(value) return addon:SetRankingBackgroundTransparency(value) end)
-    help:SetPoint("TOPLEFT", 16, -316)
-    slider:SetPoint("TOPLEFT", 20, -344)
+    help:SetPoint("TOPLEFT", 16, -280)
+    slider:SetPoint("TOPLEFT", 20, -308)
     local transparencyHelp = "Fade the ranking overlay's background and border while keeping player rows and meters readable.\n\n"
         .. "Changes apply immediately and save across reloads and characters."
     OptionTooltip(panel.rankingTransparencyHelp, "Background transparency", transparencyHelp)
@@ -480,6 +471,27 @@ local function CreateOptionsPanel()
             .. "Active players can appear again through fresh updates, and your current character remains visible. "
             .. "Your preferences and personal Burned status stay saved.")
     sharing:SetScript("OnHide", ResetPlayerDataConfirmation)
+
+    local burnedHeading = UI:Label(sharing, "Burned status", 14, "heading")
+    burnedHeading:SetPoint("TOPLEFT", 356, -174)
+
+    panel.burnedEnabled = UI:Checkbox(sharing)
+    panel.burnedEnabled:SetPoint("TOPLEFT", 352, -200)
+    panel.burnedEnabled:SetSize(28, 28)
+    BindPreference(panel, panel.burnedEnabled, function() return addon:GetBurnedEnabled() end,
+        addon.SetBurnedEnabled)
+    PreferenceLabel(sharing, panel.burnedEnabled, "Enable Burned status",
+        "Share Burned status over Guild and Friends while in a party or raid. The group meter counts current group members.\n\n"
+            .. "Turning this off stops Burned sharing and hides both meters from the ranking overlay. Your personal value stays saved.", 260)
+
+    panel.rankingBurningEffect = UI:Checkbox(sharing)
+    panel.rankingBurningEffect:SetPoint("TOPLEFT", 352, -236)
+    panel.rankingBurningEffect:SetSize(28, 28)
+    BindPreference(panel, panel.rankingBurningEffect, function() return addon:GetRankingSettings().burningEffect end,
+        addon.SetRankingBurningEffect)
+    PreferenceLabel(sharing, panel.rankingBurningEffect, "Enable burning effect",
+        "Add bright glow and animated flames to both Burned meters at 70% and above.\n\n"
+            .. "This preference saves across reloads and characters.", 260)
 
     CreateRestedXPPage(panel)
 
@@ -548,8 +560,11 @@ function addon:RefreshOptions()
     panel.rankingEnabled:SetEnabled(editable)
     panel.rankingHideInCombat:SetChecked(ranking.hideInCombat)
     panel.rankingHideInCombat:SetEnabled(editable)
+    local burnedEnabled = self:GetBurnedEnabled()
+    panel.burnedEnabled:SetChecked(burnedEnabled)
+    panel.burnedEnabled:SetEnabled(editable)
     panel.rankingBurningEffect:SetChecked(ranking.burningEffect)
-    panel.rankingBurningEffect:SetEnabled(editable)
+    panel.rankingBurningEffect:SetEnabled(editable and burnedEnabled)
     panel.pages.sharing.RefreshTransparency()
     RefreshRestedXP(panel)
     if not editable then
@@ -648,6 +663,7 @@ function addon:OpenWelcome()
     self:OpenContent()
 end
 
-for _, notification in ipairs({ "DATA_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED" }) do
+for _, notification in ipairs({ "DATA_CHANGED", "RESTEDXP_CHANGED", "RESTEDXP_SKIN_CHANGED", "RANKING_CHANGED",
+    "BURNED_SETTINGS_CHANGED" }) do
     addon:RegisterNotification(notification, function() addon:RefreshOptions() end)
 end
