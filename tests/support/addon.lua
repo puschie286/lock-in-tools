@@ -247,7 +247,25 @@ local function contains(messages, needle, first)
     return false
 end
 
+local function mockGuild(environment, members)
+    environment.Enum.ClubMemberPresence = { Unknown = 0, Online = 1, OnlineMobile = 2, Offline = 3, Away = 4, Busy = 5 }
+    environment.C_GuildInfo = { GuildRoster = function() end }
+    environment.C_Club = {
+        GetGuildClubId = function() return 100 end,
+        GetClubMembers = function(clubID)
+            assert(clubID == 100)
+            local ids = {}
+            for index in ipairs(members) do ids[index] = index end
+            return ids
+        end,
+        GetMemberInfo = function(clubID, index)
+            assert(clubID == 100)
+            return members[index]
+        end,
+    }
+end
+
 return {
-    loadAddon = loadAddon, settings = settings, contains = contains,
+    loadAddon = loadAddon, settings = settings, contains = contains, mockGuild = mockGuild,
     SECRET = SECRET, OTHER_SECRET = OTHER_SECRET,
 }

@@ -163,6 +163,9 @@ do
         GetFriendNumGameAccounts = function() return 1 end,
         GetFriendGameAccountInfo = function(index) return index == 1 and friend or other end,
     }
+    local guildMembers = {}
+    fixture.mockGuild(api, guildMembers)
+    guildMembers[1] = { name = "Dara-Stone", level = 19, presence = api.Enum.ClubMemberPresence.Online }
     world:initialize()
     loadOptions(addon, api)
     addon:OpenContent()
@@ -195,11 +198,20 @@ do
     assert(#standings == 2 and standings[1].id == sharedName:lower() and standings[1].xp == 50,
         "different realm suffixes still produce one ranked friend with shared XP")
     content.tabs.overview:Click()
-    local sharedRow = content.pages.overview.rows[2]
-    assert(sharedRow.playerID == sharedName:lower() and sharedRow.ranking:GetChecked())
+    local rankingRows = content.pages.overview.rows
+    local sharedRow = rankingRows[2]
+    assert(sharedRow.playerID == sharedName:lower() and sharedRow.ranking:GetChecked()
+        and sharedRow.name:GetText() == "Dara Stone" and sharedRow.progress:GetText() == "50%"
+        and rankingRows[3].name:GetText() == "Vela Ash" and not rankingRows[4]:IsShown(),
+        "Rankings shows one shared guild friend with XP alongside the native-only friend")
     sharedRow.ranking:Click()
     assert(not sharedRow.ranking:GetChecked() and #addon:GetPlayerRanking().players == 1,
         "unchecking the shared row also excludes its native friend entry")
+    content.tabs.guild:Click()
+    local guildRows = content.pages.guild.rows
+    assert(guildRows[2].playerID == sharedName:lower() and not guildRows[2].ranking:GetChecked()
+        and guildRows[2].name:GetText() == "Dara Stone" and not guildRows[3]:IsShown(),
+        "Guild uses the same identity and visibility setting for a guild friend")
     content.tabs.friends:Click()
     assert(row.name:GetText() == "Vela Ash" and not otherRow:IsShown(), "an unchecked shared player stays in Rankings")
     world.guild = false

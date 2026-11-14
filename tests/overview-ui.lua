@@ -26,12 +26,17 @@ do
         RequestInviteFromUnit = function(name) requests[#requests + 1] = name end,
     }
     overviewWorld.guild = true
+    local guildMembers = {}
+    fixture.mockGuild(api, guildMembers)
+    for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
+        guildMembers[index] = { name = name .. "-TestRealm", presence = api.Enum.ClubMemberPresence.Online }
+    end
     overviewWorld:initialize()
     local now = api.GetServerTime()
-    for index, name in ipairs({ "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet" }) do
-        assert(overview:ReceivePlayerStatus(name .. "-TestRealm", {
-            level = name ~= "Bravo" and 20 + index or 0, xpState = "unavailable",
-            inParty = name == "Bravo", partyFull = false,
+    for index, member in ipairs(guildMembers) do
+        assert(overview:ReceivePlayerStatus(member.name, {
+            level = index ~= 2 and 20 + index or 0, xpState = "unavailable",
+            inParty = index == 2, partyFull = false,
         }, now, 1))
     end
     local snapshotCalls, originalRequest = 0, overview.RequestData
@@ -243,8 +248,8 @@ do
     page:SetOffset(999)
     overview.rosterState.peers[page.rows[1].playerID].lastReceived = api.GetTime()
     openMenu(1)
-    overview.rosterState.peers = {}
-    overview:RefreshOverview()
+    for index = #guildMembers, 1, -1 do guildMembers[index] = nil end
+    overviewWorld.fire("GUILD_ROSTER_UPDATE", false)
     assert(page.offset == 0 and page.rows[1].playerID == "self-testrealm"
         and not page.rows[2]:IsShown() and not page.rows[2].playerID and not page.scrollbar:IsShown()
         and not menu:IsShown() and not page.empty:IsShown(),
@@ -256,6 +261,71 @@ do
     overviewWorld.fire("PLAYER_GUILD_UPDATE", "player")
     assert(page.empty:IsShown() and not page.rows[1]:IsShown() and not page.rows[1].playerID,
         "leaving every native sharing context hides the disconnected roster")
+end
+
+-- Content shows current guild membership and combines it with native friends in Rankings.
+do
+    local addon, api, _, fire, world = loadAddon(settings(SECRET, false), false)
+    local members = {}
+    fixture.mockGuild(api, members)
+    local requests = 0
+    api.C_GuildInfo.GuildRoster = function() requests = requests + 1 end
+    local presence = api.Enum.ClubMemberPresence
+    members[1] = { name = "Peer-TestRealm", level = 22, presence = presence.Online }
+    members[2] = { name = "Offline-TestRealm", level = 31, presence = presence.Offline }
+    members[3] = { name = "Self-TestRealm", level = 12, presence = presence.Online, isSelf = true }
+    local friends = { { id = "pal-testrealm", name = "Pal-TestRealm", level = 28, online = true } }
+    function addon:GetFriendsPlayers() return friends end
+    world.guild = true
+    world:initialize()
+    local now = api.GetServerTime()
+    assert(addon:ReceivePlayerStatus("Peer-TestRealm", { level = 22, xp = 50, xpMax = 100, xpState = "known" }, now, 1))
+    assert(addon:ReceivePlayerStatus("Former-TestRealm", { level = 24, xp = 25, xpMax = 100, xpState = "known" }, now, 1))
+    loadOptions(addon, api)
+    assert(requests == 0, "guild roster requests wait for a roster tab to open")
+    addon:OpenContent()
+    local content = addon.contentPanel
+    local rankings, guild = content.pages.overview, content.pages.guild
+    local function rowsByID(page)
+        local rows = {}
+        for _, row in ipairs(page.rows) do
+            if row:IsVisible() then
+                assert(row.playerID and not rows[row.playerID], "each character has one visible row")
+                rows[row.playerID] = row
+            end
+        end
+        return rows
+    end
+    local combined = rowsByID(rankings)
+    assert(combined["self-testrealm"] and combined["peer-testrealm"].progress:GetText() == "50%"
+        and combined["offline-testrealm"].level:GetText() == "31"
+        and combined["pal-testrealm"].level:GetText() == "28" and not combined["pal-testrealm"].ranking:GetChecked()
+        and not combined["former-testrealm"], "Rankings combines eligible rows and retains reported XP and overlay defaults")
+    combined["pal-testrealm"].ranking:Click()
+    assert(addon:IsRankingPlayerShown("pal-testrealm", false), "Rankings can opt a native friend into the overlay")
+    local peerCell = combined["peer-testrealm"].levelCell
+    peerCell.scripts.OnEnter(peerCell)
+    content.tabs.guild:Click()
+    local guildRows = rowsByID(guild)
+    assert(content.selectedTab == "guild" and guild.active and not rankings.active and not api.GameTooltip:IsShown()
+        and guildRows["self-testrealm"] and guildRows["peer-testrealm"].progress:GetText() == "50%"
+        and guildRows["offline-testrealm"] and not guildRows["offline-testrealm"].ranking:IsEnabled()
+        and not guildRows["pal-testrealm"] and not guildRows["former-testrealm"] and requests == 1,
+        "Guild opens independently, dismisses the prior tooltip and lists only current guild members")
+    table.remove(members, 1)
+    fire("CLUB_MEMBER_REMOVED", 100, 1)
+    guildRows = rowsByID(guild)
+    assert(not guildRows["peer-testrealm"] and addon.rosterState.peers["peer-testrealm"] and guildRows["offline-testrealm"],
+        "a membership change immediately removes the row while preserving the stored report")
+    assert(addon:SetDataChannelEnabled("guild", false))
+    assert(rowsByID(guild)["offline-testrealm"], "native guild membership is visible with Guild sharing disabled")
+    world.guild = false
+    fire("PLAYER_GUILD_UPDATE", "player")
+    assert(guild.empty:IsShown() and not next(rowsByID(guild)), "the Guild tab clears when the local character leaves")
+    content.tabs.overview:Click()
+    combined = rowsByID(rankings)
+    assert(combined["self-testrealm"] and combined["pal-testrealm"] and not combined["offline-testrealm"]
+        and not guild.active and #world.notificationErrors == 0, "Rankings keeps native friends after leaving the guild")
 end
 
 -- Friends uses the native player snapshot even with no sharing context.
@@ -272,7 +342,7 @@ do
     addon:OpenContent()
     local content = addon.contentPanel
     local overview, page = content.pages.overview, content.pages.friends
-    assert(overview.active and overview.empty:IsShown() and not page:IsShown() and reads == 0)
+    assert(overview.active and overview.empty:IsShown() and not page:IsShown())
     content.tabs.friends:Click()
     assert(content.selectedTab == "friends" and page:IsVisible() and page.empty:IsShown()
         and not page.scripts.OnUpdate and not overview.active and not overview.scripts.OnUpdate,
@@ -479,13 +549,13 @@ do
     }
     for _, player in ipairs(players) do player.xpUpdatedAt = now end
     players[9].xpUpdatedAt = now - 50000
-    progressAddon.GetOverviewPlayers = function()
+    loadOptions(progressAddon, api)
+    progressAddon.GetContentRankingPlayers = function()
         local copy = {}
         for _, player in ipairs(players) do copy[#copy + 1] = player end
         return copy
     end
     progressAddon.RequestData = function() snapshots = snapshots + 1 end
-    loadOptions(progressAddon, api)
     progressAddon:OpenContent()
     local content, tooltip = progressAddon.contentPanel, api.GameTooltip
     local page = content.overviewPage
@@ -544,4 +614,4 @@ do
 end
 
 assert(_G.LockInToolsDB == nil and _G.SLASH_LOCKINTOOLS1 == nil, "keep test environments isolated")
-print("PASS: Overview and Friends navigation, scrolling, sorting, actions and progress")
+print("PASS: Rankings, Guild and Friends navigation, scrolling, sorting, actions and progress")

@@ -581,7 +581,8 @@ end
 local function CreateContentPanel()
     local panel = CreateView()
     panel.tabs, panel.pages = {}, {}
-    addon:CreateOverviewPage(panel)
+    panel.overviewPage = addon:CreateOverviewPage(panel, "overview", "LockInToolsOverviewActions")
+    addon:CreateOverviewPage(panel, "guild", "LockInToolsGuildActions")
     addon:CreateFriendsPage(panel)
 
     panel.SelectTab = function(name)
@@ -597,7 +598,7 @@ local function CreateContentPanel()
         UI:SetTabSelected(panel.tabs[name], true)
         page:Show()
     end
-    for index, entry in ipairs({ { "overview", "Rankings" }, { "friends", "Friends" } }) do
+    for index, entry in ipairs({ { "overview", "Rankings" }, { "guild", "Guild" }, { "friends", "Friends" } }) do
         local name = entry[1]
         local tab = UI:Button(panel, entry[2], "tab")
         tab:SetPoint("TOPLEFT", 20 + (index - 1) * 140, -66)

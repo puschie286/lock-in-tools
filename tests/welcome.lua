@@ -8,6 +8,8 @@ local copy = dofile("tests/support/helpers.lua").copy
 for _, membership in ipairs({ "solo", "guild", "grouped", "raid" }) do
     local addon, api, _, _, world = loadAddon(nil, false)
     if membership ~= "solo" then world[membership] = true end
+    local guildMembers = {}
+    support.mockGuild(api, guildMembers)
     loadOptions(addon, api)
     world:initialize()
     local content = addon.contentPanel
@@ -26,6 +28,8 @@ for _, membership in ipairs({ "solo", "guild", "grouped", "raid" }) do
     if membership == "guild" then
         local presence = assert(world.statusSends[1])
         assert(presence.distribution == "GUILD")
+        guildMembers[1] = { name = "NativeFriend-TestRealm", presence = api.Enum.ClubMemberPresence.Online }
+        world.fire("GUILD_ROSTER_UPDATE", false)
         world.fire("CHAT_MSG_ADDON", presence.prefix, presence.message, "GUILD", "NativeFriend")
         assert(#addon:GetOverviewPlayers() == 2 and content.overviewPage.rows[2].playerID == "nativefriend-testrealm",
             "first-login Content discovers players over the current native route")

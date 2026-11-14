@@ -83,6 +83,78 @@ local function NativeNumber(callback, maximum, ...)
     if ok and Number(value, maximum) then return value end
 end
 
+local function GuildClubID(self)
+    if not self:HasGuild() or type(C_Club and C_Club.GetGuildClubId) ~= "function" then return nil end
+    local ok, id = pcall(C_Club.GetGuildClubId)
+    if ok and not IsSecret(id) and (type(id) == "number" or type(id) == "string") then return id end
+end
+
+local function GuildOnline(presence)
+    local statuses = Enum and Enum.ClubMemberPresence
+    if not statuses or IsSecret(presence) or type(presence) ~= "number" then return nil end
+    if presence == statuses.Offline then return false end
+    if presence == statuses.Online or presence == statuses.Away or presence == statuses.Busy
+        or presence == statuses.OnlineMobile then return true end
+end
+
+local function ReadGuildPlayers(clubID)
+    local players = {}
+    if type(C_Club.GetClubMembers) ~= "function" or type(C_Club.GetMemberInfo) ~= "function" then return players end
+    local ok, members = pcall(C_Club.GetClubMembers, clubID)
+    if not ok or IsSecret(members) or type(members) ~= "table" then return players end
+    local forever = WOW_PROJECT_CAMELOT and WOW_PROJECT_ID == WOW_PROJECT_CAMELOT
+    for _, memberID in ipairs(members) do
+        if not IsSecret(memberID) then
+            local success, member = pcall(C_Club.GetMemberInfo, clubID, memberID)
+            if success and not IsSecret(member) and type(member) == "table" then
+                local id = Identity(member.name)
+                if id then
+                    players[#players + 1] = { id = id, name = member.name,
+                        displayName = forever and member.name or nil,
+                        level = Number(member.level, 1000) and member.level > 0 and member.level or nil,
+                        online = GuildOnline(member.presence),
+                        isSelf = not IsSecret(member.isSelf) and member.isSelf == true }
+                end
+            end
+        end
+    end
+    return players
+end
+
+local function RefreshGuildRoster(state, clubID, canRequest)
+    if state.clubID ~= clubID or canRequest then state.requested = false end
+    -- Read the roster by its current club ID so changing guilds cannot reuse
+    -- a snapshot from the previous guild.
+    state.clubID, state.players = clubID, clubID and ReadGuildPlayers(clubID) or {}
+    if clubID and not state.requested then
+        state.requested = true
+        if type(C_GuildInfo and C_GuildInfo.GuildRoster) == "function" then
+            state.requested = pcall(C_GuildInfo.GuildRoster)
+        end
+        -- The native roster focuses the club to load its member list when needed.
+        if type(C_Club.AreMembersReady) == "function" and type(C_Club.FocusMembers) == "function" then
+            local ok, ready = pcall(C_Club.AreMembersReady, clubID)
+            if ok and not IsSecret(ready) and ready == false then pcall(C_Club.FocusMembers, clubID) end
+        end
+    end
+end
+
+function addon:RequestGuildRoster()
+    local clubID = GuildClubID(self)
+    local state = self.guildRoster
+    if not state then
+        state = {}
+        self.guildRoster = state
+    end
+    RefreshGuildRoster(state, clubID)
+end
+
+function addon:GetGuildPlayers()
+    local state = self.guildRoster
+    if state and state.clubID == GuildClubID(self) then return state.players end
+    return {}
+end
+
 local function NativeGroupRealm()
     if type(GetNormalizedRealmName) ~= "function" then return nil end
     local ok, realm = pcall(GetNormalizedRealmName)
@@ -348,6 +420,17 @@ function addon:InitializeRoster()
             settings.peers[id] = nil
         end
     end
+    self:RegisterGameEvents({ "GUILD_ROSTER_UPDATE", "PLAYER_GUILD_UPDATE", "INITIAL_CLUBS_LOADED",
+        "CLUB_MEMBERS_UPDATED", "CLUB_MEMBER_ADDED", "CLUB_MEMBER_REMOVED", "CLUB_MEMBER_UPDATED",
+        "CLUB_MEMBER_PRESENCE_UPDATED" }, function(self, event, value)
+        local state = self.guildRoster
+        if not state or IsSecret(value) then return end
+        if event == "PLAYER_GUILD_UPDATE" and value ~= nil and value ~= "player" then return end
+        local clubID = GuildClubID(self)
+        if event:sub(1, 11) == "CLUB_MEMBER" and value ~= clubID then return end
+        RefreshGuildRoster(state, clubID, event == "GUILD_ROSTER_UPDATE" and value == true)
+        self:Notify("GUILD_CHANGED")
+    end)
     self:RegisterNotification("FRIENDS_CHANGED", function(_, friends) RestoreFriendDisplayNames(self, friends) end)
     self:RegisterDataStatusProvider("player", function()
         if Active(self) then return LocalStatus(self) end

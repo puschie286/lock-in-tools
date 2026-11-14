@@ -231,16 +231,16 @@ local function CreatePlayerTable(panel, columns, refresh)
     return page
 end
 
-local function CreateShownCheckbox(page, row, defaultShown)
+local function CreateShownCheckbox(page, row)
     local ranking = UI:Checkbox(row)
     row.ranking = ranking
     ranking:SetPoint("LEFT", SHOWN_COLUMN_X - 16 + (SHOWN_COLUMN_WIDTH - 28) / 2, 0)
     ranking:SetSize(28, 28)
     ranking:SetScript("OnClick", function(button)
         local id = row.playerID
-        if not id or not row:IsVisible() then return end
+        if not id or not row:IsVisible() or row.rankingAvailable == false then return end
         local success, message = addon:SetRankingPlayerShown(id, button:GetChecked() and true or false)
-        if not success then button:SetChecked(addon:IsRankingPlayerShown(id, defaultShown)) end
+        if not success then button:SetChecked(addon:IsRankingPlayerShown(id, row.defaultShown)) end
         page.feedback:SetText(success and "" or (message or "Unable to change ranking visibility."))
         if not success then page.feedback:SetTextColor(1, 0.35, 0.35) end
     end)
@@ -256,18 +256,19 @@ local function CreateShownCheckbox(page, row, defaultShown)
     return ranking
 end
 
-local function RefreshShown(row, defaultShown)
-    row.ranking:SetChecked(addon:IsRankingPlayerShown(row.playerID, defaultShown))
-    row.ranking:SetEnabled(not addon.savedDataReadOnly)
+local function RefreshShown(row, defaultShown, available)
+    row.defaultShown, row.rankingAvailable = defaultShown, available
+    row.ranking:SetChecked(available and addon:IsRankingPlayerShown(row.playerID, defaultShown))
+    row.ranking:SetEnabled(available and not addon.savedDataReadOnly)
 end
 
-function addon:CreateOverviewPage(panel)
+function addon:CreateOverviewPage(panel, tab, menuName)
     local page = CreatePlayerTable(panel, { { "Name", "name", 16, 310 }, { "Level", "level", 334, 124 },
         { "Last seen", "seen", 466, 88 } }, function(self)
         self:RefreshOverview()
     end)
-    panel.pages.overview, panel.overviewPage = page, page
-    page.actionMenu = self:CreatePlayerActionMenu(page, "LockInToolsOverviewActions", function(success, message)
+    panel.pages[tab] = page
+    page.actionMenu = self:CreatePlayerActionMenu(page, menuName, function(success, message)
         page.feedback:SetText(message or "")
         if success then page.feedback:SetTextColor(0.4, 1, 0.4)
         else page.feedback:SetTextColor(1, 0.35, 0.35) end
@@ -286,7 +287,7 @@ function addon:CreateOverviewPage(panel)
             page.actionMenu:Open(row.playerID, row)
         end
         row:SetScript("OnClick", OpenActions)
-        CreateShownCheckbox(page, row, true):SetScript("OnMouseUp", OpenActions)
+        CreateShownCheckbox(page, row):SetScript("OnMouseUp", OpenActions)
         row.name = UI:Label(row, "", 12)
         row.name:SetPoint("TOPLEFT", 0, -7)
         row.name:SetSize(310, 30)
@@ -328,6 +329,7 @@ function addon:CreateOverviewPage(panel)
     function page:Activate()
         if self.active or not self:IsVisible() then return end
         self.active, self.elapsed = true, 0
+        addon:RequestGuildRoster()
         self:SetScript("OnUpdate", function(_, elapsed)
             self.elapsed = self.elapsed + elapsed
             if self.elapsed >= 1 then
@@ -362,14 +364,74 @@ local function RefreshPlayerTable(page, players, displayName)
     if #players == 0 then page.empty:Show() else page.empty:Hide() end
 end
 
+function addon:GetContentRankingPlayers(guildOnly)
+    local hasGuild = self:HasGuild()
+    if guildOnly and not hasGuild then return {} end
+    local guild, friends = self:GetGuildPlayers(), self:GetFriendsPlayers()
+    if not hasGuild and #friends == 0 then return {} end
+    local own, shared, friendByKey = nil, {}, {}
+    for _, player in ipairs(self:GetOverviewPlayers(true)) do
+        if player.isSelf then own = player
+        else shared[self:GetRankingPlayerKey(player.id)] = player end
+    end
+    for _, friend in ipairs(friends) do
+        friendByKey[friend.id] = friend
+        if friend.aliasID then friendByKey[self:GetRankingPlayerKey(friend.aliasID)] = friend end
+    end
+
+    local players, added = {}, {}
+    if own then
+        players[1] = own
+        added[self:GetRankingPlayerKey(own.id)] = true
+    end
+    local function Add(native, friend)
+        local nativeKey = self:GetRankingPlayerKey(native.id)
+        local key = friend and friend.id or nativeKey
+        if native.isSelf or added[key] then return end
+        added[key] = true
+        -- Keep the reporting identity for party actions and use native rows
+        -- as the source of membership, including after a guild or friend removal.
+        local player = shared[nativeKey] or shared[key]
+            or (friend and shared[self:GetRankingPlayerKey(friend.aliasID)])
+        if player then
+            player.displayName = (friend and friend.displayName) or player.displayName or native.displayName
+            player.level = player.level or native.level or (friend and friend.level)
+        else
+            player = { id = friend and friend.id or native.id, name = native.name,
+                displayName = (friend and friend.displayName) or native.displayName,
+                level = native.level, seenAt = native.seenAt, online = native.online, xpState = "unavailable",
+                nativeOnly = true, rankingAvailable = friend ~= nil }
+        end
+        players[#players + 1] = player
+    end
+    for _, member in ipairs(guild) do Add(member, friendByKey[self:GetRankingPlayerKey(member.id)]) end
+    if not guildOnly then
+        for _, friend in ipairs(friends) do Add(friend, friend) end
+    end
+    table.sort(players, function(left, right)
+        local leftSelf, rightSelf = left.isSelf == true, right.isSelf == true
+        if leftSelf ~= rightSelf then return leftSelf end
+        local leftOnline, rightOnline = left.online == true, right.online == true
+        if leftOnline ~= rightOnline then return leftOnline end
+        return left.id < right.id
+    end)
+    return players
+end
+
 function addon:RefreshOverview()
     local panel = self.contentPanel
-    local page = panel and panel.overviewPage
-    if not page or not page:IsVisible() or panel.selectedTab ~= "overview" then return end
-    local players, now = self:GetOverviewPlayers(), GetServerTime()
+    local tab = panel and panel.selectedTab
+    if tab ~= "overview" and tab ~= "guild" then return end
+    local page = panel.pages[tab]
+    if not page:IsVisible() then return end
+    local players, now = self:GetContentRankingPlayers(tab == "guild"), GetServerTime()
     RefreshPlayerTable(page, players, OverviewName)
     if #players == 0 then
-        page.empty:SetText("Waiting for players sharing through Guild or Friends.")
+        local message = "Your guild members and available WoW friends appear here."
+        if tab == "guild" then
+            message = self:HasGuild() and "Waiting for your guild roster." or "Join a guild to see its members here."
+        end
+        page.empty:SetText(message)
     end
     local menu = page.actionMenu
     for index, row in ipairs(page.rows) do
@@ -384,8 +446,11 @@ function addon:RefreshOverview()
         if player then
             row.name:SetText(OverviewName(player))
             RefreshProgress(row, player)
-            row.seen:SetText(player.online and "Active" or Age(player.seenAt, now))
-            RefreshShown(row, true)
+            local seen = Age(player.seenAt, now)
+            if player.online then seen = player.nativeOnly and "Online" or "Active"
+            elseif player.nativeOnly and player.online == false and not player.seenAt then seen = "Offline" end
+            row.seen:SetText(seen)
+            RefreshShown(row, not player.nativeOnly, player.rankingAvailable ~= false)
             row:Show()
         else
             row.levelCell.player = nil
@@ -417,7 +482,7 @@ function addon:CreateFriendsPage(panel)
             label:SetSize(column[4], 36)
             row[key] = label
         end
-        CreateShownCheckbox(page, row, false)
+        CreateShownCheckbox(page, row)
         page.rows[index] = row
     end
     page:SetScript("OnShow", function() addon:RefreshFriends() end)
@@ -440,8 +505,8 @@ function addon:RefreshFriends()
             local key = self:GetRankingPlayerKey(player.id)
             if key then inRankings[key] = true end
         end
-        -- Keep the native snapshot intact for the overlay. Only this tab omits
-        -- friends who can already be managed in Rankings.
+        -- Keep the native snapshot intact for the overlay. Friends shows
+        -- native entries that have no shared row.
         for _, friend in ipairs(friends) do
             if not inRankings[friend.id] and not inRankings[friend.aliasID] then
                 players[#players + 1] = friend
@@ -461,7 +526,7 @@ function addon:RefreshFriends()
             row.level:SetText(player.level and tostring(player.level) or "—")
             row.zone:SetText(player.zone or "—")
             row.status:SetText(player.online and "Online" or (player.online == false and "Offline" or "Unknown"))
-            RefreshShown(row, false)
+            RefreshShown(row, false, true)
             row:Show()
         else row:Hide() end
     end
@@ -471,6 +536,7 @@ function addon:OpenOverview()
     self:OpenContent("overview")
 end
 
+addon:RegisterNotification("GUILD_CHANGED", function() addon:RefreshOverview() end)
 for _, notification in ipairs({ "DATA_CHANGED", "ROSTER_CHANGED", "FRIENDS_CHANGED", "RANKING_CHANGED" }) do
     addon:RegisterNotification(notification, function()
         addon:RefreshOverview()
